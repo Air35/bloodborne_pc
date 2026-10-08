@@ -179,33 +179,39 @@ static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     runtime_report();
     exit(status);
 }
-uintptr_t runtime_resolve(const char *name, int is_data) {
+uintptr_t runtime_resolve(const char *scoped, int is_data) {
     if (!(capabilities & 1)) return 0;
+    /* sotc: imports are matched by NID alone. The #library#module suffix letters are
+     * assigned per executable, so the Bloodborne spellings do not apply to other games. */
+    char name[16];
+    size_t length=strcspn(scoped,"#");
+    if (length>=sizeof(name)) return 0;
+    memcpy(name,scoped,length); name[length]=0;
     if (is_data) {
         static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
-        if (!strcmp(name, "f7uOxY9mM1U#p#J")) return (uintptr_t)&stack_canary;
-        if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
+        if (!strcmp(name, "f7uOxY9mM1U")) return (uintptr_t)&stack_canary;
+        if (!strcmp(name, "ZT4ODD2Ts9o")) return (uintptr_t)&need_libc_internal;
         return 0;
     }
     /* Exact scoped imports for CUSA03173; the suffix identifies library/module. */
-    if (!strcmp(name, "bzQExy189ZI#q#q")) return (uintptr_t)init_env;
-    if (!strcmp(name, "8G2LB+A3rzg#q#q")) return (uintptr_t)guest_atexit;
-    if (!strcmp(name, "tsvEmnenz48#q#q")) return (uintptr_t)guest_cxa_atexit;
-    if (!strcmp(name, "uMei1W9uyNo#q#q")) return (uintptr_t)guest_libc_exit;
+    if (!strcmp(name, "bzQExy189ZI")) return (uintptr_t)init_env;
+    if (!strcmp(name, "8G2LB+A3rzg")) return (uintptr_t)guest_atexit;
+    if (!strcmp(name, "tsvEmnenz48")) return (uintptr_t)guest_cxa_atexit;
+    if (!strcmp(name, "uMei1W9uyNo")) return (uintptr_t)guest_libc_exit;
     /* Not imported by the current eboot, exposed for ABI tests/future use. */
-    if (!strcmp(name, "H2e8t5ScQGc#q#q")) return (uintptr_t)guest_finalize;
-    if (!strcmp(name, "3GPpjQdAMTw#q#q")) return (uintptr_t)guard_acquire;
-    if (!strcmp(name, "9rAeANT2tyE#q#q")) return (uintptr_t)guard_release;
-    if (!strcmp(name, "2emaaluWzUw#q#q")) return (uintptr_t)guard_abort;
-    if (!strcmp(name, "Ou3iL1abvng#p#J")) return (uintptr_t)stack_fail;
-    if (!strcmp(name, "8zTFvBIAIN8#q#q")) return (uintptr_t)guest_memset;
-    if (!strcmp(name, "Q3VBxCXhUHs#q#q")) return (uintptr_t)guest_memcpy;
-    if (!strcmp(name, "+P6FRGH4LfA#q#q")) return (uintptr_t)guest_memmove;
-    if (!strcmp(name, "DfivPArhucg#q#q")) return (uintptr_t)guest_memcmp;
-    if (!strcmp(name, "j4ViWNHEgww#q#q")) return (uintptr_t)guest_strlen;
-    if (!strcmp(name, "vNe1w4diLCs#p#J")) return (uintptr_t)guest_tls_get_addr;
-    if (!strcmp(name, "959qrazPIrg#p#J")) return (uintptr_t)guest_procparam;
-    if (!strcmp(name, "p5EcQeEeJAE#p#J")) return (uintptr_t)guest_set_heap_api;
+    if (!strcmp(name, "H2e8t5ScQGc")) return (uintptr_t)guest_finalize;
+    if (!strcmp(name, "3GPpjQdAMTw")) return (uintptr_t)guard_acquire;
+    if (!strcmp(name, "9rAeANT2tyE")) return (uintptr_t)guard_release;
+    if (!strcmp(name, "2emaaluWzUw")) return (uintptr_t)guard_abort;
+    if (!strcmp(name, "Ou3iL1abvng")) return (uintptr_t)stack_fail;
+    if (!strcmp(name, "8zTFvBIAIN8")) return (uintptr_t)guest_memset;
+    if (!strcmp(name, "Q3VBxCXhUHs")) return (uintptr_t)guest_memcpy;
+    if (!strcmp(name, "+P6FRGH4LfA")) return (uintptr_t)guest_memmove;
+    if (!strcmp(name, "DfivPArhucg")) return (uintptr_t)guest_memcmp;
+    if (!strcmp(name, "j4ViWNHEgww")) return (uintptr_t)guest_strlen;
+    if (!strcmp(name, "vNe1w4diLCs")) return (uintptr_t)guest_tls_get_addr;
+    if (!strcmp(name, "959qrazPIrg")) return (uintptr_t)guest_procparam;
+    if (!strcmp(name, "p5EcQeEeJAE")) return (uintptr_t)guest_set_heap_api;
     uintptr_t mutex = runtime_mutex_resolve(name);
     if (mutex) return mutex;
     uintptr_t thread = runtime_thread_resolve(name);
@@ -243,8 +249,9 @@ static const struct { const char *nid, *symbol; } import_names[]={
 };
 /* Symbol name for a scoped NID, or NULL when this eboot/libc never imports it. */
 const char *runtime_symbol(const char *nid) {
+    size_t length=strcspn(nid,"#");
     for (size_t i=0;i<sizeof(import_names)/sizeof(*import_names);++i)
-        if (!strcmp(nid,import_names[i].nid)) return import_names[i].symbol;
+        if (strlen(import_names[i].nid)==length && !memcmp(nid,import_names[i].nid,length)) return import_names[i].symbol;
     return NULL;
 }
 /* Same symbol name means same contract whether imported from libkernel or

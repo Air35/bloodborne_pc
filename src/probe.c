@@ -598,6 +598,20 @@ int main(int argc, char **argv) {
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
+    /* sotc: BB_LIST_IMPORTS=1 prints how every import is served, then exits. */
+    if (getenv("BB_LIST_IMPORTS")) {
+        unsigned served[3]={0};
+        for (uint64_t i=0;i<import_count;++i) {
+            int data=0;
+            for (uint64_t r=0;r<nr;++r) if (relocs[r].kind && relocs[r].value==i) { data=relocs[r].kind==2; break; }
+            int how=runtime_resolve(names[i],data) ? 0 : native_libc && bindings[i] ? 1 : 2;
+            ++served[how];
+            printf("IMPORT %-7s %-28s %s\n",how==0 ? "runtime" : how==1 ? "native" : "MISSING",names[i],runtime_import_name(names[i]));
+        }
+        printf("IMPORTS: %u runtime, %u native, %u missing\n",served[0],served[1],served[2]);
+        fflush(NULL);
+        _exit(0);
+    }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

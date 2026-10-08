@@ -9,14 +9,14 @@ typedef int32_t (ABI *Param)(uint32_t,int32_t *);
 typedef int32_t (ABI *List)(uint32_t,void *,uint32_t,uint32_t *);
 #define GET(t,n) ((t)runtime_content_resolve(n))
 int main(int argc,char **argv) {
-    Module load=GET(Module,"g8cM39EUZ6o#M#N");
-    Module loaded=GET(Module,"fMP5NHUOaMk#M#N");
-    Module unload=GET(Module,"eR2bZFAAU0Q#M#N");
-    Init init=GET(Init,"R9lA82OraNs#c#d");
-    Param param=GET(Param,"99b82IKXpH4#c#d");
-    List list=GET(List,"xnd8BJzAxmk#c#d");
+    Module load=GET(Module,"g8cM39EUZ6o");
+    Module loaded=GET(Module,"fMP5NHUOaMk");
+    Module unload=GET(Module,"eR2bZFAAU0Q");
+    Init init=GET(Init,"R9lA82OraNs");
+    Param param=GET(Param,"99b82IKXpH4");
+    List list=GET(List,"xnd8BJzAxmk");
     assert(load && loaded && unload && init && param && list);
-    assert(!runtime_content_resolve("g8cM39EUZ6o#I#J"));
+    assert(!runtime_content_resolve("g8cM39EUZ6o"));
     if (argc>1 && !strcmp(argv[1],"--missing")) { load(0xb4); return 99; }
     const uint32_t profile[]={1,13,0x80000000,0,7};
     runtime_content_configure(profile);
