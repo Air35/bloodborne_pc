@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,10 @@
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
 #include "video_core/sotc_stats.h"
+#include "video_core/buffer_cache/bpe_heap_guard.h"
+#include <optional>
+
+extern "C" uintptr_t runtime_sotc_heap(void);
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -310,7 +315,9 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
             .pMemoryBarriers = &host_barrier,
         });
         scheduler.SubmitAheadAndWait();
+        SotcStats::readback_ahead.fetch_add(1, std::memory_order_relaxed);
     } else {
+        SotcStats::readback_finish.fetch_add(1, std::memory_order_relaxed);
         for (const auto& item : pending) {
             runtime.CopyBuffer(item.arena, download.buffer, item.copies);
         }
@@ -318,11 +325,67 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
 
     download.buffer->Invalidate(download.offset, download.size);
+    // sotc: GPU output of dispatches on stale descriptors must not overwrite the allocator
+    // metadata of the game's BPE heap (bpe_heap_guard.cpp, from Pink-shadPS4; the loader finds
+    // the heap, SOTC_HEAP_GUARD=0 turns it off).
+    // The free tree is walked again only when it changed: its root (heap+0x80), node count
+    // (heap+0xa8, kept by the game's tree code) and pending block (heap+0xc0) sign it. Block
+    // headers are followed through the physical chain on every write anyway. Only the command
+    // processor thread downloads memory.
+    static std::optional<BpeHeapGuard> cached_guard;
+    static std::array<u64, 3> cached_signature{};
+    BpeHeapGuard* heap_guard = nullptr;
+    if (const VAddr heap = runtime_sotc_heap(); heap != 0) {
+        // Only readbacks into the heap's own memory ([heap+0x28], [heap+0x30] bytes) need it:
+        // building the guard walks the free tree, too costly for every readback.
+        const VAddr heap_base = *std::bit_cast<const VAddr*>(heap + 0x28);
+        const u64 heap_size = *std::bit_cast<const u64*>(heap + 0x30);
+        bool touches_heap = false;
+        for (const auto& item : pending) {
+            touches_heap |= item.addr < heap_base + heap_size && heap_base < item.addr + item.size;
+        }
+        if (touches_heap) {
+            const std::array<u64, 3> signature = {*std::bit_cast<const u64*>(heap + 0x80),
+                                                   *std::bit_cast<const u64*>(heap + 0xa8),
+                                                   *std::bit_cast<const u64*>(heap + 0xc0)};
+            if (!cached_guard || signature != cached_signature) {
+                SotcStats::heap_guard_builds.fetch_add(1, std::memory_order_relaxed);
+                cached_guard.emplace(memory, heap);
+                cached_signature = signature;
+            }
+            if (cached_guard->IsValid()) {
+                heap_guard = &*cached_guard;
+            }
+        }
+    }
     for (const auto& item : pending) {
         for (const auto& copy : item.copies) {
             const VAddr dst_addr = item.arena->cpu_addr + copy.srcOffset;
             const u8* src = download.mapped + (copy.dstOffset - download.offset);
+            if (const u8* now = memory->GetBackingPointer(dst_addr)) {
+                // sotc: did the GPU actually change these bytes? (SOTC_FPS statistics)
+                u64 changed = 0;
+                for (u64 i = 0; i < copy.size; ++i) {
+                    changed += now[i] != src[i];
+                }
+                SotcStats::readback_copies.fetch_add(1, std::memory_order_relaxed);
+                SotcStats::readback_bytes.fetch_add(copy.size, std::memory_order_relaxed);
+                if (changed) {
+                    SotcStats::readback_copies_changed.fetch_add(1, std::memory_order_relaxed);
+                    SotcStats::readback_bytes_changed.fetch_add(changed, std::memory_order_relaxed);
+                }
+            }
             ForEachNonStackRange(dst_addr, copy.size, [&](VAddr addr, u64 size) {
+                if (heap_guard) {
+                    if (const u64 kept = heap_guard->Write(addr, src + (addr - dst_addr), size)) {
+                        static u64 reported = 0;
+                        if (reported++ < 8) {
+                            LOG_WARNING(Render, "BPE heap guard kept {:#x} bytes of heap metadata at {:#x}",
+                                        kept, addr);
+                        }
+                    }
+                    return;
+                }
                 memory->TryWriteBacking(std::bit_cast<u8*>(addr), src + (addr - dst_addr), size,
                                         1);
             });
@@ -366,9 +429,10 @@ void BufferCache::AddGpuModified(VAddr addr, u64 size) {
     if (watch && addr < watch + 0x10000 && watch < addr + size) {
         static int shown = 0;
         if (shown++ < 40) {
-            std::fprintf(stderr, "SOTC gpu-modified %#llx+%#llx by %p <- %p\n",
+            std::fprintf(stderr, "SOTC gpu-modified %#llx+%#llx by %p <- %p, program %#llx\n",
                          static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size),
-                         __builtin_return_address(0), __builtin_return_address(1));
+                         __builtin_return_address(0), __builtin_return_address(1),
+                         static_cast<unsigned long long>(SotcStats::current_program.load()));
         }
     }
     gpu_modified_ranges.Add(addr, size);
@@ -452,6 +516,32 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
 
 bool BufferCache::IsRegionCpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionCpuModified(addr, size);
+}
+
+bool BufferCache::TryReplaceFromCpu(VAddr addr, const void* data, u64 size) {
+    if (size == 0) {
+        return true;
+    }
+    if (!memory->GetBackingPointer(addr) || !memory->GetBackingPointer(addr + size - 1)) {
+        return false;
+    }
+    // Page tracking is page granular: other GPU-written bytes on these pages would be lost.
+    const VAddr lo = Common::AlignDown(addr, VAddr{4096});
+    const VAddr hi = Common::AlignUp(addr + size, VAddr{4096});
+    bool foreign = false;
+    gpu_modified_ranges.ForEachInRange(lo, hi - lo, [&](VAddr start, VAddr end) {
+        foreign |= start < addr || end > addr + size;
+    });
+    if (foreign) {
+        return false;
+    }
+    gpu_modified_ranges.Subtract(addr, size);
+    memory_tracker->UnmarkRegionAsGpuModified(addr, size, false);
+    if (!memory->TryWriteBacking(std::bit_cast<void*>(addr), data, size, 10)) {
+        return false;
+    }
+    memory_tracker->MarkRegionAsCpuModified(addr, size);
+    return true;
 }
 
 bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {

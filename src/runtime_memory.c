@@ -797,18 +797,10 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
 }
 /* sotc: host pointer to the backing of a mapped guest address (bypasses GPU page protection),
  * valid to the end of its VMA; NULL for reserved or unmapped addresses. */
-const unsigned char *runtime_memory_backing_pointer(uintptr_t address) {
-    read_lock();
-    size_t i=vma_index(address);
-    const unsigned char *p=NULL;
-    if (i<vma_count && vmas[i].start<=address && vmas[i].kind!=KIND_RESERVED && backing_base)
-        p=backing_base+vmas[i].phys+(address-vmas[i].start);
-    read_unlock();
-    return p;
-}
+
 /* Per-thread cache of recently found regions for the GPU's per-draw queries:
  * entries hold for as long as the table generation they were read at. */
-typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;
+typedef struct { uint64_t generation; uintptr_t start, end; int kind; const unsigned char *backing; } CachedRegion; /* backing: view of start */
 static __thread CachedRegion region_cache[8];
 static __thread unsigned region_cache_next;
 static const CachedRegion *cached_region(uintptr_t address) {
@@ -824,7 +816,23 @@ static const CachedRegion *cached_region(uintptr_t address) {
 static void cache_region(size_t i) {
     uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
     if (i==vma_count || (generation & 1)) return;
-    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind};
+    const unsigned char *backing=vmas[i].kind!=KIND_RESERVED && backing_base ? backing_base+vmas[i].phys : NULL;
+    region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind,backing};
+}
+/* sotc: the GPU reads guest memory through the backing view on every upload; the per-thread
+ * region cache spares it the table lock (a winpthread rwlock, slow) and the binary search. */
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address) {
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    if (c && c->backing) return c->backing+(address-c->start);
+    read_lock();
+    size_t i=vma_index(address);
+    const unsigned char *p=NULL;
+    if (i<vma_count && vmas[i].start<=address) {
+        cache_region(i);
+        if (vmas[i].kind!=KIND_RESERVED && backing_base) p=backing_base+vmas[i].phys+(address-vmas[i].start);
+    }
+    read_unlock();
+    return p;
 }
 /* Mapped length from address, up to size, across adjacent mappings. */
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {

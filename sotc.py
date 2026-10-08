@@ -113,7 +113,11 @@ def main():
         stamp.write_text(wanted + '\n')
 
     modes = env.get('SOTC_MODES', '')
-    run_script('sotc_modes.py', game, '--out', out, '--modes', modes, '--cvars', env.get('SOTC_CVARS', ''))
+    cvars = env.get('SOTC_CVARS')
+    if cvars is None:
+        # Without the launcher: the culling settings of Pink-shadPS4 (same image, fewer GPU waits).
+        cvars = 'doIndexBufferCulling=0 doSunShadowIndexBufferCulling=0'
+    run_script('sotc_modes.py', game, '--out', out, '--modes', modes, '--cvars', cvars)
     if 'fps60' in modes.lower():
         # The game waits for vblanks: at 60 Hz an uncapped frame still rounds up to 30 FPS.
         env.setdefault('BB_VBLANK_HZ', '120')

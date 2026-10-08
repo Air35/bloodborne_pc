@@ -97,6 +97,11 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// sotc: writes `data` to guest memory from the CPU as a GPU write would, when no other
+    /// GPU-written bytes share its pages: the range stops being GPU-modified, so reading it
+    /// back costs no readback. False (nothing done) otherwise.
+    bool TryReplaceFromCpu(VAddr addr, const void* data, u64 size);
+
     /// Byte-precise: true when a written binding covered any byte of the range since its last
     /// readback. Readbacks copy only these bytes, so the backing holds every other byte.
     /// Command processor thread only.

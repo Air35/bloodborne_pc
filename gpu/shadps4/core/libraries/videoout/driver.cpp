@@ -257,9 +257,23 @@ void VideoOutDriver::Flip(const Request& req) {
             const uint64_t readbacks = SotcStats::readbacks.exchange(0, std::memory_order_relaxed);
             const uint64_t readback_ns =
                 SotcStats::readback_ns.exchange(0, std::memory_order_relaxed);
-            std::fprintf(stderr, "SOTC FPS %.1f at %.0fs; readbacks %.0f/s, %.0f ms/s\n",
+            const uint64_t copies = SotcStats::readback_copies.exchange(0);
+            const uint64_t copies_changed = SotcStats::readback_copies_changed.exchange(0);
+            const uint64_t bytes = SotcStats::readback_bytes.exchange(0);
+            const uint64_t bytes_changed = SotcStats::readback_bytes_changed.exchange(0);
+            std::fprintf(stderr,
+                         "SOTC FPS %.1f at %.0fs; readbacks %.0f/s (ahead %llu, finish %llu, heap %llu), %.0f ms/s; "
+                         "changed copies %llu/%llu, bytes %llu/%llu\n",
                          flips / seconds, std::chrono::duration<double>(now - run_start).count(),
-                         readbacks / seconds, readback_ns / 1e6 / seconds);
+                         readbacks / seconds,
+                         static_cast<unsigned long long>(SotcStats::readback_ahead.exchange(0)),
+                         static_cast<unsigned long long>(SotcStats::readback_finish.exchange(0)),
+                         static_cast<unsigned long long>(SotcStats::heap_guard_builds.exchange(0)),
+                         readback_ns / 1e6 / seconds,
+                         static_cast<unsigned long long>(copies_changed),
+                         static_cast<unsigned long long>(copies),
+                         static_cast<unsigned long long>(bytes_changed),
+                         static_cast<unsigned long long>(bytes));
             flips = 0;
             window_start = now;
         }

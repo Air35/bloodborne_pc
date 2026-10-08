@@ -12,6 +12,9 @@
 
 namespace Vulkan {
 
+/// sotc: SOTC_WAIT_SPIN_US, microseconds GPU waits poll before sleeping (0 = off).
+u32 SotcWaitSpinUs();
+
 class Instance;
 class Scheduler;
 

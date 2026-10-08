@@ -4,10 +4,21 @@
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include <chrono>
+#include <cstdlib>
+#include <immintrin.h>
 
 #include "common/assert.h"
 
 namespace Vulkan {
+
+u32 SotcWaitSpinUs() {
+    static const u32 value = [] {
+        const char* v = std::getenv("SOTC_WAIT_SPIN_US");
+        return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0u;
+    }();
+    return value;
+}
 
 constexpr u64 WAIT_TIMEOUT = std::numeric_limits<u64>::max();
 
@@ -53,6 +64,19 @@ void Semaphore::Wait(u64 tick) {
     Refresh();
     if (IsFree(tick)) {
         return;
+    }
+
+    // sotc (wait_spin_us of Pink-shadPS4): poll for a moment before sleeping; waking from a
+    // blocking wait costs more than the short readback waits of Shadow of the Colossus.
+    if (const u32 spin_us = SotcWaitSpinUs(); spin_us != 0) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
+        do {
+            _mm_pause();
+            Refresh();
+            if (IsFree(tick)) {
+                return;
+            }
+        } while (std::chrono::steady_clock::now() < deadline);
     }
 
     // If none of the above is hit, fallback to a regular wait

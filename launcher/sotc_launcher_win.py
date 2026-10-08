@@ -105,7 +105,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': '',
                 'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
-                'fx_fog': True, 'fx_ssao': True, 'engine_cvars': ''}
+                'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True}
 # Engine effects verified to change the image when set on the command line (A/B, 08/10/2026).
 EFFECTS = [('fx_vignette', ('Vinheta (cantos escurecidos)', 'Vignette (darkened corners)'),
             'r_vignetteOverrideEnable=1 r_vignetteEnable=0'),
@@ -201,6 +201,10 @@ def game_environment(s):
     if s['readbacks']:
         env['BB_READBACKS'] = s['readbacks']
     cvars = [off for key, _t, off in EFFECTS if not s.get(key, True)]
+    if s.get('perf_culling', True):
+        # From Pink-shadPS4: no GPU index-buffer culling (always both), same image, far fewer
+        # GPU results the CPU has to wait for.
+        cvars += ['doIndexBufferCulling=0', 'doSunShadowIndexBufferCulling=0']
     cvars += str(s.get('engine_cvars', '')).split()
     env['SOTC_CVARS'] = ' '.join(cvars)
     env['SOTC_NEO'] = '1' if s.get('neo') else '0'
@@ -630,6 +634,12 @@ class Launcher:
                      'contra ~38 no modo normal.',
                      'The game then offers, in Options > Presentation, the PS4 Pro graphics mode: Cinematic '
                      '(1440p, more detail) or Performance. Heavier: ~25 FPS in the open world against ~38 normally.'))
+        self.section(f, _('Desempenho', 'Performance'))
+        self.check(f, 'perf_culling', _('Culling sem a GPU (recomendado)', 'Culling without the GPU (recommended)'),
+                   _('Desliga o culling de índices feito na GPU (técnica do Pink-shadPS4): mesma imagem e bem menos '
+                     'esperas pela GPU. No santuário: ~22 → ~28 FPS.',
+                     'Turns off the GPU index-buffer culling (Pink-shadPS4): same image, far fewer GPU waits. '
+                     'Sanctuary: ~22 → ~28 FPS.'))
         self.section(f, _('Efeitos', 'Effects'))
         for key, title, _off in EFFECTS:
             self.check(f, key, _(*title))

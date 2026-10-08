@@ -93,6 +93,14 @@ Funcionam: logos, abertura, menus com texto, carregar save, exploração a caval
 som (com os módulos do usuário). O jogo roda travado em 30 FPS, como no PS4; durante as
 cargas cai para 22–25.
 
+## Créditos
+
+- [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (bbport, deadinside28 e forks): carregador,
+  runtime nativo e lançador, base deste port.
+- [shadPS4](https://github.com/shadps4-emu/shadPS4) e o fork shadPS4 SotC: núcleo de vídeo Vulkan.
+- [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): as cvars de culling, a proteção
+  do heap do jogo contra leituras da GPU (`bpe_heap_guard`), o flush periódico e as leituras antecipadas.
+
 ## Diagnóstico
 
 Estas variáveis de ambiente ajudam a investigar problemas:

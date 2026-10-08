@@ -8,6 +8,8 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include <chrono>
+#include <immintrin.h>
 
 namespace Vulkan {
 
@@ -185,6 +187,13 @@ void Scheduler::SubmitAheadAndWait() {
         }
         ASSERT_MSG(submit_result == vk::Result::eSuccess, "Ahead submit failed: {}",
                    vk::to_string(submit_result));
+    }
+    if (const u32 spin_us = SotcWaitSpinUs(); spin_us != 0) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
+        while (instance.GetDevice().getFenceStatus(*ahead_fence) == vk::Result::eNotReady &&
+               std::chrono::steady_clock::now() < deadline) {
+            _mm_pause();
+        }
     }
     const auto wait_result =
         instance.GetDevice().waitForFences(*ahead_fence, true, std::numeric_limits<u64>::max());

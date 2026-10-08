@@ -162,6 +162,20 @@ bool MemoryManager::TryCopySparseMemory(VAddr source, u8* dest, u64 size) {
     }
     return true;
 }
+const u8* MemoryManager::GetBackingRun(VAddr address, VAddr* run_start, u64* run_size) const {
+    uintptr_t start = 0, end = 0;
+    int mapped = 0;
+    if (!runtime_memory_region(address, &start, &end, &mapped) || !mapped) {
+        return nullptr;
+    }
+    const u8* backing = runtime_memory_backing_pointer(start);
+    if (!backing) {
+        return nullptr;
+    }
+    *run_start = start;
+    *run_size = end - start;
+    return backing;
+}
 const u8* MemoryManager::GetBackingPointer(VAddr address) const {
     return runtime_memory_backing_pointer(address);
 }

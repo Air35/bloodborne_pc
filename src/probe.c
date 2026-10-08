@@ -14,6 +14,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#include <wchar.h>
+#include <mmsystem.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -217,6 +219,130 @@ static void dump_thread_stacks(void) {
     fprintf(stderr,"STACKS: end\n");
     fflush(stderr);
 }
+/* sotc: SOTC_PROFILE=<thread name part>: samples that thread every ~1 ms (SuspendThread +
+ * GetThreadContext) from SOTC_PROFILE_DELAY (default 20) s for SOTC_PROFILE_SECONDS (default 15)
+ * s, then prints the hottest instructions (leaf) and the hottest frames anywhere on the
+ * frame-pointer chain (inclusive). exe offsets: llvm-symbolizer on out/gpu/bb-probe.exe. */
+#define PROFILE_SLOTS 65536
+typedef struct { uintptr_t address; unsigned leaf, inclusive; } ProfileSlot;
+static ProfileSlot *profile_slots;
+static void profile_add(uintptr_t address, int leaf) {
+    size_t i=(address*0x9E3779B97F4A7C15ull)>>48;
+    for (size_t n=0;n<PROFILE_SLOTS;++n,i=(i+1)&(PROFILE_SLOTS-1)) {
+        ProfileSlot *s=&profile_slots[i];
+        if (!s->address) s->address=address;
+        if (s->address==address) { if (leaf) ++s->leaf; ++s->inclusive; return; }
+    }
+}
+/* (system leaf, first own caller) pairs. */
+typedef struct { uintptr_t leaf, caller; unsigned count; } ProfilePair;
+static ProfilePair profile_pairs[4096];
+static void profile_pair(uintptr_t exe, uintptr_t leaf, uintptr_t caller) {
+    (void)exe;
+    for (int i=0;i<4096;++i) {
+        ProfilePair *p=&profile_pairs[i];
+        if (!p->count) { p->leaf=leaf; p->caller=caller; }
+        if (p->leaf==leaf && p->caller==caller) { ++p->count; return; }
+    }
+}
+static int profile_by_pair(const void *a, const void *b) {
+    return (int)((const ProfilePair *)b)->count-(int)((const ProfilePair *)a)->count;
+}
+static int profile_by_leaf(const void *a, const void *b) {
+    return (int)((const ProfileSlot *)b)->leaf-(int)((const ProfileSlot *)a)->leaf;
+}
+static int profile_by_inclusive(const void *a, const void *b) {
+    return (int)((const ProfileSlot *)b)->inclusive-(int)((const ProfileSlot *)a)->inclusive;
+}
+static DWORD WINAPI profiler(void *name) {
+    typedef HRESULT (WINAPI *Describe)(HANDLE, PWSTR *);
+    Describe describe=(Describe)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+    const char *delay=getenv("SOTC_PROFILE_DELAY"), *seconds=getenv("SOTC_PROFILE_SECONDS");
+    Sleep((delay ? atoi(delay) : 20)*1000);
+    wchar_t wanted[128];
+    MultiByteToWideChar(CP_UTF8,0,(const char *)name,-1,wanted,128);
+    DWORD target=0;
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    THREADENTRY32 te={.dwSize=sizeof(te)};
+    for (BOOL ok=Thread32First(snapshot,&te); ok && !target; ok=Thread32Next(snapshot,&te)) {
+        if (te.th32OwnerProcessID!=GetCurrentProcessId()) continue;
+        HANDLE t=OpenThread(THREAD_QUERY_LIMITED_INFORMATION,FALSE,te.th32ThreadID);
+        PWSTR text=NULL;
+        if (t && describe && SUCCEEDED(describe(t,&text)) && text) {
+            if (wcsstr(text,wanted)) target=te.th32ThreadID;
+            LocalFree(text);
+        }
+        if (t) CloseHandle(t);
+    }
+    CloseHandle(snapshot);
+    if (!target) { fprintf(stderr,"SOTC profile: no thread named like %s\n",(const char *)name); return 0; }
+    HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,target);
+    profile_slots=calloc(PROFILE_SLOTS,sizeof(*profile_slots));
+    if (!thread || !profile_slots) return 0;
+    const ULONGLONG end=GetTickCount64()+(ULONGLONG)(seconds ? atoi(seconds) : 15)*1000;
+    unsigned samples=0;
+    timeBeginPeriod(1);
+    while (GetTickCount64()<end) {
+        if (SuspendThread(thread)!=(DWORD)-1) {
+            CONTEXT c={.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER};
+            if (GetThreadContext(thread,&c)) {
+                ++samples;
+                profile_add((uintptr_t)c.Rip,1);
+                const uintptr_t leaf=(uintptr_t)c.Rip;
+                int first_own=1;
+                /* Callers through the unwind tables (.pdata): system DLLs keep no frame pointers. */
+                for (int depth=0; depth<32; ++depth) {
+                    DWORD64 base=0;
+                    PRUNTIME_FUNCTION fn=RtlLookupFunctionEntry(c.Rip,&base,NULL);
+                    if (fn) {
+                        PVOID handler_data=NULL; DWORD64 establisher=0;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,c.Rip,fn,&c,&handler_data,&establisher,NULL);
+                    } else {
+                        uintptr_t ret;
+                        if (!read_word((uintptr_t)c.Rsp,&ret)) break;
+                        c.Rip=ret; c.Rsp+=8;
+                    }
+                    if (!c.Rip) break;
+                    profile_add((uintptr_t)c.Rip,0);
+                    /* The first frame in the loader/GPU library that leads to a system leaf:
+                     * who waits, locks or calls the driver. */
+                    if (first_own && (uintptr_t)c.Rip-(uintptr_t)GetModuleHandleA(NULL)<0x4000000 &&
+                        leaf-(uintptr_t)GetModuleHandleA(NULL)>=0x4000000) {
+                        first_own=0;
+                        profile_pair((uintptr_t)GetModuleHandleA(NULL),leaf,(uintptr_t)c.Rip);
+                    }
+                }
+            }
+            ResumeThread(thread);
+        }
+        Sleep(1);
+    }
+    timeEndPeriod(1);
+    char where[MAX_PATH+64];
+    fprintf(stderr,"SOTC profile of %s: %u samples\n",(const char *)name,samples);
+    qsort(profile_slots,PROFILE_SLOTS,sizeof(*profile_slots),profile_by_leaf);
+    fprintf(stderr,"  leaf:\n");
+    for (int i=0;i<40 && profile_slots[i].leaf;++i) {
+        describe_address(where,sizeof(where),profile_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*profile_slots[i].leaf/samples,where);
+    }
+    qsort(profile_pairs,4096,sizeof(*profile_pairs),profile_by_pair);
+    fprintf(stderr,"  system leaf <- first own caller:\n");
+    for (int i=0;i<30 && profile_pairs[i].count;++i) {
+        char caller[MAX_PATH+64];
+        describe_address(where,sizeof(where),profile_pairs[i].leaf);
+        describe_address(caller,sizeof(caller),profile_pairs[i].caller);
+        fprintf(stderr,"  %5.1f%% %s <- %s\n",100.0*profile_pairs[i].count/samples,where,caller);
+    }
+    qsort(profile_slots,PROFILE_SLOTS,sizeof(*profile_slots),profile_by_inclusive);
+    fprintf(stderr,"  inclusive:\n");
+    for (int i=0;i<60 && profile_slots[i].inclusive;++i) {
+        describe_address(where,sizeof(where),profile_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*profile_slots[i].inclusive/samples,where);
+    }
+    fflush(stderr);
+    return 0;
+}
 static DWORD WINAPI stacks_watcher(void *path) {
     for (;;) {
         Sleep(500);
@@ -285,6 +411,83 @@ static int helper_single_step(EXCEPTION_POINTERS *info) {
     info->ContextRecord->EFlags&=~(DWORD)0x100;
     return 1;
 }
+/* sotc: the BPE heap of Shadow of the Colossus (EU 1.01). GPU writes of dispatches on stale
+ * descriptors land in freed heap blocks and readbacks then overwrite the allocator's metadata
+ * (access violations in eboot+0x48xxx/0x49xxx). The GPU side keeps that metadata
+ * (video_core/buffer_cache/bpe_heap_guard.cpp, from Pink-shadPS4) but needs the heap object: a
+ * breakpoint on the heap's free function (eboot+0x495e0) records its first argument for the
+ * first calls, then is removed. SOTC_HEAP_GUARD=0 leaves it off. */
+#define HEAP_FREE_OFFSET 0x495e0
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address);
+#define HEAP_HOOK_CALLS 2000
+static unsigned char heap_hook_original;
+static volatile LONG heap_hook_calls, heap_hook_done;
+static _Thread_local int heap_hook_rearm;
+static struct { uintptr_t heap; LONG count; } heap_seen[8];
+static volatile uintptr_t heap_chosen;
+static void heap_hook_write(unsigned char value) {
+    DWORD old;
+    unsigned char *at=image+HEAP_FREE_OFFSET;
+    if (VirtualProtect(at,1,PAGE_EXECUTE_READWRITE,&old)) { *at=value; VirtualProtect(at,1,old,&old); FlushInstructionCache(GetCurrentProcess(),at,1); }
+}
+static void install_heap_hook(void) {
+    static const unsigned char expected[8]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+    const char *v=getenv("SOTC_HEAP_GUARD");
+    if ((v && v[0]=='0') || memcmp(image+HEAP_FREE_OFFSET,expected,sizeof(expected))) return;
+    heap_hook_original=image[HEAP_FREE_OFFSET];
+    image[HEAP_FREE_OFFSET]=0xCC; /* the image is still writable here */
+}
+static void choose_heap(void) {
+    uintptr_t best=0; LONG best_count=0;
+    for (int i=0;i<8;++i) {
+        uint64_t size=0;
+        const unsigned char *backing=heap_seen[i].heap ? runtime_memory_backing_pointer(heap_seen[i].heap+0x30) : NULL;
+        if (backing) memcpy(&size,backing,8);
+        else if (heap_seen[i].heap-(uintptr_t)image<0x20000000) memcpy(&size,(const void *)(heap_seen[i].heap+0x30),8); /* a global of the eboot */
+        if (heap_seen[i].heap && size>=0x1000000 && size<0x100000000ull && heap_seen[i].count>best_count) {
+            best=heap_seen[i].heap; best_count=heap_seen[i].count;
+        }
+    }
+    heap_chosen=best;
+    fprintf(stderr,"Runtime: BPE heap guard on heap %p (%ld of %d frees)\n",(void *)best,best_count,HEAP_HOOK_CALLS);
+    for (int i=0;i<8 && heap_seen[i].heap;++i) {
+        uint64_t words[0x10]={0};
+        const unsigned char *backing=runtime_memory_backing_pointer(heap_seen[i].heap);
+        if (backing) memcpy(words,backing,sizeof(words));
+        else if (heap_seen[i].heap-(uintptr_t)image<0x20000000) memcpy(words,(const void *)heap_seen[i].heap,sizeof(words));
+        fprintf(stderr,"  heap %p: %ld frees; +0x28 %#llx +0x30 %#llx +0x38 %#llx +0x40 %#llx\n",(void *)heap_seen[i].heap,
+                heap_seen[i].count,(unsigned long long)words[5],(unsigned long long)words[6],(unsigned long long)words[7],
+                (unsigned long long)words[8]);
+    }
+}
+uintptr_t runtime_sotc_heap(void) { return heap_chosen; }
+static int heap_hook_trap(EXCEPTION_POINTERS *info) {
+    CONTEXT *c=info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode==EXCEPTION_SINGLE_STEP) {
+        if (!heap_hook_rearm) return 0;
+        heap_hook_rearm=0;
+        if (!heap_hook_done) heap_hook_write(0xCC);
+        c->EFlags&=~(DWORD)0x100;
+        return 1;
+    }
+    if (!image || c->Rip!=(DWORD64)(uintptr_t)(image+HEAP_FREE_OFFSET)) return 0;
+    if (image[HEAP_FREE_OFFSET]!=0xCC) return 1; /* another thread restored it: just run it */
+    const uintptr_t heap=(uintptr_t)c->Rdi;
+    for (int i=0;i<8;++i) {
+        if (heap_seen[i].heap==heap) { InterlockedIncrement(&heap_seen[i].count); break; }
+        if (!heap_seen[i].heap && !InterlockedCompareExchangePointer((void *volatile *)&heap_seen[i].heap,(void *)heap,NULL)) {
+            InterlockedIncrement(&heap_seen[i].count); break;
+        }
+    }
+    heap_hook_write(heap_hook_original);
+    if (InterlockedIncrement(&heap_hook_calls)>=HEAP_HOOK_CALLS) {
+        if (!InterlockedExchange(&heap_hook_done,1)) choose_heap();
+    } else {
+        heap_hook_rearm=1;
+        c->EFlags|=0x100; /* put the breakpoint back after this instruction */
+    }
+    return 1;
+}
 static LONG vectored_fault_impl(EXCEPTION_POINTERS *info);
 /* sotc (from the shadPS4 SotC fork, signals.cpp): Shadow of the Colossus runs its jobs on fibers
  * with 16-64 KiB stacks packed back to back without guard pages. The exception handler runs on
@@ -337,6 +540,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
 static LONG vectored_fault_impl(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if ((code==EXCEPTION_BREAKPOINT || code==EXCEPTION_SINGLE_STEP) && heap_hook_trap(info)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_SINGLE_STEP && helper_single_step(info)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2 && gpu_enabled && helper_read_fault(info))
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -688,6 +892,7 @@ int main(int argc, char **argv) {
     AddVectoredExceptionHandler(1, vectored_fault);
     if (getenv("BB_FAULT_RING")) fault_ring_open(getenv("BB_FAULT_RING"));
     if (getenv("BB_STACKS_TRIGGER")) CreateThread(NULL,0,stacks_watcher,(void *)getenv("BB_STACKS_TRIGGER"),0,NULL);
+    if (getenv("SOTC_PROFILE")) CreateThread(NULL,0,profiler,(void *)getenv("SOTC_PROFILE"),0,NULL);
     SetUnhandledExceptionFilter(unhandled_fault);
     if (getenv("BB_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
@@ -893,6 +1098,7 @@ int main(int argc, char **argv) {
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
+    if (sotc_cpu) install_heap_hook();
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

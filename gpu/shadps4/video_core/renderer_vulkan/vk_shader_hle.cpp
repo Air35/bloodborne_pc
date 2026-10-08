@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -102,11 +106,74 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
+// sotc: Shadow of the Colossus fills small tables every frame with a compute shader:
+// dst[i] = src[i % m] (32-bit elements) for i < min(n, user SGPR6, the dispatched threads),
+// n and m read from the constant buffer. The command processor then reads those tables (SRT
+// walker), and with the shader on the GPU every read waited for the GPU (readback): about a
+// third of all readbacks in the open world. With a CPU-written source the fill is done here,
+// in stream order, so the tables stay CPU-side. SOTC_FILL_HLE=0 runs the shader on the GPU.
+static constexpr u64 REPLICATE_SHADER_HASH = 0x50784801;
+
+static bool ExecuteReplicateShaderHLE(const Shader::Info& info,
+                                      const AmdGpu::ComputeProgram& cs_program,
+                                      Rasterizer& rasterizer) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("SOTC_FILL_HLE");
+        return !v || v[0] != '0';
+    }();
+    if (!enabled || info.buffers.size() < 3 || cs_program.dim_y > 1 || cs_program.dim_z > 1) {
+        return false;
+    }
+    auto& buffer_cache = rasterizer.GetBufferCache();
+    const auto ctl = info.buffers[0].GetSharp(info);
+    const auto src = info.buffers[1].GetSharp(info);
+    const auto dst = info.buffers[2].GetSharp(info);
+    const u32 src_stride = src.GetStride() ? src.GetStride() : 4;
+    const u32 dst_stride = dst.GetStride() ? dst.GetStride() : 4;
+    if (src_stride != 4 || dst_stride != 4 || ctl.GetSize() < 8) {
+        return false;
+    }
+    if (buffer_cache.IsRegionGpuModified(ctl.base_address, 8)) {
+        return false;
+    }
+    const u32* control = std::bit_cast<const u32*>(ctl.base_address);
+    const u32 n = control[0];
+    const u32 m = control[1];
+    const u64 threads = u64(cs_program.dim_x) * 64;
+    const u64 count = std::min<u64>({n, cs_program.user_data[6], threads, dst.GetSize() / 4});
+    if (count == 0) {
+        return true;
+    }
+    const u64 src_count = m ? std::min<u64>(m, count) : count;
+    if (src_count * 4 > src.GetSize() ||
+        buffer_cache.IsRegionGpuModified(src.base_address, src_count * 4)) {
+        return false;
+    }
+    static std::vector<u32> data;
+    data.resize(count);
+    const u32* source = std::bit_cast<const u32*>(src.base_address);
+    // The pattern of src_count elements, repeated (no division per element).
+    std::memcpy(data.data(), source, src_count * 4);
+    for (u64 done = src_count; done < count;) {
+        const u64 chunk = std::min(done, count - done);
+        std::memcpy(data.data() + done, data.data(), chunk * 4);
+        done += chunk;
+    }
+    const VAddr address = dst.base_address;
+    if (!buffer_cache.TryReplaceFromCpu(address, data.data(), count * 4)) {
+        return false;
+    }
+    rasterizer.InvalidateMemory(address, count * 4);
+    return true;
+}
+
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH:
         return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    case REPLICATE_SHADER_HASH:
+        return ExecuteReplicateShaderHLE(info, cs_program, rasterizer);
     default:
         return false;
     }
