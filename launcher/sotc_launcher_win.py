@@ -102,7 +102,17 @@ def windows_language():
 APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), 'sys_modules': '',
                 'user_dir': '', 'af16': True, 'fps60': False, 'fullscreen': False,
                 'present_mode': 'Mailbox', 'language': '', 'player_name': '', 'show_fps': False,
-                'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': ''}
+                'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': '',
+                'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
+                'mouse_sens': '1.0', 'mouse_invert': False}
+OUTPUTS = [('1280x720', ('1280 × 720 (720p)', '1280 × 720 (720p)')), ('1920x1080', ('1920 × 1080 (1080p)', '1920 × 1080 (1080p)')),
+           ('2560x1440', ('2560 × 1440 (1440p)', '2560 × 1440 (1440p)')), ('3840x2160', ('3840 × 2160 (4K)', '3840 × 2160 (4K)'))]
+UPSCALERS = [('fsr1', ('FSR 1 (AMD, qualquer placa)', 'FSR 1 (AMD, any GPU)')),
+             ('bilinear', ('Bilinear (simples)', 'Bilinear (plain)'))]
+SHARPNESS = [('0', ('Alta', 'High')), ('250', ('Média (padrão)', 'Medium (default)')), ('600', ('Baixa', 'Low')),
+             ('off', ('Desligada', 'Off'))]
+MOUSE_SENS = [('0.5', ('0,5 (lenta)', '0.5 (slow)')), ('0.75', ('0,75', '0.75')), ('1.0', ('1,0 (padrão)', '1.0 (default)')),
+              ('1.5', ('1,5', '1.5')), ('2.0', ('2,0 (rápida)', '2.0 (fast)'))]
 PRESENT_MODES = [('Mailbox', ('Mailbox (baixa latência, sem cortes)', 'Mailbox (low latency, no tearing)')),
                  ('Fifo', ('FIFO (VSync)', 'FIFO (VSync)')),
                  ('Immediate', ('Immediate (pode cortar a imagem)', 'Immediate (tearing)'))]
@@ -141,11 +151,9 @@ def eboot_version(eboot):
     if key not in _EBOOT_VERSIONS:
         try:
             from prepare import parse_self
-            from sotc_modes import BASE, MODES, image_bytes
+            from sotc_modes import is_supported
             elf, _h, ph, _s, _m = parse_self(eboot.read_bytes())
-            lines = [line for mode in MODES.values() for line in mode]
-            ok = all(image_bytes(elf, ph, address - BASE, len(original)) == original for address, original, _n in lines)
-            _EBOOT_VERSIONS[key] = GAME_VERSION if ok else None
+            _EBOOT_VERSIONS[key] = GAME_VERSION if is_supported(elf, ph) else None
         except (OSError, ValueError, ImportError):
             _EBOOT_VERSIONS[key] = None
     return _EBOOT_VERSIONS[key]
@@ -186,6 +194,16 @@ def game_environment(s):
         env['SOTC_FPS'] = '1'
     if s['readbacks']:
         env['BB_READBACKS'] = s['readbacks']
+    env['SOTC_OUTPUT_RES'] = s.get('output_res') or '1920x1080'
+    env['BB_FSR1'] = '1' if s.get('upscaler', 'fsr1') == 'fsr1' else '0'
+    if s.get('sharpness') == 'off':
+        env['BB_RCAS'] = '0'
+    else:
+        env['BB_RCAS'] = '1'
+        env['BB_RCAS_ATTENUATION'] = str(s.get('sharpness') or '250')
+    env['SOTC_MOUSE'] = '1' if s.get('mouse', True) else '0'
+    env['SOTC_MOUSE_SENS'] = str(s.get('mouse_sens') or '1.0')
+    env['SOTC_MOUSE_INVERT'] = '1' if s.get('mouse_invert') else '0'
     if str(s.get('gamepad', '')).strip():
         env['BB_GAMEPAD'] = str(s['gamepad']).strip()
     env['BB_CONFIG'] = str(PORT_DIR / 'sotc.ini')
@@ -495,10 +513,12 @@ class Launcher:
         quick.grid(row=0, column=1, sticky='nw')
         ttk.Label(quick, text=_('Ajustes rápidos', 'Quick settings'), style='Section.TLabel').grid(
             row=0, column=0, columnspan=2, sticky='w', pady=(0, 2))
-        self.check(quick, 'af16', _('Texturas nítidas (filtro 16x)', 'Sharp textures (16x filtering)'))
+        self.row(quick, _('Saída', 'Output'), self.choice(quick, 'output_res', OUTPUTS, 24))
+        self.row(quick, _('Upscaler', 'Upscaler'), self.choice(quick, 'upscaler', UPSCALERS, 24))
         self.check(quick, 'fps60', _('60 FPS (experimental)', '60 FPS (experimental)'))
+        self.check(quick, 'af16', _('Texturas nítidas (filtro 16x)', 'Sharp textures (16x filtering)'))
         self.check(quick, 'fullscreen', _('Tela cheia', 'Fullscreen'))
-        for key in ('af16', 'fps60', 'fullscreen'):
+        for key in ('af16', 'fps60', 'fullscreen', 'output_res', 'upscaler'):
             self.vars[key].trace_add('write', lambda *_a: self.refresh_status())
 
     def draw_banner(self):
@@ -584,6 +604,15 @@ class Launcher:
         self.check(f, 'fps60', _('60 FPS (experimental)', '60 FPS (experimental)'),
                    _('Tira o limite de 30 FPS do jogo; o vblank vai a 120 Hz. Mediu 38 FPS no campo e ~25 no templo.',
                      'Removes the game\'s 30 FPS cap; vblank at 120 Hz. Measured 38 FPS in the open world, ~25 at the temple.'))
+        self.section(f, _('Resolução', 'Resolution'))
+        self.row(f, _('Saída', 'Output'), self.choice(f, 'output_res', OUTPUTS),
+                 _('O jogo renderiza em 1080p, como no PS4; a imagem é ampliada ou reduzida para a saída. '
+                   'Num monitor menor que a saída, a janela cabe na tela e a tela cheia usa o monitor todo.',
+                   'The game renders at 1080p, as on PS4; the image is scaled to the output. On a monitor '
+                   'smaller than the output the window fits the screen and fullscreen uses the whole monitor.'))
+        self.row(f, _('Upscaler', 'Upscaler'), self.choice(f, 'upscaler', UPSCALERS),
+                 _('FSR 1 amplia com bordas nítidas (acima de 1080p).', 'FSR 1 upscales with sharp edges (above 1080p).'))
+        self.row(f, _('Nitidez (RCAS)', 'Sharpening (RCAS)'), self.choice(f, 'sharpness', SHARPNESS))
         self.section(f, _('Tela', 'Display'))
         self.check(f, 'fullscreen', _('Tela cheia', 'Fullscreen'))
         self.row(f, _('Apresentação', 'Presentation'), self.choice(f, 'present_mode', PRESENT_MODES))
@@ -597,6 +626,14 @@ class Launcher:
         self.row(f, _('Controle preferido', 'Preferred gamepad'), ttk.Entry(f, textvariable=self.var('gamepad'), width=30),
                  _('Nome (ou parte) do controle a usar quando houver vários; vazio = o primeiro.',
                    'Name (or part of it) of the gamepad to use when several are connected; empty = the first.'))
+        self.section(f, _('Mouse', 'Mouse'))
+        self.check(f, 'mouse', _('Câmera no mouse', 'Mouse camera'),
+                   _('Clique na janela do jogo para capturar o mouse; Esc solta. Botão esquerdo = R1 (agarrar), '
+                     'direito = □ (atacar), meio = L1. Remapeie com mouse.<entrada>= no sotc.ini.',
+                     'Click the game window to capture the mouse; Esc releases it. Left button = R1 (grip), right = □ '
+                     '(attack), middle = L1. Remap with mouse.<input>= in sotc.ini.'))
+        self.row(f, _('Sensibilidade', 'Sensitivity'), self.choice(f, 'mouse_sens', MOUSE_SENS, 20))
+        self.check(f, 'mouse_invert', _('Inverter o eixo vertical', 'Invert the vertical axis'))
         self.section(f, _('Teclado (funciona junto com o controle)', 'Keyboard (works next to a gamepad)'))
         for key, action in CONTROLS:
             key = _(*key) if isinstance(key, tuple) else key
@@ -682,7 +719,9 @@ class Launcher:
                                                                      'Choose the game folder first.'), fg=MUTED)
 
     def summary(self):
-        parts = [_('60 FPS', '60 FPS') if self.var('fps60').get() else _('30 FPS (como no PS4)', '30 FPS (as on PS4)')]
+        parts = [_('60 FPS', '60 FPS') if self.var('fps60').get() else _('30 FPS (como no PS4)', '30 FPS (as on PS4)'),
+                 self.var('output_res').get().replace('x', ' × '),
+                 'FSR 1' if self.var('upscaler').get() == 'fsr1' else 'bilinear']
         if self.var('af16').get():
             parts.append(_('AF 16x', '16x AF'))
         parts.append(_('tela cheia', 'fullscreen') if self.var('fullscreen').get() else _('janela', 'window'))

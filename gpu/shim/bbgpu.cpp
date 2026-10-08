@@ -195,7 +195,8 @@ u64 PS4_SYSV_ABI sceKernelReadTsc() { return Common::FencedRDTSC(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTime() { return runtime_process_time_us(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounter() { return runtime_process_time_counter(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() { return 1'000'000'000; }
-s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return 0; } // base PS4
+extern "C" int runtime_sotc_neo(void);
+s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return runtime_sotc_neo(); } // sotc: SOTC_NEO=1, a PS4 Pro
 s32 PS4_SYSV_ABI sceKernelGetCompiledSdkVersion(s32* ver) {
     if (!ver) return ORBIS_KERNEL_ERROR_EINVAL;
     *ver = s32(g_sdk_version);

@@ -40,7 +40,14 @@ static ABI void heap_get_trace_info(HeapTraceInfo *info) {
 }
 
 /* --- libkernel: small queries --- */
-static ABI int32_t is_neo_mode(void) { return 0; } /* base PS4: the game keeps its 1080p path */
+/* Base PS4 by default: the game keeps its 1080p path. SOTC_NEO=1 (experimental): a PS4 Pro,
+ * whose Cinematic (1440p) and Performance (60 FPS) modes the game offers in its menu. */
+int runtime_sotc_neo(void) {
+    static int neo=-1;
+    if (neo<0) { const char *v=getenv("SOTC_NEO"); neo=v && *v=='1'; }
+    return neo;
+}
+static ABI int32_t is_neo_mode(void) { return runtime_sotc_neo(); }
 static ABI int32_t kernel_sleep(uint32_t seconds) {
 #ifdef _WIN32
     Sleep(seconds*1000u);

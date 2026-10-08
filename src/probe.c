@@ -415,6 +415,30 @@ static void apply_sotc_cpu_patches(const char *path, const Segment *segments, ui
            result.needs_sse4a ? "emulated" : "native", result.function_starts, result.short_sse4a,
            result.red_zone_functions, result.red_zone_instructions);
 }
+/* sotc: extra engine command line (cvars such as +r_motionBlurEnable=0), described by
+ * scripts/sotc_modes.py: SOTCCMD1, the image offset of the `lea rsi,[rip+x]` that loads the
+ * string the game appends to its command line ("+VSyncWindow=10%"), then the new text. The text
+ * is placed at the end of the trampoline area (loader memory right after the image, within the
+ * lea's reach) instead of over strings of the game. */
+static void apply_sotc_cmdline(const char *path, uint64_t size) {
+    FILE *f=fopen(path,"rb");
+    char magic[8];
+    if (!f || fread(magic,1,8,f)!=8 || memcmp(magic,"SOTCCMD1",8)) fail("bad --sotc-cmdline file (run scripts/sotc_modes.py)");
+    uint64_t lea=read64(f);
+    char text[16384];
+    size_t length=fread(text,1,sizeof(text)-1,f);
+    fclose(f);
+    text[length]=0;
+    unsigned char *at=image+lea;
+    if (lea+7>size || at[0]!=0x48 || at[1]!=0x8d || at[2]!=0x35) fail("--sotc-cmdline: no lea rsi at the given offset");
+    unsigned char *place=image+round_page(size)+SOTC_TRAMPOLINE_SIZE-sizeof(text);
+    memcpy(place,text,length+1);
+    const int64_t disp=(int64_t)(place-(at+7));
+    if (disp<INT32_MIN || disp>INT32_MAX) fail("--sotc-cmdline: text out of reach");
+    const int32_t disp32=(int32_t)disp;
+    memcpy(at+3,&disp32,4);
+    printf("Engine command line: %s\n",text);
+}
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. */
@@ -621,10 +645,11 @@ int main(int argc, char **argv) {
 #endif
     int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL, *sotc_cmdline=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--sotc-cpu") && i+1<argc) sotc_cpu=argv[++i];
+        else if (!strcmp(argv[i], "--sotc-cmdline") && i+1<argc) sotc_cmdline=argv[++i];
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
@@ -800,7 +825,21 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        /* sotc: the window opens at the output resolution (SOTC_OUTPUT_RES=WxH). */
+        int window_w=1920, window_h=1080;
+        const char *output_res=getenv("SOTC_OUTPUT_RES");
+        if (output_res && sscanf(output_res,"%dx%d",&window_w,&window_h)!=2) { window_w=1920; window_h=1080; }
+#ifdef _WIN32
+        /* A window never larger than 90% of the screen: the frame keeps the output size and is
+         * scaled into it (fullscreen uses the whole screen anyway). */
+        const int screen_w=GetSystemMetrics(SM_CXSCREEN), screen_h=GetSystemMetrics(SM_CYSCREEN);
+        if (screen_w>0 && screen_h>0 && (window_w>screen_w*9/10 || window_h>screen_h*9/10)) {
+            const double scale_w=screen_w*0.9/window_w, scale_h=screen_h*0.9/window_h;
+            const double scale=scale_w<scale_h ? scale_w : scale_h;
+            window_w=(int)(window_w*scale); window_h=(int)(window_h*scale);
+        }
+#endif
+        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,window_w,window_h};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
@@ -853,6 +892,7 @@ int main(int argc, char **argv) {
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
+    if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

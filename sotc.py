@@ -12,6 +12,7 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
     SOTC_MODES        optional, comma-separated: af16 (16x anisotropic filtering),
                       fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz)
+    SOTC_CVARS        engine settings, NAME=VALUE separated by spaces (e.g. r_motionBlurEnable=0)
     BB_GAMEPAD        the gamepad to use (its name or part of it), when several are connected
     key.<input>=Keys, pad.<input>=buttons   remap the controls (README.md, Controles)
 The image is prepared again only when the game, the modules or the scripts change.
@@ -112,7 +113,7 @@ def main():
         stamp.write_text(wanted + '\n')
 
     modes = env.get('SOTC_MODES', '')
-    run_script('sotc_modes.py', game, '--out', out, '--modes', modes)
+    run_script('sotc_modes.py', game, '--out', out, '--modes', modes, '--cvars', env.get('SOTC_CVARS', ''))
     if 'fps60' in modes.lower():
         # The game waits for vblanks: at 60 Hz an uncapped frame still rounds up to 30 FPS.
         env.setdefault('BB_VBLANK_HZ', '120')
@@ -130,6 +131,7 @@ def main():
     env.setdefault('BB_CONFIG', str(PORT / 'sotc.ini'))
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
+               *(['--sotc-cmdline', str(out / 'cmdline.bin')] if (out / 'cmdline.bin').is_file() else []),
                '--app0', str(game), '--user', str(user), *sys.argv[1:]]
     return subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
 

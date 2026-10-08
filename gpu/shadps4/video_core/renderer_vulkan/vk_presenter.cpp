@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -687,6 +690,25 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+    // sotc: SOTC_OUTPUT_RES=WxH (1280x720 ... 3840x2160): the presented frame has this size, the
+    // game's 1080p image is scaled to it (FSR 1 + RCAS with BB_FSR1=1, else bilinear).
+    static const std::pair<s32, s32> output_size = [] {
+        const char* v = std::getenv("SOTC_OUTPUT_RES");
+        s32 w = 0, h = 0;
+        if (v && std::sscanf(v, "%dx%d", &w, &h) == 2 && w >= 640 && h >= 360 && w <= 7680 && h <= 4320) {
+            return std::pair{w, h};
+        }
+        return std::pair<s32, s32>{0, 0};
+    }();
+    if (output_size.first) {
+        SetExpectedGameSize(output_size.first, output_size.second);
+        static bool reported = false;
+        if (!std::exchange(reported, true)) {
+            std::fprintf(stderr, "SOTC output %ux%u from a %ux%u game image, FSR 1 %s\n",
+                         expected_frame_width, expected_frame_height, image_size.width,
+                         image_size.height, fsr_settings.enable ? "on" : "off");
+        }
+    }
 
     const u32 capture_game_only_count = VideoCore::ConsumeGameOnlyScreenshotRequests();
     std::optional<ScreenshotReadback> pending_screenshot;

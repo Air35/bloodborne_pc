@@ -140,7 +140,7 @@ static const uint32_t input_buttons[IN_COUNT]={
 };
 #define MAX_BIND 4
 enum { PAD_LEFT_TRIGGER=SDL_GAMEPAD_BUTTON_COUNT, PAD_RIGHT_TRIGGER }; /* triggers as buttons */
-typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; } Binding;
+typedef struct { int key_count, pad_count; SDL_Scancode keys[MAX_BIND]; int pad[MAX_BIND]; unsigned mouse; } Binding; /* mouse: SDL button bits */
 static Binding bindings[IN_COUNT];
 static int bindings_ready;
 
@@ -168,6 +168,10 @@ static void bind_defaults(void) {
         {IN_LEFT,SDL_GAMEPAD_BUTTON_DPAD_LEFT}, {IN_RIGHT,SDL_GAMEPAD_BUTTON_DPAD_RIGHT},
     };
     memset(bindings,0,sizeof bindings);
+    /* sotc: mouse buttons (mouse.<input>=left,right,middle,x1,x2): grip and attack. */
+    bindings[IN_R1].mouse=1u<<SDL_BUTTON_LEFT;
+    bindings[IN_SQUARE].mouse=1u<<SDL_BUTTON_RIGHT;
+    bindings[IN_L1].mouse=1u<<SDL_BUTTON_MIDDLE;
     for (size_t i=0;i<sizeof(keys)/sizeof(*keys);++i) {
         Binding *b=&bindings[keys[i].input]; b->keys[b->key_count++]=keys[i].key;
     }
@@ -189,12 +193,28 @@ static void load_bindings(void) {
     if (!f) return;
     char line[512];
     while (fgets(line,sizeof line,f)) {
-        const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4);
+        const int keyboard=!strncmp(line,"key.",4), pad=!strncmp(line,"pad.",4), mouse=!strncmp(line,"mouse.",6);
         char *eq=strchr(line,'=');
-        if ((!keyboard && !pad) || !eq) continue;
+        if ((!keyboard && !pad && !mouse) || !eq) continue;
         *eq=0;
         int input=-1;
-        for (int i=0;i<IN_COUNT;++i) if (!strcmp(line+4,input_names[i])) input=i;
+        const char *input_name=line+(mouse ? 6 : 4);
+        for (int i=0;i<IN_COUNT;++i) if (!strcmp(input_name,input_names[i])) input=i;
+        if (mouse) {
+            if (input<0 || input>=IN_MOVE_UP) { printf("Runtime: controls: unknown input %s\n",line); continue; }
+            static const struct { const char *name; int button; } names[]={
+                {"left",SDL_BUTTON_LEFT}, {"right",SDL_BUTTON_RIGHT}, {"middle",SDL_BUTTON_MIDDLE},
+                {"x1",SDL_BUTTON_X1}, {"x2",SDL_BUTTON_X2},
+            };
+            bindings[input].mouse=0;
+            for (char *name=strtok(eq+1,", \r\n"); name; name=strtok(NULL,", \r\n")) {
+                int found=0;
+                for (size_t n=0;n<sizeof(names)/sizeof(*names);++n)
+                    if (!SDL_strcasecmp(name,names[n].name)) { bindings[input].mouse|=1u<<names[n].button; found=1; }
+                if (!found) printf("Runtime: controls: unknown mouse button \"%s\" for %s\n",name,line);
+            }
+            continue;
+        }
         if (input<0 || (pad && input>=IN_MOVE_UP)) { printf("Runtime: controls: unknown input %s\n",line); continue; }
         Binding *b=&bindings[input];
         if (keyboard) b->key_count=0; else b->pad_count=0;
@@ -249,6 +269,51 @@ static void apply_keyboard(PadData *d, const bool *k) {
     d->right_y=key_axis(d->right_y,key_down(k,IN_LOOK_UP),key_down(k,IN_LOOK_DOWN));
 }
 
+/* sotc: the captured mouse turns the camera (right stick) and presses its bound buttons.
+ * SOTC_MOUSE_SENS (default 1.0) scales the motion, SOTC_MOUSE_INVERT=1 inverts the vertical. */
+static void apply_mouse(PadData *d) {
+    static float sensitivity=-1, smooth_x, smooth_y; static int invert;
+    if (sensitivity<0) {
+        const char *v=getenv("SOTC_MOUSE_SENS");
+        sensitivity=v ? (float)atof(v) : 1.0f;
+        if (sensitivity<=0) sensitivity=1.0f;
+        invert=getenv("SOTC_MOUSE_INVERT") && getenv("SOTC_MOUSE_INVERT")[0]=='1';
+    }
+    float dx=0, dy=0; unsigned held=0;
+    if (!bbgpu_mouse_take(&dx,&dy,&held)) { smooth_x=smooth_y=0; return; }
+    static int told;
+    if (!told && (dx!=0 || dy!=0)) { told=1; puts("Runtime: mouse motion reaches the pad"); }
+    for (int i=IN_CROSS;i<=IN_RIGHT;++i) {
+        if (!(bindings[i].mouse & held)) continue;
+        if (i==IN_L2) d->l2=255;
+        else if (i==IN_R2) d->r2=255;
+        else if (i==IN_TOUCHPAD) touch_click(d,0);
+        else if (i==IN_TOUCHPAD_RIGHT) touch_click(d,1);
+        d->buttons|=input_buttons[i];
+    }
+    /* Pixels moved since the last sample, averaged with the sample before (the game may read
+     * the pad between two mouse reports), become a stick deflection past the game's dead zone.
+     * No longer tail: the camera stops when the mouse stops. */
+    if (invert) dy=-dy;
+    const float gain=4.0f*sensitivity, dead=28.0f;
+    const float sx=0.5f*(smooth_x+dx)*gain, sy=0.5f*(smooth_y+dy)*gain;
+    smooth_x=dx; smooth_y=dy;
+    if (sx>0.5f || sx<-0.5f) {
+        const float v=128.0f+(sx>0 ? dead : -dead)+sx;
+        d->right_x=(uint8_t)(v<0 ? 0 : v>255 ? 255 : v);
+    }
+    if (sy>0.5f || sy<-0.5f) {
+        const float v=128.0f+(sy>0 ? dead : -dead)+sy;
+        d->right_y=(uint8_t)(v<0 ? 0 : v>255 ? 255 : v);
+    }
+    static int debug=-1, shown;
+    if (debug<0) debug=getenv("SOTC_MOUSE_DEBUG")!=NULL;
+    if (debug && shown<40 && (dx!=0 || dy!=0 || sx>0.5f || sx<-0.5f)) {
+        ++shown;
+        printf("SOTC mouse sample: dx=%.1f dy=%.1f -> right %u,%u\n",dx,dy,d->right_x,d->right_y);
+    }
+}
+
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -286,6 +351,7 @@ static void sample_host(PadData *d) {
         if (touch_right) touch_click(d,1);
     }
     if (k) apply_keyboard(d,k);
+    apply_mouse(d);
 }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

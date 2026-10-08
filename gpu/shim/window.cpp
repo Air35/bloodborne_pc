@@ -1,4 +1,6 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -9,7 +11,30 @@
 
 namespace Frontend {
 
+// sotc: the mouse as a PC camera. A click in the window captures it (relative mode, hidden
+// cursor); Esc or losing focus releases it. runtime_pad.c takes the motion as the right stick
+// and the buttons through its bindings (mouse.<input>=). SOTC_MOUSE=0 leaves the mouse alone.
+namespace {
+std::atomic<float> g_mouse_dx{0}, g_mouse_dy{0};
+std::atomic<u32> g_mouse_buttons{0};
+std::atomic<bool> g_mouse_captured{false};
+bool MouseEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("SOTC_MOUSE");
+        return !v || v[0] != '0';
+    }();
+    return enabled;
+}
+void AddMotion(std::atomic<float>& total, float delta) {
+    float old = total.load(std::memory_order_relaxed);
+    while (!total.compare_exchange_weak(old, old + delta, std::memory_order_relaxed)) {
+    }
+}
+} // namespace
+
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
+    // sotc: the click that brings the window to the front also reaches the game (mouse capture).
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
@@ -125,6 +150,43 @@ bool WindowSDL::PollEvents() {
         if (BbOverlay::HandleEvent(event)) {
             continue;
         }
+        if (std::getenv("SOTC_MOUSE_DEBUG") &&
+            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_MOTION ||
+             event.type == SDL_EVENT_WINDOW_FOCUS_GAINED || event.type == SDL_EVENT_WINDOW_FOCUS_LOST)) {
+            static int shown = 0;
+            if (shown++ < 20) {
+                std::fprintf(stderr, "SOTC mouse debug: event 0x%x\n", event.type);
+            }
+        }
+        if (MouseEnabled()) {
+            const auto capture = [this](bool on) {
+                SDL_SetWindowRelativeMouseMode(window, on);
+                g_mouse_captured = on;
+                g_mouse_buttons = 0;
+                g_mouse_dx = 0;
+                g_mouse_dy = 0;
+                std::fprintf(stderr, "Runtime: mouse %s\n",
+                             on ? "captured for the camera (Esc releases it)" : "released");
+            };
+            if (!g_mouse_captured && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                      event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)) {
+                capture(true); // a click (or coming back to the game) captures the mouse
+                continue;
+            }
+            if (g_mouse_captured) {
+                if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                    AddMotion(g_mouse_dx, event.motion.xrel);
+                    AddMotion(g_mouse_dy, event.motion.yrel);
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    g_mouse_buttons |= 1u << event.button.button;
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                    g_mouse_buttons &= ~(1u << event.button.button);
+                } else if ((event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) ||
+                           event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                    capture(false);
+                }
+            }
+        }
         switch (event.type) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_RESIZED: {
@@ -146,3 +208,12 @@ bool WindowSDL::PollEvents() {
 }
 
 } // namespace Frontend
+
+// sotc: motion since the last call, the held buttons (bit = SDL button number); 0 while the
+// mouse is not captured.
+extern "C" int bbgpu_mouse_take(float* dx, float* dy, unsigned* buttons) {
+    *dx = Frontend::g_mouse_dx.exchange(0, std::memory_order_relaxed);
+    *dy = Frontend::g_mouse_dy.exchange(0, std::memory_order_relaxed);
+    *buttons = Frontend::g_mouse_buttons.load(std::memory_order_relaxed);
+    return Frontend::g_mouse_captured.load(std::memory_order_relaxed) ? 1 : 0;
+}
