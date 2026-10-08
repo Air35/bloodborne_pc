@@ -736,6 +736,25 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     free_frame();
     if (!is_reusing_frame && is_game_frame) {
         DebugState.IncFlipFrameNum();
+        // SOTC_FRAME_LOG=<n> prints the frame count and time to stderr every n frames, for
+        // measuring the frame rate of scripted runs.
+        static const u64 every = [] {
+            const char* v = std::getenv("SOTC_FRAME_LOG");
+            return v ? std::strtoull(v, nullptr, 10) : 0ULL;
+        }();
+        if (every != 0) {
+            static u64 frames = 0;
+            static const auto t0 = std::chrono::steady_clock::now();
+            if (++frames % every == 0) {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - t0)
+                                    .count();
+                std::fprintf(stderr, "SOTCFRAME %llu t=%lldms\n",
+                             static_cast<unsigned long long>(frames),
+                             static_cast<long long>(ms));
+                std::fflush(stderr);
+            }
+        }
     }
 }
 

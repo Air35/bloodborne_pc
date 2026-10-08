@@ -229,6 +229,9 @@ struct HwFragmentRuntimeInfo {
     bool clip_distance_emulation{false};
     /// bbport: writes the object motion vector to MotionVectors::Output.
     bool motion_vectors{false};
+    /// The guest runs depth/stencil before the pixel shader (DB_SHADER_CONTROL.Z_ORDER early, no
+    /// Z export). Ported from Pink-shadPS4 (luizgustavs), early_fragment_tests_from_z_order.
+    bool early_fragment_tests{false};
 
     bool operator==(const HwFragmentRuntimeInfo& other) const noexcept {
         return std::ranges::equal(color_buffers, other.color_buffers) &&
@@ -239,6 +242,7 @@ struct HwFragmentRuntimeInfo {
                dual_source_blending == other.dual_source_blending &&
                clip_distance_emulation == other.clip_distance_emulation &&
                motion_vectors == other.motion_vectors &&
+               early_fragment_tests == other.early_fragment_tests &&
                std::ranges::equal(inputs.begin(), inputs.begin() + num_inputs, other.inputs.begin(),
                                   other.inputs.begin() + num_inputs);
     }

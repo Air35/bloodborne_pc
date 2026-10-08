@@ -104,6 +104,10 @@ public:
         return tile_manager;
     }
 
+    /// Frees cached images not used in the last few frames, regardless of memory thresholds.
+    /// Called when a video memory allocation fails.
+    void EmergencyCollect();
+
     /// Invalidates any image in the logical page range.
     void InvalidateMemory(VAddr addr, size_t size);
 
@@ -345,6 +349,12 @@ private:
 
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
+
+public:
+    /// Diagnostic (SOTC_DUMP): copies every layer/slice of mip 0 to a raw file once the GPU is done.
+    void DumpImage(ImageId image_id, const std::filesystem::path& path);
+
+private:
 
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);

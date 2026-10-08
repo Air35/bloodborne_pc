@@ -137,6 +137,14 @@ public:
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
+    /// Command processor thread only, see BufferCache::IsRangeGpuWritten.
+    bool IsRangeGpuWritten(VAddr addr, u64 size) const {
+        return buffer_cache.IsRangeGpuWritten(addr, size);
+    }
+    /// Command processor thread only, see BufferCache::ReadClean.
+    bool ReadCleanMemory(VAddr addr, void* out, u32 size) {
+        return buffer_cache.ReadClean(addr, out, size);
+    }
     void MapMemory(VAddr addr, u64 size);
     void RegisterMemory(VAddr addr, u64 size);
     void UnmapMemory(VAddr addr, u64 size);
@@ -305,6 +313,10 @@ private:
     void EmitIndexBuffer();
 
     void ResetBindings(bool is_compute);
+    void MaybeDumpImages(u64 pgm_hash);
+    void FlushPeriodic();
+    u64 commands_tick{};
+    u64 commands_since_submit{};
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
@@ -351,6 +363,9 @@ private:
         bool is_written;
     };
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
+    /// Vertex/index buffers read by fixed-function stages of the current draw. They are recorded
+    /// as reads after the draw so later writes to the same ranges wait for it.
+    std::vector<BoundBuffer> fixed_function_reads;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

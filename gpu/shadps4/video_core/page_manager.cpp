@@ -22,6 +22,76 @@
 #include <windows.h>
 #endif
 
+// sotc: guest thread and fiber stacks are never made inaccessible (shadPS4 SotC fork). On
+// Windows a fault whose exception frame cannot be written below the faulting stack pointer
+// kills the process without running any handler, and Shadow of the Colossus packs hundreds of
+// small fiber stacks into heap memory the GPU also uses.
+#include <boost/icl/interval_map.hpp>
+#include <boost/icl/interval_set.hpp>
+#include <functional>
+#include <mutex>
+namespace {
+std::mutex g_guest_stacks_mutex;
+// Reference counted: the margin below one stack often covers a neighbouring stack.
+boost::icl::interval_map<VAddr, u32> g_guest_stacks;
+std::atomic<bool> g_any_guest_stack{false};
+// The exception frame is written below the faulting stack pointer.
+constexpr u64 GuestStackMargin = 16 * 1024;
+} // namespace
+namespace VideoCore {
+void RegisterGuestStack(VAddr address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    const VAddr begin = (address - GuestStackMargin) & ~VAddr{4095};
+    const VAddr end = (address + size + 4095) & ~VAddr{4095};
+    {
+        std::scoped_lock lk{g_guest_stacks_mutex};
+        g_guest_stacks += std::make_pair(boost::icl::interval<VAddr>::right_open(begin, end), 1u);
+    }
+    g_any_guest_stack.store(true, std::memory_order_release);
+}
+void UnregisterGuestStack(VAddr address, u64 size) {
+    if (size == 0) {
+        return;
+    }
+    const VAddr begin = (address - GuestStackMargin) & ~VAddr{4095};
+    const VAddr end = (address + size + 4095) & ~VAddr{4095};
+    std::scoped_lock lk{g_guest_stacks_mutex};
+    g_guest_stacks -= std::make_pair(boost::icl::interval<VAddr>::right_open(begin, end), 1u);
+}
+void ForEachNonStackRange(VAddr address, u64 size, const std::function<void(VAddr, u64)>& func) {
+    if (size == 0) {
+        return;
+    }
+    if (!g_any_guest_stack.load(std::memory_order_acquire)) {
+        func(address, size);
+        return;
+    }
+    boost::icl::interval_set<VAddr> ranges;
+    const auto window = boost::icl::interval<VAddr>::right_open(address, address + size);
+    bool overlaps = false;
+    {
+        std::scoped_lock lk{g_guest_stacks_mutex};
+        const auto [first, last] = g_guest_stacks.equal_range(window);
+        if (first != last) {
+            overlaps = true;
+            ranges += window;
+            for (auto it = first; it != last; ++it) {
+                ranges -= it->first;
+            }
+        }
+    }
+    if (!overlaps) {
+        func(address, size);
+        return;
+    }
+    for (const auto& range : ranges) {
+        func(range.lower(), range.upper() - range.lower());
+    }
+}
+} // namespace VideoCore
+
 #ifdef __linux__
 #include <thread>
 #include <fcntl.h>
@@ -426,7 +496,12 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
-        impl.Protect(address, size, perms);
+        if (perms == Core::MemoryPermission::ReadWrite) {
+            impl.Protect(address, size, perms);
+            return;
+        }
+        // sotc: stack pages stay accessible.
+        ForEachNonStackRange(address, size, [&](VAddr a, u64 s) { impl.Protect(a, s, perms); });
     }
 
 };

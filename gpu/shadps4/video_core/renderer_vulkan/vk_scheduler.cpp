@@ -14,6 +14,7 @@
 #include "bbport_copy.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_toggles.h"
+#include <limits>
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -349,6 +350,72 @@ void Scheduler::Wait(u64 tick) {
     work_semaphore.Wait(tick);
 }
 
+vk::CommandBuffer Scheduler::BeginAhead() {
+    // Idea from the readback ahead of Pink-shadPS4 (luizgustavs), on the graphics queue only.
+    const vk::Device device = instance.GetDevice();
+    if (!ahead_pool) {
+        const vk::CommandPoolCreateInfo pool_info = {
+            .flags = vk::CommandPoolCreateFlagBits::eTransient |
+                     vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
+            .queueFamilyIndex = instance.GetGraphicsQueueFamilyIndex(),
+        };
+        auto [pool_result, pool] = device.createCommandPoolUnique(pool_info);
+        ASSERT_MSG(pool_result == vk::Result::eSuccess, "Failed to create the ahead pool: {}",
+                   vk::to_string(pool_result));
+        ahead_pool = std::move(pool);
+        const vk::CommandBufferAllocateInfo alloc_info = {
+            .commandPool = *ahead_pool,
+            .level = vk::CommandBufferLevel::ePrimary,
+            .commandBufferCount = 1,
+        };
+        auto [alloc_result, cmdbufs] = device.allocateCommandBuffers(alloc_info);
+        ASSERT_MSG(alloc_result == vk::Result::eSuccess,
+                   "Failed to allocate the ahead command buffer: {}", vk::to_string(alloc_result));
+        ahead_cmdbuf = cmdbufs[0];
+        auto [fence_result, fence] = device.createFenceUnique({});
+        ASSERT_MSG(fence_result == vk::Result::eSuccess, "Failed to create the ahead fence: {}",
+                   vk::to_string(fence_result));
+        ahead_fence = std::move(fence);
+    } else {
+        Check(device.resetFences(*ahead_fence));
+    }
+    Check(ahead_cmdbuf.reset());
+    Check(ahead_cmdbuf.begin(vk::CommandBufferBeginInfo{
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    }));
+    return ahead_cmdbuf;
+}
+
+void Scheduler::SubmitAheadAndWait() {
+    Check(ahead_cmdbuf.end());
+    // Queue submission order and the barriers recorded in the command buffer order it after
+    // all work submitted before; the command buffer being recorded is not involved.
+    const vk::SubmitInfo submit_info = {
+        .commandBufferCount = 1U,
+        .pCommandBuffers = &ahead_cmdbuf,
+    };
+    {
+        std::scoped_lock lk{submit_mutex};
+        const auto submit_result = instance.GetGraphicsQueue().submit(submit_info, *ahead_fence);
+        if (submit_result == vk::Result::eErrorDeviceLost) {
+            instance.ReportDeviceFault();
+            UNREACHABLE_MSG("Device lost during ahead submit");
+        }
+        ASSERT_MSG(submit_result == vk::Result::eSuccess, "Ahead submit failed: {}",
+                   vk::to_string(submit_result));
+    }
+    const auto wait_result =
+        instance.GetDevice().waitForFences(*ahead_fence, true, std::numeric_limits<u64>::max());
+    if (wait_result == vk::Result::eErrorDeviceLost) {
+        instance.ReportDeviceFault();
+        UNREACHABLE_MSG("Device lost during ahead wait");
+    }
+    ASSERT_MSG(wait_result == vk::Result::eSuccess, "Ahead wait failed: {}",
+               vk::to_string(wait_result));
+    // The ahead copy waited for all submitted work.
+    work_semaphore.Refresh();
+}
+
 void Scheduler::PopPendingOperations() {
     if (num_pending_ops.load(std::memory_order_acquire) == 0) {
         return; // every draw comes here
@@ -423,10 +490,15 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
+    // One stage mask per wait semaphore; SubmitInfo can carry up to 4 waits (it used to provide
+    // only 2 masks, so a third/fourth wait read past the array).
+    static constexpr std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
         vk::PipelineStageFlagBits::eAllCommands,
         vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eAllCommands,
+        vk::PipelineStageFlagBits::eAllCommands,
     };
+    static_assert(wait_stage_masks.size() >= std::tuple_size_v<decltype(info.wait_semas)>);
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
         .waitSemaphoreValueCount = info.num_wait_semas,
@@ -448,7 +520,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        instance.ReportDeviceFault();
+        UNREACHABLE_MSG("Device lost during submit");
+    }
 
     work_semaphore.Refresh();
     AllocateWorkerCommandBuffers();

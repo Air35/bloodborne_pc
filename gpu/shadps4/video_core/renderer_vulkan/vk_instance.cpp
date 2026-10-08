@@ -208,6 +208,47 @@ std::string Instance::GetDriverVersionName() {
     return GetReadableVersion(version);
 }
 
+void Instance::ReportDeviceFault() const {
+    LOG_CRITICAL(Render_Vulkan, "Vulkan device lost");
+    if (!device_fault) {
+        LOG_CRITICAL(Render_Vulkan, "VK_EXT_device_fault unavailable, no fault details");
+        return;
+    }
+    const auto get_fault_info = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(*device, "vkGetDeviceFaultInfoEXT"));
+    if (!get_fault_info) {
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (get_fault_info(*device, &counts, nullptr) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "vkGetDeviceFaultInfoEXT (counts) failed");
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    std::vector<u8> vendor_binary(counts.vendorBinarySize);
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor.data(),
+        .pVendorBinaryData = vendor_binary.empty() ? nullptr : vendor_binary.data(),
+    };
+    if (get_fault_info(*device, &counts, &info) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "vkGetDeviceFaultInfoEXT failed");
+        return;
+    }
+    LOG_CRITICAL(Render_Vulkan, "Device fault: {}", info.description);
+    for (const auto& a : addresses) {
+        LOG_CRITICAL(Render_Vulkan, "  address type={} address={:#x} precision={:#x}",
+                     vk::to_string(static_cast<vk::DeviceFaultAddressTypeEXT>(a.addressType)),
+                     a.reportedAddress, a.addressPrecision);
+    }
+    for (const auto& v : vendor) {
+        LOG_CRITICAL(Render_Vulkan, "  vendor: {} code={:#x} data={:#x}", v.description,
+                     v.vendorFaultCode, v.vendorFaultData);
+    }
+}
+
 bool Instance::CreateDevice() {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
@@ -219,7 +260,8 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
         vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
-        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
+        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
+        vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -372,6 +414,13 @@ bool Instance::CreateDevice() {
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // Device fault reporting: lets us print the faulting address/type after a device loss.
+    device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    if (device_fault) {
+        const auto fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
+        device_fault = fault_features.deviceFault;
+        device_fault_vendor_binary = fault_features.deviceFaultVendorBinary;
+    }
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -624,6 +673,17 @@ bool Instance::CreateDevice() {
     }
     if (!mixed_float_dot_product) {
         device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
+    }
+
+    // Chained by hand to keep the large StructureChain above untouched.
+    vk::PhysicalDeviceFaultFeaturesEXT fault_features{
+        .deviceFault = vk::True,
+        .deviceFaultVendorBinary = device_fault_vendor_binary ? vk::True : vk::False,
+    };
+    if (device_fault) {
+        auto& features2 = device_chain.get<vk::PhysicalDeviceFeatures2>();
+        fault_features.pNext = features2.pNext;
+        features2.pNext = &fault_features;
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());

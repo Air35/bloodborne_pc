@@ -25,6 +25,15 @@ namespace VideoCore {
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
+/// Writes downloaded image data back to guest memory, leaving out guest stack pages (never
+/// protected, the CPU may hold newer data there).
+static void WriteBackSkippingStacks(VAddr guest_address, const u8* data, u64 size) {
+    ForEachNonStackRange(guest_address, size, [&](VAddr addr, u64 part) {
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(addr),
+                                                  data + (addr - guest_address), part, 3);
+    });
+}
+
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                            BufferCache& buffer_cache_, PageManager& tracker_)
@@ -59,6 +68,11 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    // Buffer arena residency is never released and competes for the same budget, so start
+    // aggressive collection well before the budget is reached (80% left too little room on
+    // 8 GB cards and new allocations failed).
+    critical_gc_memory = std::min<u64>(critical_gc_memory, device_local_memory * 6 / 10);
+    pressure_gc_memory = std::min<u64>(pressure_gc_memory, critical_gc_memory);
 }
 
 TextureCache::~TextureCache() = default;
@@ -100,25 +114,64 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (sync) {
         scheduler.Finish();
         download.Invalidate();
-        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
-                                                  download.mapped, download_size);
+        WriteBackSkippingStacks(image.info.guest_address, download.mapped, download_size);
     } else {
         scheduler.DeferPriorityOperation(
             [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
-                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
-                                                          download.mapped, download_size);
+                WriteBackSkippingStacks(device_addr, download.mapped, download_size);
                 runtime.GetStagingPool().FreeDeferred(download);
             });
     }
 }
 
-void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
-    if (image.hash == 0) {
-        // Initialize hash
-        const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-        image.hash = XXH3_64bits(addr, image.info.guest_size);
+void TextureCache::DumpImage(ImageId image_id, const std::filesystem::path& path) {
+    Image& image = slot_images[image_id];
+    const bool is_depth = image.info.props.is_depth;
+    const u32 texel = is_depth ? 4 : std::max(1u, image.info.num_bits / 8);
+    const u32 width = image.info.size.width;
+    const u32 height = image.info.size.height;
+    const u32 depth = image.info.size.depth;
+    const u32 layers = image.info.resources.layers;
+    const u32 size = width * height * depth * layers * texel;
+    if (size == 0 || size > 512_MB) {
+        return;
     }
+    const auto download = runtime.GetStagingPool().Request(size, MemoryType::HostCached, 16, true);
+    const vk::BufferImageCopy copy = {
+        .bufferOffset = download.offset,
+        .bufferRowLength = width,
+        .bufferImageHeight = height,
+        .imageSubresource =
+            {
+                .aspectMask = is_depth ? vk::ImageAspectFlagBits::eDepth
+                                       : vk::ImageAspectFlagBits::eColor,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = layers,
+            },
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {width, height, depth},
+    };
+    runtime.DownloadImage(&image, download.buffer, std::span{&copy, 1});
+    const auto name = fmt::format("{}_{:#x}_{}x{}x{}x{}_{}.raw", path.string(),
+                                  image.info.guest_address, width, height, depth, layers,
+                                  vk::to_string(image.info.pixel_format));
+    scheduler.DeferPriorityOperation([this, download, size, name] {
+        download.Invalidate();
+        if (auto* f = std::fopen(name.c_str(), "wb")) {
+            std::fwrite(download.mapped, 1, size, f);
+            std::fclose(f);
+        }
+        runtime.GetStagingPool().FreeDeferred(download);
+    });
+}
+
+void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
+    // Do not hash guest memory here: this runs from the CPU fault handler with the cache mutex
+    // held, and reading a GPU-modified (read-protected) page faults again, waits for the GPU
+    // thread to flush it, while the GPU thread waits for this mutex. RefreshImage hashes the
+    // first texels on the GPU thread anyway (an unset hash simply means "re-upload").
     image.flags |= ImageFlagBits::MaybeCpuDirty;
     UntrackImage(image_id);
 }
@@ -1012,6 +1065,30 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
     tracker.UpdatePageWatchers<false>(addr, size);
 }
 
+void TextureCache::EmergencyCollect() {
+    std::scoped_lock lock{mutex};
+    size_t num_deletions = 512;
+    size_t freed = 0;
+    const u64 ticks = std::min<u64>(4, gc_tick);
+    lru_cache.ForEachItemBelow(gc_tick - ticks, [&](ImageId image_id) {
+        if (num_deletions == 0) {
+            return true;
+        }
+        auto& image = slot_images[image_id];
+        if (image.SafeToDownload()) {
+            if (image.info.IsTiled()) {
+                return false; // Can't download non-linear images yet
+            }
+            DownloadImageMemory(image_id);
+        }
+        FreeImage(image_id);
+        --num_deletions;
+        ++freed;
+        return false;
+    });
+    LOG_WARNING(Render, "Emergency texture collection freed {} images", freed);
+}
+
 void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
@@ -1048,7 +1125,7 @@ void TextureCache::GarbageCollectImages() {
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
         ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
-        num_deletions = aggresive ? 40 : pressured ? 20 : 10;
+        num_deletions = aggresive ? 128 : pressured ? 20 : 10;
     };
     const auto clean_up = [&](ImageId image_id) {
         if (num_deletions == 0) {

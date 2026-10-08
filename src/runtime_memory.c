@@ -783,6 +783,17 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
     read_unlock();
     return ok;
 }
+/* sotc: host pointer to the backing of a mapped guest address (bypasses GPU page protection),
+ * valid to the end of its VMA; NULL for reserved or unmapped addresses. */
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address) {
+    read_lock();
+    size_t i=vma_index(address);
+    const unsigned char *p=NULL;
+    if (i<vma_count && vmas[i].start<=address && vmas[i].kind!=KIND_RESERVED && backing_base)
+        p=backing_base+vmas[i].phys+(address-vmas[i].start);
+    read_unlock();
+    return p;
+}
 /* Per-thread cache of recently found regions for the GPU's per-draw queries:
  * entries hold for as long as the table generation they were read at. */
 typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;

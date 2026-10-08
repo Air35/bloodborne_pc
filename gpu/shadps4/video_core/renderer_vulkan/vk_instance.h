@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <string>
 #include <span>
 #include <unordered_map>
 
@@ -493,6 +494,9 @@ public:
     /// Determines if a format is supported for a set of feature flags.
     [[nodiscard]] bool IsFormatSupported(vk::Format format, vk::FormatFeatureFlags2 flags) const;
 
+    /// Logs whatever the driver reports about a device loss (VK_EXT_device_fault).
+    void ReportDeviceFault() const;
+
 private:
     Instance(const Frontend::WindowSystemInfo&, s32, bool, bool);
     /// Creates the logical device opportunistically enabling extensions
@@ -570,6 +574,8 @@ private:
     bool compute_shader_derivatives{};
     bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
     bool supports_memory_budget{};
+    bool device_fault{};
+    bool device_fault_vendor_binary{};
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;

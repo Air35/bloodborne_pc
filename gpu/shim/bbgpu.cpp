@@ -38,6 +38,7 @@ int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t s
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+const unsigned char* runtime_memory_backing_pointer(uintptr_t address);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
 uint64_t runtime_process_time_us(void);
@@ -128,7 +129,23 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
         CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
     });
 }
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
+bool MemoryManager::IsValidMapping(VAddr virtual_addr, u64 size) {
+    return runtime_memory_is_mapped(virtual_addr, size ? size : 1) != 0;
+}
+bool MemoryManager::IsMappedAddress(VAddr virtual_addr) {
+    return runtime_memory_is_mapped(virtual_addr, 1) != 0;
+}
+bool MemoryManager::TryCopySparseMemory(VAddr source, u8* dest, u64 size) {
+    if (!runtime_memory_is_mapped(source, size)) {
+        return false;
+    }
+    std::memcpy(dest, reinterpret_cast<const void*>(source), size);
+    return true;
+}
+const u8* MemoryManager::GetBackingPointer(VAddr address) const {
+    return runtime_memory_backing_pointer(address);
+}
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size, u32) {
     BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, BbWriteLog::Backing);
     return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
@@ -323,6 +340,7 @@ void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return false; }
 void RequestScreenshot(ScreenshotRequest) {}
 u32 ConsumeGameOnlyScreenshotRequests() { return 0; }
+bool ConsumeImageDumpRequest() { return false; } // sotc: SOTC_DUMP needs RenderDoc hooks
 u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore

@@ -5,7 +5,13 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include <cstdlib>
+#include <algorithm>
+#include <filesystem>
+#include "common/path_util.h"
+#include "video_core/renderdoc.h"
 #include "common/debug.h"
+#include "common/elf_info.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -763,7 +769,8 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                 continue;
             }
             runtime_fault_recover = &recover;
-            srt.walker_func(snapshot.user_data, flat.data());
+            srt.walker_func(snapshot.user_data, flat.data(), &Shader::SrtCopyWindow,
+                            Shader::GetSrtWalkerContext());
             runtime_fault_recover = nullptr;
             if (std::memcmp(flat.data(), snapshot.flat, snapshot.flat_size * sizeof(u32)) != 0) {
                 u32 first = 0, count = 0;
@@ -1260,6 +1267,17 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     });
     DebugState.IncDrawCall();
 
+    // Record the indirect argument reads so a later write to the same range (e.g. a WRITE_DATA
+    // packet uploading the next draw's arguments) waits for this draw instead of racing it.
+    runtime.AccessBuffer(buffer, base, stride * max_count,
+                         vk::PipelineStageFlagBits2::eDrawIndirect,
+                         vk::AccessFlagBits2::eIndirectCommandRead);
+    if (count_address != 0) {
+        runtime.AccessBuffer(count_buffer, count_offset, 4,
+                             vk::PipelineStageFlagBits2::eDrawIndirect,
+                             vk::AccessFlagBits2::eIndirectCommandRead);
+    }
+
     ResetBindings(false);
     scheduler.KickRecording();
 }
@@ -1330,6 +1348,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         cmdbuf.dispatch(dim_x, dim_y, dim_z);
     });
     DebugState.IncDispatch();
+    MaybeDumpImages(cs.pgm_hash);
 
     ResetBindings(true);
     scheduler.KickRecording();
@@ -1381,6 +1400,9 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
         cmdbuf.dispatchIndirect(args, args_offset);
     });
     DebugState.IncDispatch();
+    runtime.AccessBuffer(buffer, base, size, vk::PipelineStageFlagBits2::eDrawIndirect,
+                         vk::AccessFlagBits2::eIndirectCommandRead);
+    MaybeDumpImages(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
 
     ResetBindings(true);
     scheduler.KickRecording();
@@ -1566,6 +1588,20 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                         bind_helper.wait_cycles / forks);
             bind_helper.wait_cycles = 0;
             helper_full = helper_partial = helper_serial = 0;
+        }
+    }
+
+    // A stage whose user data was never attached (e.g. a program restored from the pipeline
+    // cache that was not refreshed for this draw) would read its SGPRs from a null span.
+    for (const auto* stage : pipeline->GetStages()) {
+        if (stage && stage->user_data.data() == nullptr &&
+            stage->srt_info.flattened_bufsize_dw != 0) {
+            LOG_ERROR(Render_Vulkan,
+                      "Skipping draw: shader {:#x} (sw stage {}, hw stage {}, info {}) has no "
+                      "user data bound",
+                      stage->pgm_hash, u32(stage->sw_stage), u32(stage->hw_stage),
+                      fmt::ptr(stage));
+            return false;
         }
     }
 
@@ -1794,10 +1830,15 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
 
     // Map buffers for merged ranges
     for (auto& range : ranges_merged) {
-        const u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        u64 size = memory->ClampRangeSize(range.base_address, range.GetSize());
+        if (size == 0) {
+            // Start is not mapped (garbage vertex sharp): keep a small range instead of GBs.
+            size = std::min<u64>(range.GetSize(), 4096);
+        }
         std::tie(range.buffer, range.offset) =
             buffer_cache.ObtainBuffer(range.base_address, size, false);
         needs_barrier |= runtime.IsBufferAccessed(range.buffer, range.offset, size);
+        fixed_function_reads.push_back({range.buffer, range.offset, static_cast<u32>(size), false});
     }
 
     // Bind vertex buffers
@@ -1857,6 +1898,95 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
         buffer_cache.ObtainBuffer(index_address, index_buffer_size, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, offset, index_buffer_size);
     index_bind = {buffer->Handle(), offset, index_type};
+    fixed_function_reads.push_back({buffer, offset, index_buffer_size, false});
+}
+
+void Rasterizer::FlushPeriodic() {
+    // Readbacks drain the GPU, but between them the GPU only gets work when a readback submits:
+    // it sits idle while the command processor records. Submitting every N draws/dispatches lets
+    // it run the frame during the recording. A submit inside a render pass cuts it, so wait for a
+    // command outside one, up to 4 * N. From periodic_flush_commands of Pink-shadPS4
+    // (luizgustavs). SOTC_FLUSH_EVERY=N sets it, 0 = off.
+    static const u32 every = [this] {
+        if (const char* v = std::getenv("SOTC_FLUSH_EVERY")) {
+            return static_cast<u32>(std::strtoul(v, nullptr, 10));
+        }
+        // SotC: +20% fps in the open world (14-15 -> 18). Other games keep the upstream behavior.
+        // Only measured on NVIDIA; Pink-shadPS4 advises turning it off on AMD (black screen).
+        constexpr u32 VendorNvidia = 0x10DE;
+        return Common::ElfInfo::Instance().GameSerial() == "CUSA08809" &&
+                       instance.GetVendorID() == VendorNvidia
+                   ? 256u
+                   : 0u;
+    }();
+    if (every == 0) {
+        return;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    if (tick != commands_tick) {
+        commands_tick = tick;
+        commands_since_submit = 0;
+    }
+    ++commands_since_submit;
+    if (commands_since_submit < every ||
+        (false && commands_since_submit < u64{every} * 4) /* sotc: unused with the bbport recorder */) {
+        return;
+    }
+    scheduler.Flush();
+}
+
+// SOTC_DUMP="hash,hash,..." (hex, default: the SotC volumetric fog passes): after F12 (without
+// RenderDoc), the next dispatch of each listed compute shader dumps every image it has bound to
+// user/log/dump_N/ (raw mip 0, all layers and slices). The data is what the GPU really computed,
+// unlike a RenderDoc replay of a frame that uses the sparse guest-memory buffer.
+void Rasterizer::MaybeDumpImages(u64 pgm_hash) {
+    static const std::vector<u64> targets = [] {
+        std::vector<u64> list;
+        const char* env = std::getenv("SOTC_DUMP");
+        if (!env) {
+            return list;
+        }
+        std::string spec = env;
+        if (spec.empty() || spec == "1") {
+            spec = "b33e9db6,91c6c95e,25338711,47c1dc64";
+        }
+        size_t pos = 0;
+        while (pos < spec.size()) {
+            const size_t end = std::min(spec.find(',', pos), spec.size());
+            list.push_back(std::strtoull(spec.substr(pos, end - pos).c_str(), nullptr, 16));
+            pos = end + 1;
+        }
+        return list;
+    }();
+    static std::vector<u64> pending;
+    static std::filesystem::path dir;
+    static u32 session = 0;
+    static u32 seq = 0;
+    if (targets.empty()) {
+        return;
+    }
+    if (VideoCore::ConsumeImageDumpRequest()) {
+        pending = targets;
+        dir = Common::FS::GetUserPath(Common::FS::PathType::LogDir) / fmt::format("dump_{}", ++session);
+        std::filesystem::create_directories(dir);
+        seq = 0;
+    }
+    const auto it = std::find(pending.begin(), pending.end(), pgm_hash);
+    if (it == pending.end()) {
+        return;
+    }
+    pending.erase(it);
+    std::vector<VideoCore::ImageId> seen;
+    u32 index = 0;
+    for (const auto image_id : bound_images) {
+        if (!image_id || std::find(seen.begin(), seen.end(), image_id) != seen.end()) {
+            continue;
+        }
+        seen.push_back(image_id);
+        texture_cache.DumpImage(image_id, dir / fmt::format("{:02}_cs_{:08x}_img{}", seq, pgm_hash,
+                                                             index++));
+    }
+    ++seq;
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
@@ -1871,6 +2001,13 @@ void Rasterizer::ResetBindings(bool is_compute) {
         runtime.AccessBuffer(buffer, offset, size, dst_stage,
                              vk::AccessFlagBits2::eShaderRead | write_flag);
     }
+    for (const auto& read : fixed_function_reads) {
+        runtime.AccessBuffer(read.buffer, read.offset, read.size,
+                             vk::PipelineStageFlagBits2::eVertexInput,
+                             vk::AccessFlagBits2::eVertexAttributeRead |
+                                 vk::AccessFlagBits2::eIndexRead);
+    }
+    fixed_function_reads.clear();
     bound_images.clear();
     bound_buffers.clear();
     needs_barrier = false;
@@ -2117,12 +2254,45 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(vsharp.base_address),
                                      memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
             }
-            if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
+            // Unmapped addresses show up in descriptors of bindings the shader does not use
+            // (garbage left in the guest's descriptor memory); bind nothing instead of aborting.
+            // Large ranges get clamped to the mapped memory at their start (0 if unmapped);
+            // written bindings are checked as well, so garbage cannot become GPU-modified memory.
+            u64 size = 0;
+            if (vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
+                memory->IsValidMapping(vsharp.base_address) &&
+                (!desc.is_written || memory->IsMappedAddress(vsharp.base_address))) {
+                size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            }
+            if (size == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                // Guest code commonly marks a buffer as unbounded with num_records near 4GB and
+                // only touches a small part of it, and descriptors of unused bindings can hold
+                // garbage sizes of several GB. Backing such ranges makes the buffer cache keep
+                // them resident until video memory runs out, so bindings above a sane size are
+                // limited to a window from their base address.
+                static const u64 unbounded_window = [] {
+                    const char* v = std::getenv("SHADPS4_UNBOUNDED_BUFFER_MB");
+                    return (v ? std::strtoull(v, nullptr, 10) : 64ULL) << 20;
+                }();
+                constexpr u64 MaxSaneBindingSize = 256ULL << 20;
+                // Written bindings keep their full range: a shader writing past a shortened
+                // binding would hit sparse pages that were never made resident.
+                if (!desc.is_written &&
+                    (vsharp.GetSize() >= 0xFFFF0000ULL || size > MaxSaneBindingSize) &&
+                    unbounded_window != 0 && size > unbounded_window) {
+                    static std::atomic<u32> reported{0};
+                    if (vsharp.GetSize() < 0xFFFF0000ULL && reported++ < 16) {
+                        LOG_WARNING(Render,
+                                    "Limiting {} MB binding at {:#x} of shader {:#x} to {} MB",
+                                    size >> 20, vsharp.base_address, stage.pgm_hash,
+                                    unbounded_window >> 20);
+                    }
+                    size = unbounded_window;
+                }
                 if (size != vsharp.GetSize()) {
-                    LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
+                    LOG_DEBUG(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
@@ -2139,6 +2309,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
+                    Core::MemoryManager::NoteHostWrite(vsharp.base_address, size, 7,
+                                                       stage.pgm_hash);
                 }
                 needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
             }
@@ -3141,6 +3313,7 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
 }
 
 void Rasterizer::MapMemory(VAddr addr, u64 size) {
+    buffer_cache.OnMappingChanged();
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
@@ -3153,7 +3326,16 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     DrainDrawPipe();
+    buffer_cache.OnMappingChanged();
     buffer_cache.InvalidateMemory(addr, size);
+    // Give the arena memory back; it runs on the GPU thread, ordered before later draws.
+    // Releasing arena memory on unmap still races with in-flight GPU work during loads
+    // (device lost, silent crashes loading a save), so it is opt-in for now.
+    static const bool release_enabled = std::getenv("SOTC_ARENA_RELEASE") != nullptr;
+    if (release_enabled) {
+        liverpool->SendCommand<false>(
+            [this, addr, size] { buffer_cache.ReleaseMemory(addr, size); });
+    }
     texture_cache.UnmapMemory(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};

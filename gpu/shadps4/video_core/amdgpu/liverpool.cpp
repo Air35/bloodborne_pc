@@ -10,6 +10,8 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include <cstdio>
+#include <atomic>
+#include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -27,6 +29,9 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+
+// Counted for the SOTC_PROBE diagnostic log (emulator.cpp).
+std::atomic<u64> g_sotc_zpass_dumps{0};
 
 namespace AmdGpu {
 
@@ -83,6 +88,18 @@ Liverpool::Liverpool() : guest_markers_enabled{EmulatorSettings.IsVkGuestMarkers
 Liverpool::~Liverpool() {
     process_thread.request_stop();
     process_thread.join();
+}
+
+void Liverpool::WriteFenceValue(void* address, u64 data, u32 num_bytes) {
+    // The value is written to the backing memory directly (the GPU may target pages the guest
+    // mapped read-only), which the memory tracker cannot see. Invalidate first so a copy of the
+    // page already uploaded to the GPU is not reused with the old value, and so GPU-written data
+    // sharing the page is read back before the new value lands on top of it.
+    if (rasterizer) {
+        rasterizer->InvalidateMemory(std::bit_cast<VAddr>(address), num_bytes, true);
+    }
+    auto* memory = Core::Memory::Instance();
+    ASSERT(memory->TryWriteBacking(address, &data, num_bytes, 2));
 }
 
 void Liverpool::ProcessCommands() {
@@ -429,6 +446,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
+            Core::MemoryManager::NoteHostWrite(dump_const->Address<VAddr>(), dump_const->Size(), 5);
             break;
         }
         case PM4ItOpcode::IncrementCeCounter: {
@@ -1116,8 +1134,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
-                        static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
+                        // SOTC_OCCLUSION_STEP overrides the fake per-dump increment (A/B tests:
+                        // 0 = nothing passes the depth test, i.e. every query reads "occluded").
+                        static const u64 OcclusionCounterStep = [] {
+                            const char* v = std::getenv("SOTC_OCCLUSION_STEP");
+                            return v ? std::strtoull(v, nullptr, 0) : 0x2FFFFFFULL;
+                        }();
                         u64* results = event->Address<u64*>();
+                        g_sotc_zpass_dumps.fetch_add(1, std::memory_order_relaxed);
                         for (s32 i = 0; i < num_counter_pairs; ++i, results += 2) {
                             *results = pixel_counter | OcclusionCounterValidMask;
                         }
@@ -1567,6 +1591,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const u32 data_size = (header->type3.count.Value() - 2) * 4;
             if (!write_data->wr_one_addr.Value()) {
                 std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
+                Core::MemoryManager::NoteHostWrite(write_data->Address<VAddr>(), data_size, 4);
             } else {
                 UNREACHABLE();
             }

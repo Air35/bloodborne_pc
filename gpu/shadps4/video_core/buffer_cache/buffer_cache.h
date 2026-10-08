@@ -5,7 +5,9 @@
 
 #include "bbport_copy.h"
 
+#include <chrono>
 #include <deque>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -105,12 +107,31 @@ public:
 
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
+    /// Byte-precise: true when a written binding covered any byte of the range since its last
+    /// readback. Readbacks copy only these bytes, so the backing holds every other byte.
+    /// Command processor thread only.
+    [[nodiscard]] bool IsRangeGpuWritten(VAddr addr, size_t size) const {
+        return gpu_modified_ranges.Intersects(addr, size);
+    }
+
+    /// Reads [addr, addr + size) from the backing when no byte of it is GPU-written, through a
+    /// cache of pages holding their backing pointer and the hull of their GPU-written bytes.
+    /// From Pink-shadPS4 (luizgustavs). Command processor thread only.
+    bool ReadClean(VAddr addr, void* out, u32 size);
+
+    /// A GPU mapping changed: cached backing pointers may be stale. Any thread.
+    void OnMappingChanged() {
+        clean_map_generation.fetch_add(1, std::memory_order_release);
+    }
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
+
+    /// Releases the arena memory backing a range the guest unmapped. GPU thread only.
+    void ReleaseMemory(VAddr device_addr, u64 size);
 
 private:
     struct ArenaBinds {
@@ -186,8 +207,40 @@ private:
         }
     };
     IntervalList<Backing> resident_ranges;
+    /// Readback windows requested recently; downloaded together with the next readback.
+    struct HotReadback {
+        VAddr addr;
+        u64 size;
+        std::chrono::steady_clock::time_point last_request;
+    };
+    static constexpr size_t MaxHotReadbacks = 64;
+    static constexpr auto HotReadbackLifetime = std::chrono::seconds(2);
+    std::vector<HotReadback> hot_readbacks;
+    struct CleanPage {
+        VAddr page_addr = ~0ULL;
+        u64 map_generation{};
+        const u8* backing{};
+        u32 dirty_lo{};
+        u32 dirty_hi{};
+    };
+    static constexpr u64 CleanPageBits = 12;
+    static constexpr u64 CleanPageSize = 1ULL << CleanPageBits;
+    static constexpr size_t NumCleanPages = 1024;
+    std::array<CleanPage, NumCleanPages> clean_pages{};
+    bool clean_pages_used = false;
+    std::atomic<u64> clean_map_generation{};
+    void AddGpuModified(VAddr addr, u64 size);
+
+    /// GPU writes recorded into the command buffer still being built (tick current_writes_tick).
+    RangeSet current_writes;
+    u64 current_writes_tick{};
+    void RecordCurrentWrite(VAddr addr, u64 size);
+
+    /// Number of resident blocks still bound to each backing allocation.
+    std::unordered_map<VkDeviceMemory, u64> backing_blocks;
 
     u32 arena_memory_type_index{};
+    std::optional<u32> arena_fallback_memory_type_index;
     u32 block_size{};
     u32 block_shift{};
     u32 blocks_per_arena_page{};

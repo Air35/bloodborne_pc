@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -690,6 +691,13 @@ public:
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick);
 
+    /// Begins a one-off command buffer that is submitted ahead of the one being recorded, for
+    /// work that only depends on already submitted commands (readbacks of their results).
+    vk::CommandBuffer BeginAhead();
+
+    /// Submits the command buffer from BeginAhead after all submitted work and waits for it.
+    void SubmitAheadAndWait();
+
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
@@ -928,6 +936,9 @@ private:
     // compares thread ids, which on Windows (libc++ over winpthreads) costs two system calls.
     bool recording_threaded{false};
     std::jthread recorder_thread;
+    vk::UniqueCommandPool ahead_pool;
+    vk::CommandBuffer ahead_cmdbuf;
+    vk::UniqueFence ahead_fence;
     tracy::VkCtxScope* profiler_scope{};
 };
 
