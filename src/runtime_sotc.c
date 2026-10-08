@@ -282,7 +282,7 @@ typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t gone;
     uint64_t bits;
-    int multi, deleted;
+    int multi, deleted, traced;
     EventWaiter *waiters;
     char name[32];
 } EventFlag;
@@ -309,6 +309,11 @@ static ABI int32_t evf_create(EventFlag **out, const char *name, uint32_t attr, 
     pthread_mutex_init(&f->lock,NULL); pthread_cond_init(&f->gone,NULL);
     f->bits=pattern; f->multi=(attr&0xf0)==0x20;
     strcpy(f->name,name);
+    static const char *trace; static int trace_checked;
+    if (!trace_checked) { trace=getenv("SOTC_EVF_TRACE"); trace_checked=1; }
+    f->traced=trace && (!strcmp(trace,"*") || strstr(trace,name)!=NULL);
+    if (f->traced) fprintf(stderr,"EVF create '%s' %p attr 0x%x bits 0x%llx from %p\n",name,(void *)f,attr,
+                           (unsigned long long)pattern,__builtin_return_address(0));
     *out=f;
     return 0;
 }
@@ -325,6 +330,8 @@ static ABI int32_t evf_delete(EventFlag *f) {
 static ABI int32_t evf_set(EventFlag *f, uint64_t bits) {
     if (!f) return KERNEL_ERROR(E_SRCH);
     pthread_mutex_lock(&f->lock);
+    if (f->traced) fprintf(stderr,"EVF set %p 0x%llx (was 0x%llx) from %p thread %lu\n",(void *)f,(unsigned long long)bits,
+                           (unsigned long long)f->bits,__builtin_return_address(0),(unsigned long)get_thread_id());
     f->bits|=bits;
     for (EventWaiter *w=f->waiters;w;w=w->next) {
         if (w->ready || !evf_met(f,w->bits,w->mode)) continue;
@@ -378,9 +385,18 @@ static int32_t evf_wait_common(EventFlag *f, uint64_t bits, int mode, uint64_t *
         uint64_t ns=(uint64_t)deadline.tv_nsec+(uint64_t)*timeout*1000u;
         deadline.tv_sec+=(time_t)(ns/1000000000u); deadline.tv_nsec=(long)(ns%1000000000u);
     }
-    int timed_out=0;
+    int timed_out=0, reported=0;
     while (!w.ready && !w.canceled && !w.deleted) {
-        if (!timeout) pthread_cond_wait(&w.cv,&f->lock);
+        if (!timeout) {
+            /* Infinite waits wake every 5 s to report long waits (hang diagnosis). */
+            struct timespec slice;
+            clock_gettime(CLOCK_REALTIME,&slice); slice.tv_sec+=5;
+            if (pthread_cond_timedwait(&w.cv,&f->lock,&slice)==ETIMEDOUT && !w.ready && !w.canceled && !w.deleted && reported<3) {
+                ++reported;
+                fprintf(stderr,"Runtime: event flag '%s' waited %ds for 0x%llx (mode 0x%x), bits 0x%llx\n",f->name,
+                        reported*5,(unsigned long long)bits,mode,(unsigned long long)f->bits);
+            }
+        }
         else if (pthread_cond_timedwait(&w.cv,&f->lock,&deadline)==ETIMEDOUT && !w.ready && !w.canceled && !w.deleted) {
             timed_out=1; break;
         }
@@ -395,7 +411,12 @@ static int32_t evf_wait_common(EventFlag *f, uint64_t bits, int mode, uint64_t *
     return 0;
 }
 static ABI int32_t evf_wait(EventFlag *f, uint64_t bits, uint32_t mode, uint64_t *result, uint32_t *timeout) {
-    return evf_wait_common(f,bits,(int)mode,result,timeout,0);
+    if (f && f->traced) fprintf(stderr,"EVF wait %p 0x%llx mode 0x%x (bits 0x%llx) from %p thread %lu\n",(void *)f,
+                                (unsigned long long)bits,mode,(unsigned long long)f->bits,__builtin_return_address(0),
+                                (unsigned long)get_thread_id());
+    int32_t r=evf_wait_common(f,bits,(int)mode,result,timeout,0);
+    if (f && f->traced) fprintf(stderr,"EVF woke %p -> 0x%x thread %lu\n",(void *)f,(unsigned)r,(unsigned long)get_thread_id());
+    return r;
 }
 static ABI int32_t evf_poll(EventFlag *f, uint64_t bits, uint32_t mode, uint64_t *result) {
     return evf_wait_common(f,bits,(int)mode,result,NULL,1);

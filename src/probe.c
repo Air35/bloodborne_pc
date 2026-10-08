@@ -13,6 +13,7 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -143,6 +144,79 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
+/* sotc: BB_STACKS_TRIGGER=<file>: when the file appears it is removed and every other thread is
+ * suspended in turn and reported (name, rip, frame-pointer chain) to stderr: hangs without a
+ * debugger. Guest code keeps frame pointers. */
+static int read_word(uintptr_t address, uintptr_t *value) {
+    SIZE_T n=0;
+    return ReadProcessMemory(GetCurrentProcess(),(const void *)address,value,sizeof(*value),&n) && n==sizeof(*value);
+}
+static void dump_thread_stacks(void) {
+    typedef HRESULT (WINAPI *GetDescription)(HANDLE,PWSTR *);
+    static GetDescription get_description;
+    if (!get_description) get_description=(GetDescription)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    if (snapshot==INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry={.dwSize=sizeof(entry)};
+    DWORD self=GetCurrentThreadId(), pid=GetCurrentProcessId();
+    fprintf(stderr,"STACKS: begin\n");
+    for (BOOL more=Thread32First(snapshot,&entry); more; more=Thread32Next(snapshot,&entry)) {
+        if (entry.th32OwnerProcessID!=pid || entry.th32ThreadID==self) continue;
+        HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_LIMITED_INFORMATION,FALSE,entry.th32ThreadID);
+        if (!thread) continue;
+        char name[96]="";
+        PWSTR wide=NULL;
+        if (get_description && SUCCEEDED(get_description(thread,&wide)) && wide) {
+            WideCharToMultiByte(CP_UTF8,0,wide,-1,name,sizeof(name),NULL,NULL);
+            LocalFree(wide);
+        }
+        if (SuspendThread(thread)!=(DWORD)-1) {
+            CONTEXT c={.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER};
+            if (GetThreadContext(thread,&c)) {
+                char where[MAX_PATH+64];
+                describe_address(where,sizeof(where),(uintptr_t)c.Rip);
+                fprintf(stderr,"thread %lu '%s': rip %s rsp=%016llx\n",entry.th32ThreadID,name,where,c.Rsp);
+                uintptr_t rbp=(uintptr_t)c.Rbp, frame[2];
+                for (int depth=0;depth<24 && rbp;++depth) {
+                    if (!read_word(rbp,&frame[0]) || !read_word(rbp+8,&frame[1]) || !frame[1]) break;
+                    describe_address(where,sizeof(where),frame[1]);
+                    fprintf(stderr,"    #%d %s\n",depth,where);
+                    if (frame[0]<=rbp) break;
+                    rbp=frame[0];
+                }
+                /* Guest and loader return addresses near the top of the stack (frames without
+                 * rbp); loader ones as exe offsets for llvm-addr2line (ImageBase 0x140000000). */
+                int found=0, host=0;
+                const uintptr_t exe=(uintptr_t)GetModuleHandleA(NULL);
+                for (uintptr_t at=(uintptr_t)c.Rsp; at<(uintptr_t)c.Rsp+0x3000 && found<14+host; at+=8) {
+                    uintptr_t value;
+                    if (!read_word(at,&value)) break;
+                    if (image && value-(uintptr_t)image<0x4000000) {
+                        fprintf(stderr,"    [rsp+0x%llx] guest 0x%llx\n",(unsigned long long)(at-c.Rsp),
+                                (unsigned long long)(value-(uintptr_t)image));
+                        ++found;
+                    } else if (host<24 && value-exe>0x1000 && value-exe<0x4000000) {
+                        fprintf(stderr,"    [rsp+0x%llx] exe 0x%llx\n",(unsigned long long)(at-c.Rsp),
+                                (unsigned long long)(value-exe+0x140000000ull));
+                        ++host;
+                    }
+                }
+            }
+            ResumeThread(thread);
+        }
+        CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    fprintf(stderr,"STACKS: end\n");
+    fflush(stderr);
+}
+static DWORD WINAPI stacks_watcher(void *path) {
+    for (;;) {
+        Sleep(500);
+        if (!remove((const char *)path)) dump_thread_stacks();
+    }
+    return 0;
+}
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -173,9 +247,43 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
+/* sotc: with precise readbacks GPU-written pages are read-protected. A loader or GPU helper
+ * thread (draw preparation, recording, copies) reading one must not request a readback: the
+ * command processor serving it waits for those very threads. The page is opened for the one
+ * faulting instruction (trap flag) and its protection restored on the single-step trap. Those
+ * threads need the CPU-side bytes only; GPU results reach the guest through its own faults. */
+static _Thread_local uintptr_t step_page;
+static _Thread_local DWORD step_protect;
+static int helper_read_fault(EXCEPTION_POINTERS *info) {
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    if (record->ExceptionInformation[0]!=0 || step_page || runtime_thread_is_guest() ||
+        bbgpu_is_gpu_side_thread() || bbgpu_readbacks_mode()!=2) return 0;
+    const uintptr_t page=(uintptr_t)record->ExceptionInformation[1] & ~(uintptr_t)4095;
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery((void *)page,&m,sizeof(m)) || m.State!=MEM_COMMIT || m.Protect!=PAGE_NOACCESS) return 0;
+    DWORD old;
+    if (!VirtualProtect((void *)page,4096,PAGE_READONLY,&old)) return 0;
+    step_page=page; step_protect=old;
+    info->ContextRecord->EFlags|=0x100;
+    return 1;
+}
+static int helper_single_step(EXCEPTION_POINTERS *info) {
+    if (!step_page) return 0;
+    MEMORY_BASIC_INFORMATION m;
+    DWORD old;
+    /* Only if nobody (the tracker) changed the page meanwhile. */
+    if (VirtualQuery((void *)step_page,&m,sizeof(m)) && m.Protect==PAGE_READONLY)
+        VirtualProtect((void *)step_page,4096,step_protect,&old);
+    step_page=0;
+    info->ContextRecord->EFlags&=~(DWORD)0x100;
+    return 1;
+}
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if (code==EXCEPTION_SINGLE_STEP && helper_single_step(info)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2 && gpu_enabled && helper_read_fault(info))
+        return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
         /* GPU page tracking (write-protected guest pages) is resolved first. */
         if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
@@ -497,6 +605,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
+    if (getenv("BB_STACKS_TRIGGER")) CreateThread(NULL,0,stacks_watcher,(void *)getenv("BB_STACKS_TRIGGER"),0,NULL);
     SetUnhandledExceptionFilter(unhandled_fault);
     if (getenv("BB_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};

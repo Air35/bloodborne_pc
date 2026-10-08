@@ -8,7 +8,15 @@
 #include <errno.h>
 #include <time.h>
 typedef struct { int type; } GuestAttr;
-typedef struct { pthread_mutex_t native; } GuestMutex;
+/* sotc: owner and lock site are kept for hang reports (long waits are reported). */
+typedef struct { pthread_mutex_t native; unsigned long owner; void *site; unsigned depth; } GuestMutex;
+#ifdef _WIN32
+#include <windows.h>
+static unsigned long current_tid(void) { return GetCurrentThreadId(); }
+#else
+#include <unistd.h>
+static unsigned long current_tid(void) { return (unsigned long)gettid(); }
+#endif
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;
@@ -48,7 +56,7 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (!out || (attr && !*attr)) return orbis_error(EINVAL);
     int type = attr ? (*attr)->type : 1;
     if (type < 1 || type > 4) return orbis_error(EINVAL);
-    GuestMutex *mutex = malloc(sizeof(*mutex));
+    GuestMutex *mutex = calloc(1, sizeof(*mutex));
     if (!mutex) return orbis_error(ENOMEM);
     pthread_mutexattr_t native_attr;
     int e = pthread_mutexattr_init(&native_attr);
@@ -80,8 +88,22 @@ static int32_t ensure_mutex(GuestMutex **mutex) {
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
-    e = orbis_error(pthread_mutex_lock(&(*mutex)->native));
-    if (!e) ++locks;
+    GuestMutex *m = *mutex;
+    int native = pthread_mutex_trylock(&m->native);
+    for (int waited = 0; native == EBUSY;) {
+        struct timespec slice;
+        clock_gettime(CLOCK_REALTIME, &slice);
+        slice.tv_sec += 5;
+        native = pthread_mutex_timedlock(&m->native, &slice);
+        if (native == ETIMEDOUT) {
+            native = EBUSY;
+            if (waited++ < 3)
+                fprintf(stderr, "Runtime: mutex %p waited %ds by thread %lu from %p; owner thread %lu locked from %p (depth %u)\n",
+                        (void *)m, waited * 5, current_tid(), __builtin_return_address(0), m->owner, m->site, m->depth);
+        }
+    }
+    e = orbis_error(native);
+    if (!e) { ++locks; m->owner = current_tid(); m->site = __builtin_return_address(0); ++m->depth; }
     return e;
 }
 static ABI int32_t mutex_trylock(GuestMutex **mutex) {
@@ -94,8 +116,19 @@ static ABI int32_t mutex_trylock(GuestMutex **mutex) {
 static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     if (!mutex || (uintptr_t)*mutex == 2) return orbis_error(EINVAL);
     if ((uintptr_t)*mutex < 2) return orbis_error(EPERM);
-    int32_t e = orbis_error(pthread_mutex_unlock(&(*mutex)->native));
+    GuestMutex *m = *mutex;
+    unsigned depth = m->depth;
+    if (depth) --m->depth;
+    if (!m->depth) m->owner = 0;
+    int32_t e = orbis_error(pthread_mutex_unlock(&m->native));
+    if (e) m->depth = depth;
     if (!e) ++unlocks;
+    else {
+        static _Atomic unsigned failures;
+        if (failures++ < 8)
+            fprintf(stderr, "Runtime: mutex %p unlock failed 0x%x from %p\n", (void *)*mutex, (unsigned)e,
+                    __builtin_return_address(0));
+    }
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {

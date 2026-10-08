@@ -737,7 +737,12 @@ void *runtime_low_map(size_t size, int prot) {
  * 524288 small guest copies batched for the copy threads instead of the recording thread,
  * 1073741824 the lock-free UpdateImage path for clean, tracked images. */
 /* Bits 32 and up: the draw pipeline and related GPU thread work (gpu/shim/bbport_toggles.h). */
-uint64_t runtime_disabled_optimizations;
+/* sotc: bit 39 (PendingFenceWaits) is off by default. It lets a graphics WAIT_REG_MEM pass on a
+ * value a fence still queued for the draw recording thread will write, but Shadow of the
+ * Colossus also waits there for labels its compute queues write: the frame then went ahead
+ * without the compute results and the scene was never drawn (black screen in about half of
+ * the boots). A BB_TOGGLE_FILE value replaces this default. */
+uint64_t runtime_disabled_optimizations=UINT64_C(1)<<39;
 /* Speculative readers of guest memory (GPU draw-preparation workers) register a recovery
  * point: a fault on that thread jumps back to it instead of terminating (probe.c). */
 __thread sigjmp_buf *runtime_fault_recover;

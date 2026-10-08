@@ -13,6 +13,9 @@
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
+#include <Zydis/Zydis.h>
+#include "common/decoder.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifndef _WIN64
@@ -177,6 +180,96 @@ struct PageManager::Impl {
 
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
+#ifdef _WIN32
+    static DWORD64* ContextRegister(CONTEXT* ctx, ZydisRegister reg) {
+        switch (ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg)) {
+        case ZYDIS_REGISTER_RAX: return &ctx->Rax;
+        case ZYDIS_REGISTER_RCX: return &ctx->Rcx;
+        case ZYDIS_REGISTER_RDX: return &ctx->Rdx;
+        case ZYDIS_REGISTER_RBX: return &ctx->Rbx;
+        case ZYDIS_REGISTER_RSI: return &ctx->Rsi;
+        case ZYDIS_REGISTER_RDI: return &ctx->Rdi;
+        case ZYDIS_REGISTER_R8: return &ctx->R8;
+        case ZYDIS_REGISTER_R9: return &ctx->R9;
+        case ZYDIS_REGISTER_R10: return &ctx->R10;
+        case ZYDIS_REGISTER_R11: return &ctx->R11;
+        case ZYDIS_REGISTER_R12: return &ctx->R12;
+        case ZYDIS_REGISTER_R13: return &ctx->R13;
+        case ZYDIS_REGISTER_R14: return &ctx->R14;
+        case ZYDIS_REGISTER_R15: return &ctx->R15;
+        default: return nullptr;
+        }
+    }
+#endif
+
+    /// sotc: clean-load callback of the generated SRT walkers (GPU-side threads).
+    static bool SrtWalkerCleanLoad(u64 address, u32 size, u64* out) {
+        if (!rasterizer->IsGpuSideThread()) {
+            return false;
+        }
+        *out = 0;
+        return rasterizer->ReadCleanMemory(address, out, size);
+    }
+
+    /// sotc (shadPS4 SotC fork, idea from Pink-shadPS4 srt_walker_clean_reads): SRT walkers read
+    /// user data tables that often share a page with bytes the GPU wrote. The page is
+    /// read-protected for those bytes, but the backing holds every byte the GPU did not write:
+    /// such a load is completed from the backing instead of a full readback. The page stays
+    /// protected, so reads of the GPU-written bytes still fault and read back.
+    static bool TryCleanWalkerLoad(void* context) {
+#ifdef _WIN32
+        const void* rip = Common::GetRip(context);
+        if (!Shader::IsSrtWalkerCode(rip)) {
+            return false;
+        }
+        ZydisDecodedInstruction instruction;
+        ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+        const auto status = Common::Decoder::Instance()->decodeInstruction(
+            instruction, operands, const_cast<void*>(rip), 15);
+        if (!ZYAN_SUCCESS(status) || instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+            operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+            return false;
+        }
+        auto* ctx = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+        const auto& mem = operands[1].mem;
+        const u32 size = operands[0].size / 8;
+        DWORD64* dst = ContextRegister(ctx, operands[0].reg.value);
+        if (!dst || (size != 4 && size != 8) || mem.segment != ZYDIS_REGISTER_DS ||
+            mem.base == ZYDIS_REGISTER_NONE) {
+            return false;
+        }
+        const DWORD64* base = ContextRegister(ctx, mem.base);
+        if (!base) {
+            return false;
+        }
+        VAddr address = *base + static_cast<u64>(mem.disp.value);
+        if (mem.index != ZYDIS_REGISTER_NONE) {
+            const DWORD64* index = ContextRegister(ctx, mem.index);
+            if (!index) {
+                return false;
+            }
+            address += *index * mem.scale;
+        }
+        if (!rasterizer->IsMapped(address, size) || rasterizer->IsRangeGpuWritten(address, size)) {
+            return false;
+        }
+        u64 value = 0;
+        if (!Core::Memory::Instance()->TryCopySparseMemory(address, reinterpret_cast<u8*>(&value),
+                                                           size)) {
+            return false;
+        }
+        // A 32-bit destination zero-extends into the full register, as the mov would.
+        *dst = value;
+        ctx->Rip += instruction.length;
+        // Later walker loads in this page try the clean path before faulting.
+        Shader::MarkSrtCleanPages(address, size);
+        return true;
+#else
+        return false;
+#endif
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         // bbport: the draw recording thread handles its faults inline too (vk_draw_pipe.h).
@@ -184,12 +277,22 @@ struct PageManager::Impl {
         if (is_gpu_thread) {
             BbStats::gpu_signal_faults.fetch_add(1, std::memory_order_relaxed);
         }
+        if (is_gpu_thread && !Common::IsWriteError(context) && TryCleanWalkerLoad(context)) {
+            return true;
+        }
         if (Common::IsWriteError(context)) {
             BbStats::Timer timer{BbStats::t_write_faults};
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
             BbStats::Timer timer{BbStats::t_read_faults};
+            // sotc: SOTC_READBACK_LOG=1 lists the reads of GPU-written memory (precise mode).
+            static const bool log_reads = std::getenv("SOTC_READBACK_LOG") != nullptr;
+            if (log_reads) {
+                std::fprintf(stderr, "READBACK addr %#llx rip %p gpu %d\n",
+                             static_cast<unsigned long long>(addr), Common::GetRip(context),
+                             is_gpu_thread ? 1 : 0);
+            }
             return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
         return false;
@@ -488,6 +591,7 @@ struct SignalImpl : public PageManager::Impl {
         constexpr auto priority = std::numeric_limits<u32>::min();
         Core::Signals::Instance()->RegisterAccessViolationHandler(GuestFaultSignalHandler,
                                                                   priority);
+        Shader::SetSrtCleanLoad(&SrtWalkerCleanLoad); // sotc
     }
 
     void Protect(VAddr address, size_t size, Core::MemoryPermission perms) override {

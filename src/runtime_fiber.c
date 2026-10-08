@@ -179,6 +179,15 @@ ABI void fiber_force_quit(uint64_t value) {
 }
 
 static int valid(const Fiber *f) { return f->magic_start==SIGNATURE0 && f->magic_end==SIGNATURE1; }
+/* Fiber calls the game gets an error from are reported (the first 32): a refused run or switch
+ * can lose a job. */
+static int32_t fiber_refused(const char *call, const Fiber *f, int32_t error) {
+    static _Atomic unsigned reported;
+    if (atomic_fetch_add(&reported,1)<32)
+        fprintf(stderr,"Runtime: %s refused fiber '%s' (state %u): 0x%08x\n",call,f ? f->name : "?",
+                f ? atomic_load(&((Fiber *)f)->state) : 0,(unsigned)error);
+    return error;
+}
 static void stack_prepare(Fiber *f) {
     f->context_start=f->addr_context;
     f->context_end=(unsigned char *)f->addr_context+f->size_context;
@@ -257,17 +266,17 @@ static ABI int32_t fiber_finalize(Fiber *f) {
     if ((uintptr_t)f & 7) return FIBER_ERROR_ALIGNMENT;
     if (!valid(f)) return FIBER_ERROR_INVALID;
     uint32_t expected=STATE_IDLE;
-    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_TERMINATED)) return FIBER_ERROR_STATE;
+    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_TERMINATED)) return fiber_refused("sceFiberFinalize",f,FIBER_ERROR_STATE);
     return 0;
 }
 static ABI int32_t fiber_run_impl(Fiber *f, void *addr, uint64_t size, uint64_t arg, uint64_t *arg_on_return) {
     if (!f) return FIBER_ERROR_NULL;
     if (((uintptr_t)f & 7) || ((uintptr_t)addr & 15)) return FIBER_ERROR_ALIGNMENT;
     if (!valid(f)) return FIBER_ERROR_INVALID;
-    if (thread_fiber_get()) return FIBER_ERROR_PERMISSION;
+    if (thread_fiber_get()) return fiber_refused("sceFiberRun",f,FIBER_ERROR_PERMISSION);
     if (addr || size) { int32_t r=attach_context(f,addr,size); if (r<0) return r; }
     uint32_t expected=STATE_IDLE;
-    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_RUN)) return FIBER_ERROR_STATE;
+    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_RUN)) return fiber_refused("sceFiberRun",f,FIBER_ERROR_STATE);
     atomic_fetch_add(&fibers_run,1);
     FiberContext ctx={0};
     ctx.current_fiber=f;
@@ -293,7 +302,7 @@ static ABI int32_t fiber_switch_impl(Fiber *f, void *addr, uint64_t size, uint64
     if (!g) return FIBER_ERROR_PERMISSION;
     if (addr || size) { int32_t r=attach_context(f,addr,size); if (r<0) return r; }
     uint32_t expected=STATE_IDLE;
-    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_RUN)) return FIBER_ERROR_STATE;
+    if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_RUN)) return fiber_refused("sceFiberSwitch",f,FIBER_ERROR_STATE);
     atomic_fetch_add(&fiber_switches,1);
     Fiber *current=g->current_fiber;
     if (!current->addr_context) switch_fiber(current,f,arg,g);

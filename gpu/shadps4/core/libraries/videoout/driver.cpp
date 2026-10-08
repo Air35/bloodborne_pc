@@ -6,6 +6,9 @@
 #include <vector>
 #include <chrono>
 #include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <time.h>
 #ifndef _WIN32
 #include <sys/resource.h>
@@ -290,6 +293,11 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 }
 
 void VideoOutDriver::Flip(const Request& req) {
+    static const bool trace_flip = std::getenv("SOTC_FLIP_TRACE") != nullptr; // sotc
+    if (trace_flip) {
+        std::fprintf(stderr, "FLIPTRACE flip start index %d arg %#llx\n", req.index,
+                     static_cast<unsigned long long>(req.flip_arg));
+    }
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
@@ -495,6 +503,14 @@ void VideoOutDriver::Flip(const Request& req) {
         --flip_status.flip_pending_num;
     }
 
+    static const bool trace = std::getenv("SOTC_FLIP_TRACE") != nullptr; // sotc: frame handshake
+    if (trace) {
+        std::fprintf(stderr, "FLIPTRACE %lld flip done index %d arg %#llx events %zu\n",
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count()),
+                     req.index, static_cast<unsigned long long>(req.flip_arg),
+                     port->flip_events.size());
+    }
     // Trigger flip events for the port.
     for (auto event : port->flip_events) {
         auto equeue = Kernel::GetEqueue(event);
@@ -534,6 +550,15 @@ void VideoOutDriver::DrawLastFrame() {
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    static const bool trace = std::getenv("SOTC_FLIP_TRACE") != nullptr; // sotc: frame handshake
+    if (trace) {
+        std::fprintf(stderr, "FLIPTRACE %lld submit flip index %d arg %#llx eop %d thread %lu pending %d\n",
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count()),
+                     index, static_cast<unsigned long long>(flip_arg), is_eop ? 1 : 0,
+                     static_cast<unsigned long>(GetCurrentThreadId()),
+                     port->flip_status.flip_pending_num);
+    }
     {
         std::unique_lock lock{port->port_mutex};
         if (index != -1 && port->flip_status.flip_pending_num > 16) {
@@ -578,6 +603,11 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .index = index,
             .eop = is_eop,
         });
+    }
+    static const bool trace_queue = std::getenv("SOTC_FLIP_TRACE") != nullptr; // sotc
+    if (trace_queue) {
+        std::fprintf(stderr, "FLIPTRACE queued index %d arg %#llx frame %p\n", index,
+                     static_cast<unsigned long long>(flip_arg), static_cast<void*>(frame));
     }
     request_cv.notify_one();
 }
@@ -626,6 +656,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
         // Check if it's time to take a request.
         auto& vblank_status = main_port.vblank_status;
+        static const bool trace_heartbeat = std::getenv("SOTC_FLIP_TRACE") != nullptr; // sotc
+        if (trace_heartbeat && vblank_status.count % 120 == 0) {
+            std::size_t queued;
+            {
+                std::scoped_lock lk{mutex};
+                queued = requests.size();
+            }
+            std::fprintf(stderr, "FLIPTRACE heartbeat vblank %llu flip_rate %d queued %zu wait %lld us\n",
+                         static_cast<unsigned long long>(vblank_status.count), main_port.flip_rate,
+                         queued, static_cast<long long>(timer.GetTotalWait().count() / 1000));
+        }
         const auto now = std::chrono::steady_clock::now();
         const bool flip_slot = !frame_limit || now >= next_flip;
         if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {

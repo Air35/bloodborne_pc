@@ -22,6 +22,10 @@ int bbgpu_init(const BbGpuConfig *config);
 uintptr_t bbgpu_resolve(const char *scoped_nid);
 /* Called first by the loader's SIGSEGV handler: 1 when a GPU page-tracking fault was handled. */
 int bbgpu_handle_fault(void *ucontext, void *address);
+/* sotc: the GPU command thread or the draw recording thread (faults handled inline). */
+int bbgpu_is_gpu_side_thread(void);
+/* sotc: readbacks mode (0 disabled, 1 relaxed, 2 precise). */
+int bbgpu_readbacks_mode(void);
 /* BB_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void bbgpu_dump_guest_writes(void *ucontext);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when

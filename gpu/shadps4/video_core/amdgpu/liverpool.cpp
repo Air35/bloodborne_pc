@@ -1612,7 +1612,25 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            // sotc: long waits are reported (hang diagnosis).
+            const auto wait_start = std::chrono::steady_clock::now();
+            bool wait_reported = false;
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                if (!wait_reported && std::chrono::steady_clock::now() - wait_start > std::chrono::seconds(2)) {
+                    wait_reported = true;
+                    const bool memory_space =
+                        wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+                    std::fprintf(stderr,
+                                 "SOTC compute WAIT_REG_MEM vqid %u stuck 2s: %s %#llx func %u ref %#x "
+                                 "mask %#x value %#x\n",
+                                 vqid, memory_space ? "mem" : "reg",
+                                 memory_space ? static_cast<unsigned long long>(
+                                                    wait_reg_mem->Address<uintptr_t>())
+                                              : static_cast<unsigned long long>(wait_reg_mem->Reg()),
+                                 static_cast<u32>(wait_reg_mem->function.Value()), wait_reg_mem->ref,
+                                 wait_reg_mem->mask,
+                                 memory_space ? *wait_reg_mem->Address() : regs.reg_array[wait_reg_mem->Reg()]);
+                }
                 YIELD_ASC(vqid);
             }
             break;

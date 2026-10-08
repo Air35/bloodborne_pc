@@ -27,6 +27,7 @@
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
+#include "core/emulator_settings.h"
 #include "core/signals.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -113,7 +114,12 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
             end = source + size;
         }
         const u64 n = std::min<u64>(size, end - source);
-        if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        // sotc: read through the backing view, never through the guest address. With precise
+        // readbacks GPU-written pages are read-protected, and a fault on a copy thread or the
+        // recording thread would wait for the command processor, which waits for them.
+        const u8* backing = mapped ? runtime_memory_backing_pointer(source) : nullptr;
+        if (backing) std::memcpy(dest, backing, n);
+        else if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
         else std::memset(dest, 0, n);
         source += n; dest += n; size -= n;
     }
@@ -136,10 +142,23 @@ bool MemoryManager::IsMappedAddress(VAddr virtual_addr) {
     return runtime_memory_is_mapped(virtual_addr, 1) != 0;
 }
 bool MemoryManager::TryCopySparseMemory(VAddr source, u8* dest, u64 size) {
-    if (!runtime_memory_is_mapped(source, size)) {
-        return false;
+    // Through the backing view: the guest address may be protected by the GPU page tracker.
+    while (size) {
+        uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        if (!runtime_memory_region(source, &start, &end, &mapped) || !mapped) {
+            return false;
+        }
+        const u8* backing = runtime_memory_backing_pointer(source);
+        if (!backing) {
+            return false;
+        }
+        const u64 n = std::min<u64>(size, end - source);
+        std::memcpy(dest, backing, n);
+        source += n;
+        dest += n;
+        size -= n;
     }
-    std::memcpy(dest, reinterpret_cast<const void*>(source), size);
     return true;
 }
 const u8* MemoryManager::GetBackingPointer(VAddr address) const {
@@ -283,6 +302,15 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
         }
     }
     return 0;
+}
+
+extern "C" int bbgpu_is_gpu_side_thread(void) {
+    auto* rasterizer = Core::Memory::Instance()->GetRasterizer();
+    return rasterizer && rasterizer->IsGpuSideThread() ? 1 : 0;
+}
+
+extern "C" int bbgpu_readbacks_mode(void) {
+    return static_cast<int>(EmulatorSettings.GetReadbacksMode());
 }
 
 extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {

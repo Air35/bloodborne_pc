@@ -58,6 +58,8 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static ThreadAttr *attributes;
 static GuestThread *threads;
 static _Thread_local GuestThread *current;
+/* sotc: true on threads that run guest code (created by the guest, or the main thread). */
+int runtime_thread_is_guest(void) { return current!=NULL; }
 static _Thread_local int32_t guest_errno;
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
@@ -256,6 +258,10 @@ static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
+#ifdef _WIN32
+    /* sotc: host thread ids of guest threads, for traces that print GetCurrentThreadId. */
+    if (getenv("SOTC_THREAD_IDS")) fprintf(stderr,"Runtime: guest thread '%s' is host thread %lu\n",t->name,GetCurrentThreadId());
+#endif
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
