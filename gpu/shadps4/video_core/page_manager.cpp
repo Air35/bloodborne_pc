@@ -266,9 +266,13 @@ struct PageManager::Impl {
         const u64 aligned_addr = page_start << PM_PAGE_BITS;
         const u64 aligned_end = page_end << PM_PAGE_BITS;
         if (!rasterizer->IsMapped(aligned_addr, aligned_end - aligned_addr)) {
-            LOG_WARNING(Render,
-                        "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
-                        aligned_addr, aligned_end);
+            // sotc: frequent while the game streams; the first few are enough.
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                LOG_WARNING(Render,
+                            "Tracking memory region {:#x} - {:#x} which is not fully GPU mapped.",
+                            aligned_addr, aligned_end);
+            }
             EnsurePages(aligned_addr, aligned_end);
         }
 

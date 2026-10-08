@@ -41,6 +41,12 @@ def load_ini():
                 os.environ.setdefault(name.strip(), value.strip())
 
 
+def no_console():
+    """Started without a console (the launcher): console programs must not open their own."""
+    import ctypes
+    return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
+
+
 def find_probe():
     for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
         if candidate.is_file():
@@ -49,7 +55,10 @@ def find_probe():
 
 
 def run_script(name, *args):
-    result = subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL)
+    # Inside the packaged SotC.exe (PyInstaller) the executable runs the scripts itself.
+    script = ['--script'] if getattr(sys, 'frozen', False) else []
+    result = subprocess.run([sys.executable, *script, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL,
+                            creationflags=no_console())
     if result.returncode:
         sys.exit(result.returncode)
 
@@ -118,7 +127,7 @@ def main():
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
                '--app0', str(game), '--user', str(user), *sys.argv[1:]]
-    return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
+    return subprocess.run(command, stdin=subprocess.DEVNULL, creationflags=no_console()).returncode
 
 
 if __name__ == '__main__':

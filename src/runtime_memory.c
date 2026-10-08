@@ -555,7 +555,14 @@ static ABI int32_t reserve_range(void **inout, uint64_t size, int flags, uint64_
     }
     int32_t result=place(inout,size,0,flags,alignment,KIND_RESERVED,0,0);
     write_unlock();
-    if (!result) printf("Runtime: reserved virtual range %p, size=%" PRIu64 "\n", *inout, size);
+    /* sotc: Shadow of the Colossus reserves thousands of ranges while streaming; BB_MEMORY_LOG=1 lists all. */
+    static unsigned reserved_logged;
+    static int memory_log=-1;
+    if (memory_log<0) memory_log=getenv("BB_MEMORY_LOG")!=NULL;
+    if (!result && (memory_log || reserved_logged<16)) {
+        printf("Runtime: reserved virtual range %p, size=%" PRIu64 "%s\n", *inout, size,
+               ++reserved_logged==16 && !memory_log ? " (further ones: BB_MEMORY_LOG=1)" : "");
+    }
     return result;
 }
 static int32_t protect_locked(uintptr_t start, uint64_t size, int prot, int type) {

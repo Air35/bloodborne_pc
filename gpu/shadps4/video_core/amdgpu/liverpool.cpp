@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <utility>
 #include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -428,7 +429,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::SetPredication: {
-                LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION");
+                // sotc: once; the game sends it every frame.
+                static bool reported = false;
+                if (!std::exchange(reported, true)) {
+                    LOG_WARNING(Render, "Unimplemented IT_SET_PREDICATION (reported once)");
+                }
                 break;
             }
             case PM4ItOpcode::IndexType: {
@@ -850,7 +855,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS");
+                // sotc: once; the game sends it every frame.
+                static bool reported = false;
+                if (!std::exchange(reported, true)) {
+                    LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS (reported once)");
+                }
                 break;
             }
             case PM4ItOpcode::CondExec: {

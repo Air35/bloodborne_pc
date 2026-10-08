@@ -10,7 +10,8 @@ Este pacote **não contém o jogo nem firmware da Sony**. Você precisa ter os s
 ## Requisitos
 
 - Windows 10/11 64-bit e GPU com Vulkan 1.3.
-- [Python 3](https://www.python.org/downloads/) instalado, com a opção "Add to PATH" marcada.
+- Python não é necessário para o `SotC.exe`; só o `SotC.bat` precisa de
+  [Python 3](https://www.python.org/downloads/).
 - O **seu dump** do jogo CUSA08809 (pasta com `eboot.bin`, `sce_module`, `sce_sys`...).
 - Para ter som, `libSceNgs2.sprx` e `libSceUlt.sprx` do **seu próprio console**, decriptados.
   São os mesmos arquivos da pasta `user/sys_modules` do shadPS4; num PS4 com GoldHEN ficam em
@@ -18,16 +19,19 @@ Este pacote **não contém o jogo nem firmware da Sony**. Você precisa ter os s
 
 ## Como jogar
 
-1. Edite `sotc.ini`:
-   - `SOTC_GAME_DIR=` a pasta do jogo;
-   - `SOTC_SYS_MODULES=` a pasta com os dois `.sprx`, para ter som.
-2. Clique duas vezes em `SotC.bat`.
+1. Abra `SotC.exe`, o lançador.
+2. Em **Jogo e saves**, escolha:
+   - a pasta do jogo;
+   - a pasta com os dois `.sprx`, para ter som;
+   - se quiser, importe um save do shadPS4 pelo botão **Importar save do shadPS4**.
+3. Clique em **JOGAR**.
 
+A tela **Jogar** confere tudo antes: a versão do jogo, os módulos de som, os saves e a placa de vídeo.
 Na primeira vez a imagem do jogo é preparada, o que leva alguns segundos. Isso só se repete
 quando o jogo ou os módulos mudam. Os saves e o cache de shaders ficam em `user/`.
 
-Para usar um save do shadPS4, copie
-`shadPS4/user/home/1000/savedata/CUSA08809` para `user/savedata/1/CUSA08809`.
+Sem o lançador, `SotC.bat` faz o mesmo lendo `sotc.ini`. `SotC.exe --play` abre o jogo direto
+com as últimas opções do lançador, o que serve para atalhos e para o Steam.
 
 ## Modos opcionais
 
