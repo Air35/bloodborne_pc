@@ -11,6 +11,6 @@ if ! ninja -C out/gpu bb-probe > out/probe-build.log 2>&1; then
     grep -E 'error|Error' out/probe-build.log | head -20; exit 1
 fi
 cp out/gpu/bb-probe.exe out/
-timeout "${1:-60}" out/bb-probe.exe out/boot-linked.bin --content-profile out/content.bin --app0 "$game" --user out/user > "$log" 2>&1
+timeout "${1:-60}" out/bb-probe.exe out/boot-linked.bin --content-profile out/content.bin --sotc-cpu out/sotc-cpu.bin --app0 "$game" --user out/user > "$log" 2>&1
 echo "rc=$?"
 grep -v '<Warning> vk_instance' "$log" | grep -v '^Runtime: .*=0' | tail -25

@@ -7,6 +7,7 @@
 #include <inttypes.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
+#include "gpu/sotc/sotc_patches.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -47,6 +48,38 @@ static uint64_t read64(FILE *f) {
     return n;
 }
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
+#ifdef _WIN32
+/* sotc: the PS4 maps the executable at 0x400000, and Shadow of the Colossus packs pointers
+ * to its static data into 31 bits (bit 31 selects a heap-relative form). Windows already
+ * uses 0x400000 before main, so, as shadPS4 does, the image goes to the first free range
+ * above it, which must end below 2 GiB. It is claimed first thing in main, before the C
+ * runtime, the drivers or anything else allocate there. */
+#define EBOOT_MIN UINT64_C(0x400000)
+#define EBOOT_LIMIT UINT64_C(0x80000000)
+#define EBOOT_RESERVATION (UINT64_C(256) << 20)
+static void *eboot_reservation;
+static void reserve_eboot_range(void) {
+    for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void *)at,&m,sizeof(m))) return;
+        uintptr_t start=((uintptr_t)m.BaseAddress+0xffff)&~(uintptr_t)0xffff, end=(uintptr_t)m.BaseAddress+m.RegionSize;
+        if (m.State==MEM_FREE && end>start && end-start>=EBOOT_RESERVATION) {
+            eboot_reservation=VirtualAlloc((void *)start,EBOOT_RESERVATION,MEM_RESERVE,PAGE_NOACCESS);
+            if (eboot_reservation) return;
+        }
+        at=end;
+    }
+}
+/* The image (eboot, linked modules, patch trampolines) below 2 GiB. */
+static void *allocate_image(size_t size) {
+    if (!eboot_reservation) fail("no free 256 MiB range below 2 GiB for the eboot");
+    if (size > EBOOT_RESERVATION) fail("the image does not fit the eboot reservation");
+    void *p=VirtualAlloc(eboot_reservation, size, MEM_COMMIT, PAGE_READWRITE);
+    if (!p) fail("cannot commit the eboot range");
+    printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need)\n",p);
+    return p;
+}
+#endif
 static void *allocate(size_t size) {
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
     if (low) return low;
@@ -159,6 +192,8 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
+    /* sotc: an SSE4a site the load-time patchers could not rewrite is interpreted. */
+    if (code==EXCEPTION_ILLEGAL_INSTRUCTION && image && sotc_handle_illegal(info)) return EXCEPTION_CONTINUE_EXECUTION;
     if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
         code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
         /* Faults in guest code, the loader or the runtime end the process with a report; drivers
@@ -191,6 +226,31 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
     return patched;
 }
 #endif
+/* sotc: SSE4a and red-zone patches of the eboot (gpu/sotc), described by scripts/sotc_cpu.py. */
+#define SOTC_TRAMPOLINE_SIZE (UINT64_C(16) << 20)
+static void apply_sotc_cpu_patches(const char *path, const Segment *segments, uint64_t count, uint64_t size) {
+    FILE *f=fopen(path,"rb");
+    char magic[8];
+    if (!f || fread(magic,1,8,f)!=8 || memcmp(magic,"SOTCCPU1",8)) fail("bad --sotc-cpu file (run scripts/sotc_cpu.py)");
+    uint64_t eh=read64(f), eh_size=read64(f), functions=read64(f), offsets[16];
+    if (functions>16) fail("too many red-zone functions");
+    for (uint64_t i=0;i<functions;++i) offsets[i]=read64(f);
+    fclose(f);
+    uint64_t eboot_end=module_count ? modules[0].base : size;
+    if (eh_size && (eh>=eboot_end || eh_size>eboot_end-eh)) fail("eh_frame_hdr outside the eboot");
+    SotcCodeSegment code[16]; uint32_t n=0;
+    for (uint64_t s=0;s<count && n<16;++s)
+        if ((segments[s].flags&1) && segments[s].address<eboot_end)
+            code[n++]=(SotcCodeSegment){segments[s].address,segments[s].size};
+    SotcPatchRequest request={image,eboot_end,image+round_page(size),SOTC_TRAMPOLINE_SIZE,eh,eh_size,
+                              code,n,offsets,(uint32_t)functions};
+    SotcPatchResult result;
+    if (sotc_patch_eboot(&request,&result)) fail("CPU patches: cannot decode the eboot function table");
+    printf("CPU patches: SSE4a %s, %" PRIu64 " functions, %" PRIu64 " short SSE4a relocated, "
+           "red zone: %" PRIu64 " functions / %" PRIu64 " instructions\n",
+           result.needs_sse4a ? "emulated" : "native", result.function_starts, result.short_sse4a,
+           result.red_zone_functions, result.red_zone_instructions);
+}
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. */
@@ -379,6 +439,9 @@ void runtime_restart(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    reserve_eboot_range();
+#endif
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
@@ -394,9 +457,10 @@ int main(int argc, char **argv) {
 #endif
     int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
+        else if (!strcmp(argv[i], "--sotc-cpu") && i+1<argc) sotc_cpu=argv[++i];
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
@@ -553,7 +617,12 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-    image = allocate(round_page(size));
+    /* sotc: the CPU patch trampolines follow the image (rel32 jumps reach them). */
+#ifdef _WIN32
+    image = allocate_image(round_page(size) + SOTC_TRAMPOLINE_SIZE);
+#else
+    image = allocate(round_page(size) + SOTC_TRAMPOLINE_SIZE);
+#endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
@@ -616,6 +685,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
+    if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
@@ -625,6 +695,7 @@ int main(int argc, char **argv) {
             executable_entry = 1;
     }
     if (!executable_entry) fail("entry is not executable");
+    protect(image + round_page(size), SOTC_TRAMPOLINE_SIZE, 5);
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {

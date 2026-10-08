@@ -72,6 +72,7 @@ void runtime_report(void) {
            calls_init, calls_atexit, calls_cxa, handler_count);
     printf("Runtime: static guards acquired=%zu, released=%zu\n", (size_t)guards_acquired, (size_t)guards_released);
     runtime_thread_report();
+    runtime_fiber_report();
     runtime_mutex_report();
     runtime_rwlock_report();
     runtime_sema_report();
@@ -242,6 +243,8 @@ uintptr_t runtime_resolve(const char *scoped, int is_data) {
     if (save) return save;
     uintptr_t file = runtime_file_resolve(name);
     if (file) return file;
+    uintptr_t fiber = runtime_fiber_resolve(name);
+    if (fiber) return fiber;
     uintptr_t sotc = runtime_sotc_resolve(name);
     if (sotc) return sotc;
     return bbgpu_resolve(name);

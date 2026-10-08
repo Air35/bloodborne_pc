@@ -346,10 +346,20 @@ static int32_t memory_io(void *buffer, uint64_t size, int64_t offset, int write)
 static ABI int32_t memory_get(int32_t user, void *buffer, uint64_t size, int64_t offset) { (void)user; return memory_io(buffer,size,offset,0); }
 static ABI int32_t memory_set(int32_t user, void *buffer, uint64_t size, int64_t offset) { (void)user; return memory_io(buffer,size,offset,1); }
 
+static ABI int32_t save_no_backup(const void *param) { (void)param; return (int32_t)0x809F0008; } /* NOT_FOUND */
+/* SceSaveDataMountInfo: blocks, freeBlocks (32 KiB each), reserved[32]. */
+static ABI int32_t save_mount_info(const void *mount_point, uint64_t *info) {
+    if (!mount_point || !info) return (int32_t)0x809F0001;
+    info[0]=32768; info[1]=32768-64; memset(info+2,0,32);
+    return 0;
+}
 static const RuntimeExport exports[]={
     {"sceSaveDataInitialize",save_initialize}, {"sceSaveDataInitialize2",save_initialize},
     {"sceSaveDataInitialize3",save_initialize}, {"sceSaveDataTerminate",save_terminate},
     {"sceSaveDataMount",save_mount}, {"sceSaveDataMount2",save_mount2}, {"sceSaveDataUmount",save_umount},
+    /* sotc: no backups are kept; unmount-with-backup is a plain unmount. */
+    {"sceSaveDataUmountWithBackup",save_umount}, {"sceSaveDataCheckBackupData",save_no_backup},
+    {"sceSaveDataRestoreBackupData",save_no_backup}, {"sceSaveDataGetMountInfo",save_mount_info},
     {"sceSaveDataSetParam",save_set_param}, {"sceSaveDataSaveIcon",save_icon}, {"sceSaveDataDelete",save_delete},
     {"sceSaveDataDirNameSearch",save_search},
     {"sceSaveDataSetupSaveDataMemory",memory_setup}, {"sceSaveDataGetSaveDataMemory",memory_get},

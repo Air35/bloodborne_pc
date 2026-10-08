@@ -122,6 +122,136 @@ static ABI int32_t disc_map_request(const char *path, int64_t offset, int64_t si
     return 0;
 }
 
+/* --- System services with nothing to do on a PC: accepted and ignored. --- */
+static ABI int32_t ok_ignored(void) { return 0; }
+static ABI int32_t ok_args(uint64_t a, uint64_t b, uint64_t c, uint64_t d) { (void)a; (void)b; (void)c; (void)d; return 0; }
+static ABI void system_load_exec(const char *path, char *const *argv) {
+    (void)argv;
+    fprintf(stderr,"STOP: the game asked to execute %s (sceSystemServiceLoadExec)\n",path ? path : "(null)");
+    exit(0);
+}
+/* SceSystemServiceDisplaySafeAreaInfo: float ratio, reserved[128]; the whole window is safe. */
+static ABI int32_t display_safe_area(float *info) {
+    if (!info) return (int32_t)0x80A10003;
+    memset(info,0,132); info[0]=1.0f;
+    return 0;
+}
+/* libSceSystemGesture: no touch pad events (the pad runtime reports no touches). */
+static int gesture_handle=0;
+static ABI int32_t gesture_open(int32_t input, const void *param) { (void)input; (void)param; return ++gesture_handle; }
+static ABI int32_t gesture_events_count(int32_t handle, const void *recognizer) { (void)handle; (void)recognizer; return 0; }
+static ABI int32_t gesture_event_by_index(int32_t handle, const void *recognizer, uint32_t index, void *event) {
+    (void)handle; (void)recognizer; (void)index; (void)event;
+    return (int32_t)0x808AD003; /* index out of range */
+}
+/* libScePngEnc: screenshots for save icons are not encoded; the game keeps its default icon. */
+#define PNG_ENC_ERROR ((int32_t)UINT32_C(0x80690004))
+static ABI int32_t png_query_memory(const void *param) { (void)param; return 4096; }
+static ABI int32_t png_create(const void *param, void *memory, uint32_t size, void **handle) {
+    (void)param; (void)size;
+    if (!memory || !handle) return PNG_ENC_ERROR;
+    *handle=memory;
+    return 0;
+}
+static ABI int32_t png_encode(void *handle, const void *param, void *output) { (void)handle; (void)param; (void)output; return PNG_ENC_ERROR; }
+/* libSceHttp helpers used without a connection. */
+static ABI int32_t http_uri_escape(char *out, uint64_t *require, uint64_t prepare, const char *in) {
+    static const char hex[]="0123456789ABCDEF";
+    if (!in) return (int32_t)0x80431002;
+    uint64_t n=0;
+    for (const unsigned char *p=(const unsigned char *)in;*p;++p) {
+        int plain=(*p>='A' && *p<='Z') || (*p>='a' && *p<='z') || (*p>='0' && *p<='9') || strchr("-_.~",*p);
+        if (out && n+(plain ? 1 : 3)<prepare) {
+            if (plain) out[n]=(char)*p;
+            else { out[n]='%'; out[n+1]=hex[*p>>4]; out[n+2]=hex[*p&15]; }
+        }
+        n+=plain ? 1 : 3;
+    }
+    if (out && prepare) out[n<prepare ? n : prepare-1]=0;
+    if (require) *require=n+1;
+    return out && n+1>prepare ? (int32_t)0x80431100 : 0;
+}
+static ABI int32_t net_unavailable(void) { return (int32_t)0x80410101; }
+
+/* --- Silent audio (temporary): libSceNgs2 renders silence, libSceAudio3d accepts objects and
+ * paces the audio thread. Real sound will come from the user's own firmware modules. --- */
+typedef struct { uint32_t magic, kind; uint64_t rack_id; } AudioHandle;
+static AudioHandle *audio_handle(uint32_t kind, uint64_t rack_id) {
+    AudioHandle *h=calloc(1,sizeof(*h));
+    if (h) { h->magic=0x4e475332; h->kind=kind; h->rack_id=rack_id; }
+    return h;
+}
+#define NGS2_ERROR_INVALID ((int32_t)UINT32_C(0x804a0230))
+static ABI int32_t ngs2_system_create(const void *option, const void *allocator, void **out) {
+    (void)option; (void)allocator;
+    if (!out) return NGS2_ERROR_INVALID;
+    *out=audio_handle(1,0);
+    puts("Runtime: Ngs2 system created (silent audio)");
+    return 0;
+}
+typedef struct { void *buffer; uint64_t size; uint32_t waveform, channels; } Ngs2RenderBuffer;
+static ABI int32_t ngs2_system_render(void *system, Ngs2RenderBuffer *buffers, uint32_t count) {
+    (void)system;
+    for (uint32_t i=0;buffers && i<count;++i) if (buffers[i].buffer) memset(buffers[i].buffer,0,buffers[i].size);
+    return 0;
+}
+typedef struct { void *host_buffer; uint64_t host_buffer_size; uintptr_t reserved[5], user_data; } Ngs2ContextBuffer;
+static ABI int32_t ngs2_rack_query_buffer_size(uint32_t rack_id, const void *option, Ngs2ContextBuffer *info) {
+    (void)rack_id; (void)option;
+    if (!info) return NGS2_ERROR_INVALID;
+    info->host_buffer_size=0x1000;
+    return 0;
+}
+static ABI int32_t ngs2_rack_create(void *system, uint32_t rack_id, const void *option, const void *buffer, void **out) {
+    (void)system; (void)option; (void)buffer;
+    if (!out) return NGS2_ERROR_INVALID;
+    *out=audio_handle(2,rack_id);
+    return 0;
+}
+static ABI int32_t ngs2_rack_voice(void *rack, uint32_t index, void **out) {
+    (void)rack; (void)index;
+    if (!out) return NGS2_ERROR_INVALID;
+    *out=audio_handle(3,index);
+    return 0;
+}
+static ABI int32_t ngs2_voice_state(void *voice, void *state, uint64_t size) {
+    (void)voice;
+    if (state && size) memset(state,0,size);
+    return 0;
+}
+static ABI int32_t ngs2_voice_flags(void *voice, uint32_t *flags) { (void)voice; if (flags) *flags=0; return 0; }
+static ABI int32_t audio3d_port_open(int32_t user, const void *params, uint32_t *port) {
+    (void)user; (void)params;
+    if (!port) return (int32_t)0x80ec0004;
+    *port=1;
+    puts("Runtime: Audio3d port opened (silent audio)");
+    return 0;
+}
+static ABI int32_t audio3d_object_reserve(uint32_t port, uint32_t *object) {
+    static _Atomic uint32_t next=1;
+    (void)port;
+    if (!object) return (int32_t)0x80ec0004;
+    *object=next++;
+    return 0;
+}
+static ABI int32_t audio3d_port_push(uint32_t port, int blocking) {
+    (void)port;
+    if (blocking) { /* one 256-sample grain at 48 kHz */
+#ifdef _WIN32
+        Sleep(5);
+#else
+        usleep(5333);
+#endif
+    }
+    return 0;
+}
+static ABI int32_t audio3d_queue_level(uint32_t port, uint32_t *level, uint32_t *available) {
+    (void)port;
+    if (level) *level=0;
+    if (available) *available=4;
+    return 0;
+}
+
 /* --- POSIX scheduling: FreeBSD policies, PS4 FIFO priorities 256..767 --- */
 enum { SCHED_FIFO_=1, SCHED_OTHER_=2, SCHED_RR_=3 };
 static ABI int32_t sched_priority_max(int policy) { return policy==SCHED_FIFO_ || policy==SCHED_RR_ ? 767 : E_INVAL; }
@@ -276,6 +406,37 @@ static const RuntimeExport exports[]={
     {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelSleep",kernel_sleep},
     {"scePthreadGetthreadid",get_thread_id}, {"sceKernelUuidCreate",uuid_create},
     {"sceSysmoduleLoadModuleInternalWithArg",load_module_internal_with_arg},
+    {"sceShareUtilityInitializeEx2",ok_args}, {"sceShareUtilityOpenShareMenuDefault",ok_ignored},
+    {"sceScreenShotDisable",ok_ignored}, {"sceScreenShotEnable",ok_ignored},
+    {"sceGameLiveStreamingEnableLiveStreaming",ok_args}, {"sceVideoRecordingSetInfo",ok_args},
+    {"sceNetCtlInit",ok_ignored}, {"sceNetCtlTerm",ok_ignored},
+    {"sceNpTrophyDestroyContext",ok_args}, {"sceNpTrophyDestroyHandle",ok_args},
+    {"scePadSetLightBar",ok_args}, {"sceAudioOutSetMixLevelPadSpk",ok_args},
+    {"sceImeKeyboardOpen",ok_args}, {"sceImeUpdate",ok_args}, {"sceImeKeyboardClose",ok_args},
+    {"sceSystemServiceLoadExec",system_load_exec}, {"sceSystemServiceGetDisplaySafeAreaInfo",display_safe_area},
+    {"sceSystemGestureOpen",gesture_open}, {"sceSystemGestureClose",ok_args},
+    {"sceSystemGestureCreateTouchRecognizer",ok_args}, {"sceSystemGestureUpdateTouchRecognizer",ok_args},
+    {"sceSystemGestureInitializePrimitiveTouchRecognizer",ok_args},
+    {"sceSystemGestureFinalizePrimitiveTouchRecognizer",ok_args},
+    {"sceSystemGestureUpdatePrimitiveTouchRecognizer",ok_args},
+    {"sceSystemGestureGetTouchEventsCount",gesture_events_count},
+    {"sceSystemGestureGetTouchEventByIndex",gesture_event_by_index},
+    {"scePngEncQueryMemorySize",png_query_memory}, {"scePngEncCreate",png_create},
+    {"scePngEncDelete",ok_args}, {"scePngEncEncode",png_encode},
+    {"sceHttpUriEscape",http_uri_escape}, {"sceHttpGetAllResponseHeaders",net_unavailable},
+    {"sceNetGetSockInfo",net_unavailable},
+    {"sceNgs2SystemCreateWithAllocator",ngs2_system_create}, {"sceNgs2SystemDestroy",ok_args},
+    {"sceNgs2SystemRender",ngs2_system_render}, {"sceNgs2RackQueryBufferSize",ngs2_rack_query_buffer_size},
+    {"sceNgs2RackCreate",ngs2_rack_create}, {"sceNgs2RackCreateWithAllocator",ngs2_rack_create},
+    {"sceNgs2RackDestroy",ok_args}, {"sceNgs2RackGetVoiceHandle",ngs2_rack_voice},
+    {"sceNgs2VoiceControl",ok_args}, {"sceNgs2VoiceGetState",ngs2_voice_state},
+    {"sceNgs2VoiceGetStateFlags",ngs2_voice_flags},
+    {"sceAudio3dInitialize",ok_args}, {"sceAudio3dTerminate",ok_ignored},
+    {"sceAudio3dPortOpen",audio3d_port_open}, {"sceAudio3dPortClose",ok_args},
+    {"sceAudio3dObjectReserve",audio3d_object_reserve}, {"sceAudio3dObjectUnreserve",ok_args},
+    {"sceAudio3dObjectSetAttributes",ok_args}, {"sceAudio3dPortSetAttribute",ok_args},
+    {"sceAudio3dPortAdvance",ok_args}, {"sceAudio3dPortPush",audio3d_port_push},
+    {"sceAudio3dPortGetQueueLevel",audio3d_queue_level},
     {"sceKernelConvertUtcToLocaltime",utc_to_local}, {"sceKernelConvertLocaltimeToUtc",local_to_utc},
     {"sched_get_priority_max",sched_priority_max}, {"sched_get_priority_min",sched_priority_min},
     {"pthread_getschedparam",get_sched_param}, {"pthread_setschedparam",set_sched_param},
