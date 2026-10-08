@@ -33,19 +33,32 @@ quando o jogo ou os módulos mudam. Os saves e o cache de shaders ficam em `user
 Sem o lançador, `SotC.bat` faz o mesmo lendo `sotc.ini`. `SotC.exe --play` abre o jogo direto
 com as últimas opções do lançador, o que serve para atalhos e para o Steam.
 
-## Modos opcionais
+## Imagem e desempenho
 
-Em `sotc.ini`, `SOTC_MODES=` aceita uma lista separada por vírgulas:
+Tudo isto está no lançador, na página **Imagem e FPS** (e os principais em **Jogar**):
 
-- `af16`: filtro anisotrópico 16x. O chão, a grama e as rochas ficam nítidos à distância,
-  quase sem custo.
-- `fps60`: tira o limite de 30 FPS do jogo (patch GoldHEN de illusion). O vblank passa a
-  120 Hz. **Experimental**: no campo aberto mediu 38 FPS; no templo, cerca de 25.
+- **Saída** 720p, 1080p, 1440p ou 4K. O jogo renderiza em 1080p, como no PS4, e a imagem é
+  ampliada para a saída com **FSR 1** + nitidez (RCAS) ou bilinear. A janela nunca passa de 90%
+  da tela; a tela cheia usa o monitor inteiro.
+- **60 FPS** (experimental): tira o limite de 30 FPS do jogo (patch GoldHEN de illusion), com
+  vblank a 120 Hz. Mediu 38 FPS no campo aberto e ~25 no templo.
+- **Texturas nítidas**: filtro anisotrópico 16x, quase sem custo.
+- **Modo PS4 Pro**: o jogo se vê num PS4 Pro e oferece no próprio menu (Opções > Apresentação)
+  o Modo Grafismo **Cinematográfico** (1440p, mais detalhe) ou **Desempenho**. É mais pesado:
+  ~25 FPS no campo aberto.
+- **Efeitos**: vinheta, névoa atmosférica e oclusão ambiente (SSAO) podem ser desligados.
+  O motion blur, o brilho e os filtros ficam no menu do próprio jogo.
+- **Cvars do motor** (Avançado): variáveis do motor Bluepoint, `NOME=valor`, para quem quer
+  experimentar.
 
-Exemplo: `SOTC_MODES=af16,fps60`. Os modos vêm do fork shadPS4 SotC e só valem para a
-versão EU 1.01. Em outra versão eles não são aplicados.
+Os modos de patch só valem para a versão EU 1.01; em outra versão eles não são aplicados.
 
 ## Controles
+
+**Mouse:** clique na janela do jogo para capturar o mouse, que passa a girar a câmera; Esc ou
+trocar de janela solta o mouse. Botão esquerdo = R1 (agarrar), direito = □ (atacar),
+meio = L1. Sensibilidade e inversão ficam em **Controles** no lançador. Para remapear os botões
+do mouse, use `mouse.<entrada>=left,right,middle,x1,x2`.
 
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
 escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona

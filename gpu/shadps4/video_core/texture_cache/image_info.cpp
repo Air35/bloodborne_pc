@@ -48,6 +48,9 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
     pitch = attrib.tiling_mode == TilingMode::Linear ? size.width : (size.width + 127) & (~127);
     num_bits = attrib.pixel_format != VideoOutFormat::A16R16G16B16Float ? 32 : 64;
     ASSERT(num_bits == 32);
+    // sotc: on a PS4 Pro the tiled display buffers use the alternate tiling, as the color
+    // buffers the game renders into them do (else the two are an unresolvable overlap).
+    alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && props.is_tiled;
 
     guest_address = cpu_address;
     UpdateSize();

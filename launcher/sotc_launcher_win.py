@@ -28,7 +28,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 GAME_ID, GAME_VERSION = 'CUSA08809', '01.01'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
-VERSION = '1.0'
+VERSION = '1.1'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -104,7 +104,13 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'present_mode': 'Mailbox', 'language': '', 'player_name': '', 'show_fps': False,
                 'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': '',
                 'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
-                'mouse_sens': '1.0', 'mouse_invert': False}
+                'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
+                'fx_fog': True, 'fx_ssao': True, 'engine_cvars': ''}
+# Engine effects verified to change the image when set on the command line (A/B, 08/10/2026).
+EFFECTS = [('fx_vignette', ('Vinheta (cantos escurecidos)', 'Vignette (darkened corners)'),
+            'r_vignetteOverrideEnable=1 r_vignetteEnable=0'),
+           ('fx_fog', ('Névoa atmosférica', 'Atmospheric fog'), 'fog_enable=0'),
+           ('fx_ssao', ('Oclusão ambiente (SSAO)', 'Ambient occlusion (SSAO)'), 'AO_Mode=0')]
 OUTPUTS = [('1280x720', ('1280 × 720 (720p)', '1280 × 720 (720p)')), ('1920x1080', ('1920 × 1080 (1080p)', '1920 × 1080 (1080p)')),
            ('2560x1440', ('2560 × 1440 (1440p)', '2560 × 1440 (1440p)')), ('3840x2160', ('3840 × 2160 (4K)', '3840 × 2160 (4K)'))]
 UPSCALERS = [('fsr1', ('FSR 1 (AMD, qualquer placa)', 'FSR 1 (AMD, any GPU)')),
@@ -194,6 +200,10 @@ def game_environment(s):
         env['SOTC_FPS'] = '1'
     if s['readbacks']:
         env['BB_READBACKS'] = s['readbacks']
+    cvars = [off for key, _t, off in EFFECTS if not s.get(key, True)]
+    cvars += str(s.get('engine_cvars', '')).split()
+    env['SOTC_CVARS'] = ' '.join(cvars)
+    env['SOTC_NEO'] = '1' if s.get('neo') else '0'
     env['SOTC_OUTPUT_RES'] = s.get('output_res') or '1920x1080'
     env['BB_FSR1'] = '1' if s.get('upscaler', 'fsr1') == 'fsr1' else '0'
     if s.get('sharpness') == 'off':
@@ -613,6 +623,18 @@ class Launcher:
         self.row(f, _('Upscaler', 'Upscaler'), self.choice(f, 'upscaler', UPSCALERS),
                  _('FSR 1 amplia com bordas nítidas (acima de 1080p).', 'FSR 1 upscales with sharp edges (above 1080p).'))
         self.row(f, _('Nitidez (RCAS)', 'Sharpening (RCAS)'), self.choice(f, 'sharpness', SHARPNESS))
+        self.section(f, _('Modo PS4 Pro', 'PS4 Pro mode'))
+        self.check(f, 'neo', _('Apresentar-se como PS4 Pro', 'Present as a PS4 Pro'),
+                   _('O jogo passa a oferecer, no menu Opções > Apresentação, o Modo Grafismo do PS4 Pro: '
+                     'Cinematográfico (1440p, mais detalhe) ou Desempenho. Mais pesado: no campo aberto mediu ~25 FPS '
+                     'contra ~38 no modo normal.',
+                     'The game then offers, in Options > Presentation, the PS4 Pro graphics mode: Cinematic '
+                     '(1440p, more detail) or Performance. Heavier: ~25 FPS in the open world against ~38 normally.'))
+        self.section(f, _('Efeitos', 'Effects'))
+        for key, title, _off in EFFECTS:
+            self.check(f, key, _(*title))
+        self.note(f, _('O motion blur, o brilho e os filtros ficam no menu do próprio jogo (Opções > Apresentação).',
+                       "Motion blur, brightness and filters are in the game's own menu (Options > Presentation)."), top=4)
         self.section(f, _('Tela', 'Display'))
         self.check(f, 'fullscreen', _('Tela cheia', 'Fullscreen'))
         self.row(f, _('Apresentação', 'Presentation'), self.choice(f, 'present_mode', PRESENT_MODES))
@@ -664,6 +686,9 @@ class Launcher:
         self.section(f, _('Diagnóstico', 'Diagnostics'))
         self.check(f, 'show_fps', _('FPS no registro (a cada 5 s)', 'FPS in the log (every 5 s)'))
         self.row(f, _('Leituras da GPU', 'GPU readbacks'), self.choice(f, 'readbacks', READBACKS))
+        self.row(f, _('Cvars do motor', 'Engine cvars'), ttk.Entry(f, textvariable=self.var('engine_cvars'), width=58),
+                 _('Avançado: NOME=valor separados por espaço, acrescentados à linha de comando do jogo.',
+                   "Advanced: NAME=value separated by spaces, added to the game's command line."))
         self.row(f, _('Variáveis extras', 'Extra variables'), ttk.Entry(f, textvariable=self.var('extra_env'), width=58),
                  _('Pares NOME=valor separados por espaço (veja o README).',
                    'NAME=value pairs separated by spaces (see the README).'))
@@ -724,6 +749,8 @@ class Launcher:
                  'FSR 1' if self.var('upscaler').get() == 'fsr1' else 'bilinear']
         if self.var('af16').get():
             parts.append(_('AF 16x', '16x AF'))
+        if self.var('neo').get():
+            parts.append('PS4 Pro')
         parts.append(_('tela cheia', 'fullscreen') if self.var('fullscreen').get() else _('janela', 'window'))
         return '   ·   '.join(parts)
 

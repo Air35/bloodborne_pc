@@ -38,7 +38,7 @@ CVAR_MODES = {
 }
 # EU 1.01: the command line lea and the fps60 site.
 VERSION_CHECKS = [(CMDLINE_LEA, bytes.fromhex('488d352debad00')), (0x01390090, bytes.fromhex('ff25a20567'))]
-CVAR = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=[-+.0-9A-Za-z_%]+$')
+CVAR = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(=[-+.0-9A-Za-z_%]+)?$')  # NAME=VALUE or a flag such as nointro
 
 
 def image_bytes(elf, ph, vaddr, length):
@@ -75,7 +75,7 @@ def main():
     for item in args.cvars.split():
         item = item.lstrip('+')
         if not CVAR.match(item):
-            raise SystemExit(f'bad cvar {item!r} (NAME=VALUE)')
+            raise SystemExit(f'bad cvar {item!r} (NAME=VALUE or NAME)')
         cvars.append(item)
     blob = struct.pack('<8sQQ', b'BBPATCH2', BASE, len(writes))
     for offset, data in writes:
