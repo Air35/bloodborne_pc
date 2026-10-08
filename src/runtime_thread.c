@@ -190,6 +190,11 @@ static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {
     if (!a || size<16384) return ERR(22);
     a->stack=size; return 0;
 }
+/* Stacks are placed by the runtime, never by the guest. */
+static ABI int32_t attr_get_stackaddr(ThreadAttr **slot,void **address) {
+    if (!find_attr(slot) || !address) return ERR(22);
+    *address=NULL; return 0;
+}
 static ABI int32_t attr_get_stack(ThreadAttr **slot,uint64_t *size) {
     ThreadAttr *a=find_attr(slot);
     if (!a || !size) return ERR(22);
@@ -379,6 +384,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"4+h9EzwKF4I",attr_set_policy}, {"DzES9hQF4f4",attr_set_param},
         {"3qxgM4ezETA",attr_set_affinity}, {"eXbUSpEaTsA",attr_set_inherit},
         {"JaRMy+QcpeU",attr_get_detach}, {"-fA+7ZlGDQs",attr_get_stack},
+        {"Ru36fiTtJzA",attr_get_stackaddr}, {"7Xl257M4VNI",thread_equal},
         {"FXPWHNk8Of0",attr_get_param}, {"El+cQ20DynU",attr_set_guard},
         {"6UgtwV+0zb4",thread_create}, {"onNY9Byn-W8",thread_join},
         {"4qGrR6eoP9Y",thread_detach}, {"3kg7rT0NQIs",thread_exit},

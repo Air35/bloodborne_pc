@@ -131,6 +131,13 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+/* sotc: with the user's own libSceNgs2/libSceUlt linked (link_modules.py --sys-modules) their
+ * native code replaces the runtime's silent audio stand-ins. */
+static int prefer_native(const char *name, int bound) {
+    if (!bound) return 0;
+    const char *symbol=runtime_import_name(name);
+    return !strncmp(symbol,"sceNgs2",7) || !strncmp(symbol,"sceUlt",6);
+}
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -816,7 +823,8 @@ int main(int argc, char **argv) {
                         : relocs[i].kind == 1 ? (uintptr_t)(traps + 32 * relocs[i].value)
                         : (uintptr_t)image + relocs[i].value;
         if (relocs[i].kind) {
-            uintptr_t resolved = runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
+            uintptr_t resolved = prefer_native(names[relocs[i].value], native_libc && bindings[relocs[i].value])
+                                 ? 0 : runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
             if (resolved) value = resolved + relocs[i].addend;
             else if (native_libc && bindings[relocs[i].value]) {
                 uint64_t address=bindings[relocs[i].value];
@@ -832,7 +840,7 @@ int main(int argc, char **argv) {
         for (uint64_t i=0;i<import_count;++i) {
             int data=0;
             for (uint64_t r=0;r<nr;++r) if (relocs[r].kind && relocs[r].value==i) { data=relocs[r].kind==2; break; }
-            int how=runtime_resolve(names[i],data) ? 0 : native_libc && bindings[i] ? 1 : 2;
+            int how=!prefer_native(names[i],native_libc && bindings[i]) && runtime_resolve(names[i],data) ? 0 : native_libc && bindings[i] ? 1 : 2;
             ++served[how];
             printf("IMPORT %-7s %-28s %s\n",how==0 ? "runtime" : how==1 ? "native" : "MISSING",names[i],runtime_import_name(names[i]));
         }

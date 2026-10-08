@@ -19,6 +19,8 @@ from prepare import parse_self, span, unpack
 from link_libc import encode_id
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
+# sotc: audio. Never shipped: the user copies them from their own console.
+SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
@@ -128,7 +130,10 @@ def link(game, out, module_names=DEFAULT_MODULES):
     fs_patched = patch_fs_loads(image, main['ph'], 0)
     tls_module = 2
     for filename in module_names:
-        m = module(game / 'sce_module' / filename)
+        # The game's bundled modules by name; the user's own firmware modules by path.
+        source = Path(filename) if Path(filename).is_absolute() else game / 'sce_module' / filename
+        m = module(source)
+        filename = source.name
         loads = [p for p in m['ph'] if p['type'] in (1, 0x61000010)]
         modsize = max(p['vaddr'] + p['memsz'] for p in loads)
         if base + modsize > 512 * 1024 * 1024:
@@ -249,5 +254,10 @@ if __name__ == '__main__':
     p.add_argument('game', type=Path)
     p.add_argument('--out', type=Path, default=Path(__file__).resolve().parent.parent / 'out')
     p.add_argument('--modules', nargs='*', default=list(DEFAULT_MODULES))
+    p.add_argument('--sys-modules', type=Path,
+                   help="the user's decrypted firmware modules (sys_modules): links libSceUlt and libSceNgs2 (audio)")
     a = p.parse_args()
-    link(a.game, a.out, a.modules)
+    modules = list(a.modules)
+    if a.sys_modules:
+        modules += [str((a.sys_modules / name).resolve()) for name in SYS_MODULES]
+    link(a.game, a.out, modules)

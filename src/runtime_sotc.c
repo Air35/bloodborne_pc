@@ -3,6 +3,7 @@
 #define _CRT_RAND_S
 #include "runtime.h"
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -422,6 +423,14 @@ static ABI int32_t evf_poll(EventFlag *f, uint64_t bits, uint32_t mode, uint64_t
     return evf_wait_common(f,bits,(int)mode,result,NULL,1);
 }
 
+static ABI int32_t ulobjmgr_register(uint64_t object, int32_t kind, uint32_t *id) {
+    if (!object || !kind || !id) return 22; /* EINVAL */
+    *id=0;
+    return 0;
+}
+static ABI void guest_sincosf(float x, float *sine, float *cosine) { *sine=sinf(x); *cosine=cosf(x); }
+static ABI int32_t ulobjmgr_unregister(uint32_t id) { return id>=0x4000 ? 22 : 0; }
+static ABI int32_t ulobjmgr_check(uint64_t object) { return object ? 0 : 22; }
 static const RuntimeExport exports[]={
     {"sceLibcHeapGetTraceInfo",heap_get_trace_info},
     {"sceKernelIsNeoMode",is_neo_mode}, {"sceKernelSleep",kernel_sleep},
@@ -474,6 +483,10 @@ static const struct { const char *nid; void *function; } by_nid[]={
     {"fJgP+wqifno",disc_map_request},
     {"ioKMruft1ek",disc_map_no_bitmap},
     {"5+vOlukvkfg",disc_map_no_bitmap},
+    /* libkernel ulobjmgr (libSceUlt's object registry), as in shadPS4. */
+    {"BG26hBGiNlw",ulobjmgr_register}, {"Smf+fUNblPc",ulobjmgr_unregister},
+    {"HZ9Q2c+4BU4",ok_ignored}, {"SweJO7t3pkk",ulobjmgr_check},
+    {"pztV4AF18iI",guest_sincosf}, /* sincosf (libSceLibcInternal, libSceNgs2) */
 };
 uintptr_t runtime_sotc_resolve(const char *name) {
     for (size_t i=0;i<sizeof(by_nid)/sizeof(*by_nid);++i)

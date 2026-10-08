@@ -27,6 +27,12 @@ static _Thread_local unsigned char *tls_blocks[TLS_MODULES];
 static void *process_param;
 void runtime_set_procparam(void *param) { process_param=param; }
 static ABI void *guest_procparam(void) { return process_param; }
+/* sotc: libSceNgs2/libSceUlt (linked from sys_modules) ask for the eboot's SDK version. */
+static ABI int32_t compiled_sdk_version(int32_t *version) {
+    if (!version) return (int32_t)0x80020016;
+    *version=process_param ? *(const int32_t *)((const char *)process_param+16) : 0;
+    return 0;
+}
 static void **application_heap_api;
 static ABI void guest_set_heap_api(void **api) {
     application_heap_api=api;
@@ -212,6 +218,7 @@ uintptr_t runtime_resolve(const char *scoped, int is_data) {
     if (!strcmp(name, "j4ViWNHEgww")) return (uintptr_t)guest_strlen;
     if (!strcmp(name, "vNe1w4diLCs")) return (uintptr_t)guest_tls_get_addr;
     if (!strcmp(name, "959qrazPIrg")) return (uintptr_t)guest_procparam;
+    if (!strcmp(name, "WB66evu8bsU")) return (uintptr_t)compiled_sdk_version;
     if (!strcmp(name, "p5EcQeEeJAE")) return (uintptr_t)guest_set_heap_api;
     uintptr_t mutex = runtime_mutex_resolve(name);
     if (mutex) return mutex;
