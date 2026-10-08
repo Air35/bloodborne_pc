@@ -3,10 +3,7 @@
 
 #pragma once
 
-#include <cstdlib>
-
 #include <condition_variable>
-#include <deque>
 #include <coroutine>
 #include <exception>
 #include <mutex>
@@ -32,8 +29,6 @@ struct VideoOutPort;
 }
 
 namespace AmdGpu {
-
-union PM4Header;
 
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
@@ -67,30 +62,6 @@ struct Liverpool {
     Regs regs{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
-    /// bbport: register blocks written since the last draw handed to the draw recording thread
-    /// (Rasterizer::PostDraw sends them along).
-    RegDirty pipe_dirty;
-    /// bbport: fence writes handed to the draw recording thread and not yet done there: a
-    /// WaitRegMem on one of them is met in stream order without waiting for that thread.
-    struct PendingFence {
-        VAddr address;
-        u64 data;
-        u32 num_bytes;
-        u64 position;
-    };
-    std::deque<PendingFence> pending_fences;
-    void NotePendingFences(const auto& event);
-    bool PendingFenceValue(VAddr address, u32& value);
-    void NotePendingWrite(const struct PM4CmdWriteData& write_data, u32 num_bytes);
-    /// bbport: running checksum of graphics-register packets (see ApplyGraphicsRegisterPacket).
-    u64 gfx_reg_checksum{};
-    /// Top-level graphics submissions, numbered for the draw preparation workers.
-    static constexpr u64 NoSeq = ~0ull;
-    u64 gfx_submit_seq{};
-    static u64 HashRegisterPacket(u64 checksum, const u32* words, u32 count);
-    /// `dirty` (draw-preparation scanner) records the register blocks written.
-    static void ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
-                                            RegDirty* dirty = nullptr);
 
 public:
     explicit Liverpool();
@@ -112,14 +83,8 @@ public:
         submit_cv.wait(lk, [this] { return num_submits == 0; });
     }
 
-    /// bbport: also the draw recording thread and the fences it deferred are done (see
-    /// work_retired). sceGnmSubmitDone does not block the guest when this is true.
     bool IsGpuIdle() const {
-        static const bool use_retired = [] {
-            const char* env = std::getenv("BB_WORK_RETIRED");
-            return !(env && env[0] == '0');
-        }();
-        return num_submits == 0 && (work_retired || !use_retired);
+        return num_submits == 0;
     }
 
     void SetVoPort(Libraries::VideoOut::VideoOutPort* port) {
@@ -179,7 +144,7 @@ public:
         return gpu_id;
     }
 
-#if defined(__linux__) || defined(_WIN32)
+#ifdef __linux__
     u32 GetGpuCommandProcessorThreadId() {
         return gpu_tid;
     }
@@ -220,7 +185,7 @@ private:
 
     using CmdBuffer = std::pair<std::span<const u32>, std::span<const u32>>;
     CmdBuffer CopyCmdBuffers(std::span<const u32> dcb, std::span<const u32> ccb);
-    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb, u64 seq = NoSeq);
+    Task ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb);
     Task ProcessCeUpdate(std::span<const u32> ccb);
     template <bool is_indirect = false>
     Task ProcessCompute(std::span<const u32> acb, u32 vqid);
@@ -269,18 +234,14 @@ private:
     const bool guest_markers_enabled;
     std::jthread process_thread{};
     std::atomic<u32> num_submits{};
-    /// bbport: false from a submission until its draws and deferred fences are done (stage A
-    /// decrements num_submits once it has decoded a submission, before that). Under
-    /// submit_mutex with num_submits.
-    std::atomic<bool> work_retired{true};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::thread::id gpu_id;
-#if defined(__linux__) || defined(_WIN32)
-    u32 gpu_tid{};
+#ifdef __linux__
+    u32 gpu_tid;
 #endif
     s32 curr_qid{-1};
 };

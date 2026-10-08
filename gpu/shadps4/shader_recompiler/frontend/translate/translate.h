@@ -218,6 +218,7 @@ public:
     void V_CVT_F32_F64(const GcnInst& inst);
     void V_CVT_F64_F32(const GcnInst& inst);
     void V_CVT_F32_UBYTE(u32 index, const GcnInst& inst);
+    void V_TRUNC_F64(const GcnInst& inst);
     void V_FLOOR_F64(const GcnInst& inst);
     void V_FRACT_F32(const GcnInst& inst);
     void V_TRUNC_F32(const GcnInst& inst);
@@ -285,6 +286,7 @@ public:
     void V_ALIGNBIT_B32(const GcnInst& inst);
     void V_ALIGNBYTE_B32(const GcnInst& inst);
     void V_MUL_F64(const GcnInst& inst);
+    void V_MIN_F64(const GcnInst& inst);
     void V_MAX_F64(const GcnInst& inst);
     void V_MUL_LO_U32(const GcnInst& inst);
     void V_MUL_HI_U32(bool is_signed, const GcnInst& inst);
@@ -381,9 +383,6 @@ private:
     IR::U32 VMovRelSHelper(u32 src_vgprno, const IR::U32 m0);
     void VMovRelDHelper(u32 dst_vgprno, const IR::U32 src_val, const IR::U32 m0);
 
-    IR::F32 SelectCubeResult(const IR::F32& x, const IR::F32& y, const IR::F32& z,
-                             const IR::F32& x_res, const IR::F32& y_res, const IR::F32& z_res);
-
     void ExportRenderTarget(const GcnInst& inst);
     void ExportDepth(const GcnInst& inst);
     void LogMissingOpcode(const GcnInst& inst);
@@ -398,7 +397,7 @@ private:
     u32 next_vgpr_num;
     std::unordered_map<u32, IR::VectorReg> vgpr_map;
     std::array<IR::Attribute, MaxInterpVgpr> vgpr_to_interp{};
-    std::optional<FetchShaderData> fetch_data{};
+    FetchShaderData fetch_data{};
     bool opcode_missing = false;
     u32 pc{};
 };

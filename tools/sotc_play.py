@@ -60,6 +60,7 @@ def main():
     log = open(args.log, 'wb')
     process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     start = time.monotonic()
+    started = time.time()
     if args.from_main_loop:
         while process.poll() is None and time.monotonic() - start < args.total:
             if b'Starting main loop' in Path(args.log).read_bytes():
@@ -98,13 +99,19 @@ def main():
     raws = sorted((out / 'dump').glob('output_*.raw'))
     if raws:
         subprocess.run([sys.executable, str(ROOT / 'tools' / 'raw2png.py'), *map(str, raws)], stdout=subprocess.DEVNULL)
+    # Presenters without the raw dump save PNG screenshots (user/screenshots) instead.
+    shots = sorted(p for p in (ROOT / 'user' / 'screenshots').glob('*.png') if p.stat().st_mtime >= started)
+    for i, shot in enumerate(shots):
+        shutil.copy(shot, out / 'dump' / f'output_{i:03d}_shot.png')
+    pngs = sorted((out / 'dump').glob('output_*.png'))
+    if pngs:
         from PIL import Image
-        images = [Image.open(r.with_suffix('.png')).resize((640, 360)) for r in raws]
+        images = [Image.open(p).convert('RGB').resize((640, 360)) for p in pngs]
         sheet = Image.new('RGB', (1280, 360 * ((len(images) + 1) // 2)))
         for i, image in enumerate(images):
             sheet.paste(image, ((i % 2) * 640, (i // 2) * 360))
         sheet.save(out / 'dump' / 'sheet.png')
-        print(f'{len(raws)} frames -> out/dump/sheet.png')
+        print(f'{len(pngs)} frames -> out/dump/sheet.png')
 
 
 if __name__ == '__main__':

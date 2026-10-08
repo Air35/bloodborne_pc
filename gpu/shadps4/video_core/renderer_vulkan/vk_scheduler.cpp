@@ -1,19 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <thread>
-#include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include <unordered_map>
-#ifndef _WIN32
-#include <dlfcn.h>
-#endif
-#include <functional>
-
-#include "bbport_copy.h"
-#include "video_core/renderer_vulkan/vk_gpu_profiler.h"
-#include "bbport_toggles.h"
 #include <limits>
 #include "common/assert.h"
 #include "common/debug.h"
@@ -21,36 +8,22 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "bbport_threads.h"
 
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
-Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
+Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
-    // bbport: BB_VK_RECORD_THREAD=0 records on the calling thread.
-    const char* env = std::getenv("BB_VK_RECORD_THREAD");
-    if (threaded_recording && !(env && env[0] == '0')) {
-        record_chunk = AcquireChunk();
-        recorder_thread = std::jthread(std::bind_front(&Scheduler::RecorderThread, this));
-        recording_threaded = true;
-    }
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
-    AllocateWorkerCommandBuffers();
+    BeginSession();
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
 }
 
 Scheduler::~Scheduler() {
-    if (recorder_thread.joinable()) {
-        SyncRecording();
-        recorder_thread.request_stop();
-        recorder_cv.notify_all();
-        recorder_thread.join();
-    }
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
@@ -108,22 +81,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         .pStencilAttachment = db.has_stencil ? &stencil_attachment : nullptr,
     };
 
-    if (!recording_threaded) {
-        current_cmdbuf.beginRendering(rendering_info);
-        return;
-    }
-    // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
-            stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
-        info.pColorAttachments = color_attachments.data();
-        if (info.pDepthAttachment) {
-            info.pDepthAttachment = &depth_attachment;
-        }
-        if (info.pStencilAttachment) {
-            info.pStencilAttachment = &stencil_attachment;
-        }
-        cmdbuf.beginRendering(info);
-    });
+    CommandBuffer().beginRendering(rendering_info);
 }
 
 void Scheduler::EndRendering() {
@@ -131,188 +89,20 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
-    Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+    CommandBuffer().endRendering();
 }
 
-void Scheduler::TraceDirectRecording(void* caller) {
-    static const bool enabled = [] {
-        const char* env = std::getenv("BB_RECORDER_TRACE");
-        return env && env[0] == '1';
-    }();
-    if (!enabled) {
-        return;
+vk::CommandBuffer Scheduler::UploadCommandBuffer() {
+    auto& upload_cmdbuf = sessions.back().upload;
+    if (upload_cmdbuf) {
+        return upload_cmdbuf;
     }
-    static std::mutex mutex;
-    static std::unordered_map<void*, u64> callers;
-    static u64 calls;
-    std::scoped_lock lk{mutex};
-    ++callers[caller];
-    if (++calls % 2000) {
-        return;
-    }
-    std::vector<std::pair<u64, void*>> top;
-    for (const auto& [address, count] : callers) {
-        top.emplace_back(count, address);
-    }
-    std::ranges::sort(top, std::greater{});
-    for (size_t i = 0; i < std::min<size_t>(top.size(), 8); ++i) {
-#ifdef _WIN32
-        struct { const char* dli_fname; void* dli_fbase; } info{nullptr, nullptr};
-#else
-        Dl_info info{};
-        dladdr(top[i].second, &info);
-#endif
-        std::printf("Recorder sync caller: %llu x %s+0x%lx\n",
-                    static_cast<unsigned long long>(top[i].first),
-                    info.dli_fname ? info.dli_fname : "?",
-                    static_cast<unsigned long>(reinterpret_cast<uintptr_t>(top[i].second) -
-                                               reinterpret_cast<uintptr_t>(info.dli_fbase)));
-    }
-    callers.clear();
-}
-
-std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
-    std::scoped_lock lk{recorder_mutex};
-    if (free_chunks.empty()) {
-        return std::make_unique<RecordChunk>();
-    }
-    auto chunk = std::move(free_chunks.back());
-    free_chunks.pop_back();
-    return chunk;
-}
-
-void Scheduler::SignalAfterHostCopies(std::function<void()> signal) {
-    if (!IsRecordingDeferred()) {
-        WaitHostCopies();
-        signal();
-        return;
-    }
-    BbCopy::FlushBatch();
-    deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
-    Record([signal = std::move(signal), done = deferred_signals_done](vk::CommandBuffer) mutable {
-        BbCopy::AfterCopies([signal = std::move(signal), done = std::move(done)] {
-            signal();
-            done->fetch_add(1, std::memory_order_release);
-        });
-    });
-    KickRecording(true);
-}
-
-void Scheduler::WaitDeferredSignals() {
-    const u64 issued = deferred_signals_issued.load(std::memory_order_relaxed);
-    if (deferred_signals_done->load(std::memory_order_acquire) >= issued ||
-        BbToggle::Disabled(BbToggle::OrderedGuestWrites)) {
-        return;
-    }
-    BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
-    KickRecording(true);
-    while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
-        // Helps the copy threads the signals wait for.
-        BbCopy::WaitAsync();
-        std::this_thread::yield();
-    }
-}
-
-void Scheduler::WaitHostCopies() {
-    if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
-        BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
-        BbStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
-        KickRecording(true);
-        while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
-            std::this_thread::yield();
-        }
-    }
-    BbStats::WaitTimer timer{BbStats::copy_threads_wait_ns};
-    BbCopy::WaitAsync();
-}
-
-void Scheduler::KickRecording(bool force) {
-    if (!recording_threaded) {
-        return;
-    }
-    // Callers kick where nobody holds the raw command buffer: deferral resumes.
-    direct_mode = false;
-    // Batches of tens of KiB keep the queue handoff cheap relative to the work it carries.
-    if (!force && full_chunks.empty() && record_chunk->Size() < 32 * 1024) {
-        return;
-    }
-    if (full_chunks.empty() && record_chunk->Empty()) {
-        return;
-    }
-    bool wake;
-    {
-        std::scoped_lock lk{recorder_mutex};
-        for (auto& chunk : full_chunks) {
-            recorder_queue.push_back(std::move(chunk));
-        }
-        if (!record_chunk->Empty()) {
-            recorder_queue.push_back(std::move(record_chunk));
-        }
-        wake = recorder_sleeping;
-        queued_chunks.store(recorder_queue.size(), std::memory_order_release);
-    }
-    full_chunks.clear();
-    // A busy recorder picks the new chunks up by itself: waking it is a syscall per draw.
-    if (wake) {
-        recorder_cv.notify_one();
-    }
-    if (!record_chunk) {
-        record_chunk = AcquireChunk();
-    }
-}
-
-void Scheduler::SyncRecording() {
-    if (!recording_threaded) {
-        return;
-    }
-    KickRecording(true);
-    BbStats::WaitTimer timer{BbStats::sync_recording_ns};
-    std::unique_lock lk{recorder_mutex};
-    recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
-}
-
-void Scheduler::RecorderThread(std::stop_token stoken) {
-    Common::SetCurrentThreadName("bb:VkRecorder");
-    while (true) {
-        // Spin briefly before sleeping: the next chunk usually follows within microseconds,
-        // and a sleeping recorder costs the GPU thread a wake-up syscall per kick. With few
-        // hardware threads (Steam Deck: 8) the spin would take time from guest threads.
-        static const auto spin_time = std::chrono::microseconds(
-            BbThreads::Available() >= 12 ? 200 : 20);
-        const auto spin_until = std::chrono::steady_clock::now() + spin_time;
-        for (u32 spins = 1; queued_chunks.load(std::memory_order_acquire) == 0; ++spins) {
-            __builtin_ia32_pause();
-            // The clock is read every 256 pauses, not per iteration.
-            if (!(spins & 255) &&
-                (stoken.stop_requested() || std::chrono::steady_clock::now() >= spin_until)) {
-                break;
-            }
-        }
-        std::unique_ptr<RecordChunk> chunk;
-        {
-            std::unique_lock lk{recorder_mutex};
-            recorder_sleeping = true;
-            recorder_cv.wait(lk, stoken, [this] { return !recorder_queue.empty(); });
-            recorder_sleeping = false;
-            if (recorder_queue.empty()) {
-                return; // stop requested
-            }
-            chunk = std::move(recorder_queue.front());
-            recorder_queue.pop_front();
-            queued_chunks.store(recorder_queue.size(), std::memory_order_release);
-            recorder_busy = true;
-        }
-        // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
-        chunk->Execute(current_cmdbuf);
-        {
-            std::scoped_lock lk{recorder_mutex};
-            free_chunks.push_back(std::move(chunk));
-            recorder_busy = false;
-            if (recorder_queue.empty()) {
-                recorder_idle_cv.notify_all();
-            }
-        }
-    }
+    const vk::CommandBufferBeginInfo begin_info = {
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    };
+    upload_cmdbuf = command_pool.Commit();
+    Check(upload_cmdbuf.begin(begin_info));
+    return upload_cmdbuf;
 }
 
 void Scheduler::Flush(SubmitInfo& info) {
@@ -333,20 +123,12 @@ void Scheduler::Finish() {
     Wait(presubmit_tick);
 }
 
-void Scheduler::WaitSubmitted() {
-    const u64 tick = CurrentTick();
-    if (tick > 1) {
-        Wait(tick - 1);
-    }
-}
-
 void Scheduler::Wait(u64 tick) {
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
         Flush(info);
     }
-    BbStats::WaitTimer timer{BbStats::tick_wait_ns};
     work_semaphore.Wait(tick);
 }
 
@@ -417,36 +199,24 @@ void Scheduler::SubmitAheadAndWait() {
 }
 
 void Scheduler::PopPendingOperations() {
-    if (num_pending_ops.load(std::memory_order_acquire) == 0) {
-        return; // every draw comes here
-    }
     std::unique_lock lk(pending_ops_mutex);
-    // bbport: this runs on every draw and dispatch. Querying the timeline semaphore is an
-    // ioctl, so it is skipped when nothing waits and done once per 32 calls (~0.3 ms; reading
-    // the clock per draw instead was itself a hot spot).
-    if (pending_ops.empty()) {
-        return;
-    }
-    if (!work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        if ((++pending_polls & 31) != 0 && !BbToggle::Disabled(BbToggle::PendingPollLimit)) {
-            return;
-        }
-        work_semaphore.Refresh();
-    }
+    work_semaphore.Refresh();
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         pending_ops.front().callback();
         pending_ops.pop();
-        num_pending_ops.fetch_sub(1, std::memory_order_release);
     }
 }
 
-void Scheduler::AllocateWorkerCommandBuffers() {
+void Scheduler::BeginSession() {
+    EndSession();
+
+    auto& session = sessions.emplace_back();
+
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
-
-    current_cmdbuf = command_pool.Commit();
-    Check(current_cmdbuf.begin(begin_info));
+    session.primary = command_pool.Commit();
+    Check(session.primary.begin(begin_info));
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -459,6 +229,24 @@ void Scheduler::AllocateWorkerCommandBuffers() {
         new (profiler_scope) tracy::VkCtxScope{profiler_ctx, &scope_loc, current_cmdbuf, true};
     }
 #endif
+}
+
+void Scheduler::EndSession() {
+    if (sessions.empty()) {
+        return;
+    }
+
+    if (on_session) {
+        on_session();
+    }
+
+    const auto& session = sessions.back();
+    if (session.upload) {
+        Check(session.upload.end());
+    }
+
+    EndRendering();
+    Check(session.primary.end());
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
@@ -477,15 +265,18 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         on_submit(info);
     }
 
-    EndRendering();
-    if (auto* profiler = GpuProfiler::Get(); profiler && profiler->Records(this)) {
-        // Until the next submission's first timestamp: mostly the GPU waiting for it.
-        profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
+    EndSession();
+
+    std::vector<vk::CommandBuffer> cmd_buffers;
+    cmd_buffers.reserve(sessions.size() * 2);
+
+    for (const auto& session : sessions) {
+        if (session.upload) {
+            cmd_buffers.push_back(session.upload);
+        }
+        cmd_buffers.push_back(session.primary);
     }
-    SyncRecording();
-    // Guest memory copies into staging read by this submission (copy threads).
-    WaitHostCopies();
-    Check(current_cmdbuf.end());
+    sessions.clear();
 
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
@@ -512,8 +303,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .waitSemaphoreCount = info.num_wait_semas,
         .pWaitSemaphores = info.wait_semas.data(),
         .pWaitDstStageMask = wait_stage_masks.data(),
-        .commandBufferCount = 1U,
-        .pCommandBuffers = &current_cmdbuf,
+        .commandBufferCount = static_cast<u32>(cmd_buffers.size()),
+        .pCommandBuffers = cmd_buffers.data(),
         .signalSemaphoreCount = info.num_signal_semas,
         .pSignalSemaphores = info.signal_semas.data(),
     };
@@ -526,7 +317,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 
     work_semaphore.Refresh();
-    AllocateWorkerCommandBuffers();
+    BeginSession();
 
     // Apply pending operations
     PopPendingOperations();
@@ -559,13 +350,162 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
 }
 
 void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf) {
-    // A null command buffer only updates the dirty flags, exactly as recording would.
-    CommitWith(instance.IsDepthBoundsSupported(), instance.IsDynamicColorWriteMaskSupported(),
-               instance.IsAttachmentFeedbackLoopLayoutSupported(), [&](auto&& command) {
-                   if (cmdbuf) {
-                       command(cmdbuf);
-                   }
-               });
+    if (dirty_state.viewports) {
+        dirty_state.viewports = false;
+        cmdbuf.setViewportWithCount(viewports);
+    }
+    if (dirty_state.scissors) {
+        dirty_state.scissors = false;
+        cmdbuf.setScissorWithCount(scissors);
+    }
+    if (dirty_state.depth_test_enabled) {
+        dirty_state.depth_test_enabled = false;
+        cmdbuf.setDepthTestEnable(depth_test_enabled);
+    }
+    if (dirty_state.depth_write_enabled) {
+        dirty_state.depth_write_enabled = false;
+        // Note that this must be set in a command buffer even if depth test is disabled.
+        cmdbuf.setDepthWriteEnable(depth_write_enabled);
+    }
+    if (depth_test_enabled && dirty_state.depth_compare_op) {
+        dirty_state.depth_compare_op = false;
+        cmdbuf.setDepthCompareOp(depth_compare_op);
+    }
+    if (dirty_state.depth_bounds_test_enabled) {
+        dirty_state.depth_bounds_test_enabled = false;
+        if (instance.IsDepthBoundsSupported()) {
+            cmdbuf.setDepthBoundsTestEnable(depth_bounds_test_enabled);
+        }
+    }
+    if (depth_bounds_test_enabled && dirty_state.depth_bounds) {
+        dirty_state.depth_bounds = false;
+        if (instance.IsDepthBoundsSupported()) {
+            cmdbuf.setDepthBounds(depth_bounds_min, depth_bounds_max);
+        }
+    }
+    if (dirty_state.depth_bias_enabled) {
+        dirty_state.depth_bias_enabled = false;
+        cmdbuf.setDepthBiasEnable(depth_bias_enabled);
+    }
+    if (depth_bias_enabled && dirty_state.depth_bias) {
+        dirty_state.depth_bias = false;
+        cmdbuf.setDepthBias(depth_bias_constant, depth_bias_clamp, depth_bias_slope);
+    }
+    if (dirty_state.stencil_test_enabled) {
+        dirty_state.stencil_test_enabled = false;
+        cmdbuf.setStencilTestEnable(stencil_test_enabled);
+    }
+    if (stencil_test_enabled) {
+        if (dirty_state.stencil_front_ops && dirty_state.stencil_back_ops &&
+            stencil_front_ops == stencil_back_ops) {
+            dirty_state.stencil_front_ops = false;
+            dirty_state.stencil_back_ops = false;
+            cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFrontAndBack, stencil_front_ops.fail_op,
+                                stencil_front_ops.pass_op, stencil_front_ops.depth_fail_op,
+                                stencil_front_ops.compare_op);
+        } else {
+            if (dirty_state.stencil_front_ops) {
+                dirty_state.stencil_front_ops = false;
+                cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eFront, stencil_front_ops.fail_op,
+                                    stencil_front_ops.pass_op, stencil_front_ops.depth_fail_op,
+                                    stencil_front_ops.compare_op);
+            }
+            if (dirty_state.stencil_back_ops) {
+                dirty_state.stencil_back_ops = false;
+                cmdbuf.setStencilOp(vk::StencilFaceFlagBits::eBack, stencil_back_ops.fail_op,
+                                    stencil_back_ops.pass_op, stencil_back_ops.depth_fail_op,
+                                    stencil_back_ops.compare_op);
+            }
+        }
+        if (dirty_state.stencil_front_reference && dirty_state.stencil_back_reference &&
+            stencil_front_reference == stencil_back_reference) {
+            dirty_state.stencil_front_reference = false;
+            dirty_state.stencil_back_reference = false;
+            cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFrontAndBack,
+                                       stencil_front_reference);
+        } else {
+            if (dirty_state.stencil_front_reference) {
+                dirty_state.stencil_front_reference = false;
+                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eFront,
+                                           stencil_front_reference);
+            }
+            if (dirty_state.stencil_back_reference) {
+                dirty_state.stencil_back_reference = false;
+                cmdbuf.setStencilReference(vk::StencilFaceFlagBits::eBack, stencil_back_reference);
+            }
+        }
+        if (dirty_state.stencil_front_write_mask && dirty_state.stencil_back_write_mask &&
+            stencil_front_write_mask == stencil_back_write_mask) {
+            dirty_state.stencil_front_write_mask = false;
+            dirty_state.stencil_back_write_mask = false;
+            cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFrontAndBack,
+                                       stencil_front_write_mask);
+        } else {
+            if (dirty_state.stencil_front_write_mask) {
+                dirty_state.stencil_front_write_mask = false;
+                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eFront,
+                                           stencil_front_write_mask);
+            }
+            if (dirty_state.stencil_back_write_mask) {
+                dirty_state.stencil_back_write_mask = false;
+                cmdbuf.setStencilWriteMask(vk::StencilFaceFlagBits::eBack, stencil_back_write_mask);
+            }
+        }
+        if (dirty_state.stencil_front_compare_mask && dirty_state.stencil_back_compare_mask &&
+            stencil_front_compare_mask == stencil_back_compare_mask) {
+            dirty_state.stencil_front_compare_mask = false;
+            dirty_state.stencil_back_compare_mask = false;
+            cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFrontAndBack,
+                                         stencil_front_compare_mask);
+        } else {
+            if (dirty_state.stencil_front_compare_mask) {
+                dirty_state.stencil_front_compare_mask = false;
+                cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eFront,
+                                             stencil_front_compare_mask);
+            }
+            if (dirty_state.stencil_back_compare_mask) {
+                dirty_state.stencil_back_compare_mask = false;
+                cmdbuf.setStencilCompareMask(vk::StencilFaceFlagBits::eBack,
+                                             stencil_back_compare_mask);
+            }
+        }
+    }
+    if (dirty_state.primitive_restart_enable) {
+        dirty_state.primitive_restart_enable = false;
+        cmdbuf.setPrimitiveRestartEnable(primitive_restart_enable);
+    }
+    if (dirty_state.rasterizer_discard_enable) {
+        dirty_state.rasterizer_discard_enable = false;
+        cmdbuf.setRasterizerDiscardEnable(rasterizer_discard_enable);
+    }
+    if (dirty_state.cull_mode) {
+        dirty_state.cull_mode = false;
+        cmdbuf.setCullMode(cull_mode);
+    }
+    if (dirty_state.front_face) {
+        dirty_state.front_face = false;
+        cmdbuf.setFrontFace(front_face);
+    }
+    if (dirty_state.blend_constants) {
+        dirty_state.blend_constants = false;
+        cmdbuf.setBlendConstants(blend_constants.data());
+    }
+    if (dirty_state.color_write_masks) {
+        dirty_state.color_write_masks = false;
+        if (instance.IsDynamicColorWriteMaskSupported()) {
+            cmdbuf.setColorWriteMaskEXT(0, color_write_masks);
+        }
+    }
+    if (dirty_state.line_width) {
+        dirty_state.line_width = false;
+        cmdbuf.setLineWidth(line_width);
+    }
+    if (dirty_state.feedback_loop_enabled && instance.IsAttachmentFeedbackLoopLayoutSupported()) {
+        dirty_state.feedback_loop_enabled = false;
+        cmdbuf.setAttachmentFeedbackLoopEnableEXT(feedback_loop_enabled
+                                                      ? vk::ImageAspectFlagBits::eColor
+                                                      : vk::ImageAspectFlagBits::eNone);
+    }
 }
 
 } // namespace Vulkan

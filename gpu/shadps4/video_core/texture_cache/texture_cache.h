@@ -3,10 +3,6 @@
 
 #pragma once
 
-#include <atomic>
-#include <chrono>
-#include "bbport_toggles.h"
-
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -16,9 +12,9 @@
 #include <tsl/robin_map.h>
 
 #include "common/lru_cache.h"
+#include "common/multi_level_page_table.h"
 #include "common/slot_vector.h"
 #include "shader_recompiler/resource.h"
-#include "video_core/multi_level_page_table.h"
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/image_view.h"
@@ -48,11 +44,12 @@ class TextureCache {
 
     struct Traits {
         using Entry = ImageIds;
-        static constexpr size_t AddressSpaceBits = 40;
-        static constexpr size_t FirstLevelBits = 10;
-        static constexpr size_t PageBits = 20;
+        static constexpr size_t ADDRESS_SPACE_BITS = 40;
+        static constexpr size_t L1_BITS = 10;
+        static constexpr size_t PAGE_BITS = 20;
+        static constexpr bool NULL_CHECK = true;
     };
-    using PageTable = MultiLevelPageTable<Traits>;
+    using PageTable = Common::MultiLevelPageTable<Traits>;
 
 public:
     enum class BindingType : u32 {
@@ -89,17 +86,6 @@ public:
                  PageManager& tracker);
     ~TextureCache();
 
-    /// bbport: changes whenever an image is registered or unregistered.
-    [[nodiscard]] u64 RegistryGeneration() const noexcept {
-        return registry_generation.load(std::memory_order_acquire);
-    }
-
-    /// bbport: FindImage's access tick for an image found by a memoized lookup. The LRU touch
-    /// FindImage also does happens in UpdateImage (FindTexture), which every binding reaches.
-    void MarkFound(ImageId image_id) {
-        slot_images[image_id].tick_accessed_last = scheduler.CurrentTick();
-    }
-
     TileManager& GetTileManager() noexcept {
         return tile_manager;
     }
@@ -126,18 +112,8 @@ public:
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
-    /// bbport: a FindView result remembered by the caller for the same image and view info.
-    struct ViewMemo {
-        ImageId image_id{};
-        const void* backing = nullptr;
-        ImageViewId view_id{};
-    };
-
     /// Retrieves an image view with the properties of the specified image id.
-    /// `refresh` false: an image found out of date is used as is (the texture binding helper
-    /// checked it beforehand; only a guest write racing with the draw can make it so).
-    [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc,
-                                         ViewMemo* memo = nullptr, bool refresh = true);
+    [[nodiscard]] ImageView& FindTexture(ImageId image_id, const ImageDesc& desc);
 
     /// Retrieves the render target with specified properties
     [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);
@@ -145,37 +121,9 @@ public:
     /// Retrieves the depth target with specified properties
     [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
 
-    /// bbport: whether UpdateImage has nothing to do for this image (its fast path).
-    [[nodiscard]] bool IsUpToDate(ImageId image_id) const {
-        const Image& image = slot_images[image_id];
-        const u32 flags = std::atomic_ref<u32>(const_cast<u32&>(reinterpret_cast<const u32&>(image.flags)))
-                              .load(std::memory_order_acquire);
-        constexpr u32 Dirty = static_cast<u32>(ImageFlagBits::Dirty);
-        constexpr u32 Registered = static_cast<u32>(ImageFlagBits::Registered);
-        return (flags & (Dirty | Registered)) == Registered &&
-               image.track_addr == image.guest_begin && image.track_addr_end == image.guest_end &&
-               image.lru_touched_tick == gc_tick;
-    }
-
     /// Updates image contents if it was modified by CPU.
     void UpdateImage(ImageId image_id) {
-        // bbport: a clean image already tracked and touched in this GC period needs nothing.
-        // Every texture binding comes here; the mutex (shared with the fault handlers of the
-        // guest threads) was ~3% of the GPU thread. Flags are read atomically: an invalidation
-        // racing with this check races the same way with the locked path.
-        if (!BbToggle::Disabled(BbToggle::UpdateImageFastPath)) {
-            const Image& image = slot_images[image_id];
-            const u32 flags = std::atomic_ref<u32>(const_cast<u32&>(reinterpret_cast<const u32&>(image.flags)))
-                                  .load(std::memory_order_acquire);
-            constexpr u32 Dirty = static_cast<u32>(ImageFlagBits::Dirty);
-            constexpr u32 Registered = static_cast<u32>(ImageFlagBits::Registered);
-            if ((flags & (Dirty | Registered)) == Registered &&
-                image.track_addr == image.guest_begin && image.track_addr_end == image.guest_end &&
-                image.lru_touched_tick == gc_tick) {
-                return;
-            }
-        }
-        std::scoped_lock lock{mutex};
+        std::scoped_lock lk{mutex};
         Image& image = slot_images[image_id];
         TrackImage(image_id);
         TouchImage(image);
@@ -199,17 +147,11 @@ public:
     void RefreshImage(Image& image);
 
     /// Retrieves the sampler that matches the provided S# descriptor.
-    /// extra_lod_bias: bbport, added to the S#'s bias (reduced scene rendering).
     [[nodiscard]] vk::Sampler GetSampler(const AmdGpu::Sampler& sampler,
                                          AmdGpu::BorderColorBuffer border_color_base,
-                                         bool is_depth, float extra_lod_bias = 0.0f);
+                                         bool is_depth);
 
     /// Retrieves the image with the specified id.
-    Image* TryGetImage(ImageId id, u64 uid) {
-        if (!slot_images.is_allocated(id)) return nullptr;
-        auto& image = slot_images[id];
-        return !uid || image.image_uid == uid ? &image : nullptr;
-    }
     [[nodiscard]] Image& GetImage(ImageId id) {
         auto& image = slot_images[id];
         TouchImage(image);
@@ -335,8 +277,8 @@ private:
     template <typename Func>
     static void ForEachPage(PAddr addr, size_t size, Func&& func) {
         static constexpr bool RETURNS_BOOL = std::is_same_v<std::invoke_result<Func, u64>, bool>;
-        const u64 page_end = (addr + size - 1) >> Traits::PageBits;
-        for (u64 page = addr >> Traits::PageBits; page <= page_end; ++page) {
+        const u64 page_end = (addr + size - 1) >> Traits::PAGE_BITS;
+        for (u64 page = addr >> Traits::PAGE_BITS; page <= page_end; ++page) {
             if constexpr (RETURNS_BOOL) {
                 if (func(page)) {
                     break;
@@ -409,8 +351,6 @@ private:
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
     u64 total_used_memory = 0;
-    u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
-    std::chrono::steady_clock::time_point gc_report_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;
@@ -424,24 +364,6 @@ private:
     const bool readback_linear_images;
     PageTable page_table;
     std::mutex mutex;
-    // bbport: FindImage results for unchanged image registrations (guarded by `mutex`).
-    struct FindImageCacheEntry {
-        VAddr address = 0;
-        u64 size = 0;
-        Extent3D extent{};
-        vk::Format format{};
-        AmdGpu::ImageType type{};
-        bool exact_fmt = false;
-        BindingType binding{};
-        u32 levels = 0;
-        u32 layers = 0;
-        u64 generation = ~0ULL;
-        ImageId image_id{};
-        int view_mip = -1;
-        int view_slice = -1;
-    };
-    std::array<FindImageCacheEntry, 1024> find_image_cache{};
-    std::atomic<u64> registry_generation{0};
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
     struct MetaDataInfo {

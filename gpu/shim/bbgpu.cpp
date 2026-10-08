@@ -30,6 +30,7 @@
 #include "core/emulator_settings.h"
 #include "core/signals.h"
 #include "sdl_window.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" {
@@ -306,9 +307,17 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
 
 extern "C" int bbgpu_is_gpu_side_thread(void) {
     auto* rasterizer = Core::Memory::Instance()->GetRasterizer();
-    return rasterizer && rasterizer->IsGpuSideThread() ? 1 : 0;
+    return rasterizer && std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread()
+               ? 1
+               : 0;
 }
 
+extern "C" void bbgpu_register_guest_stack(uintptr_t address, uint64_t size) {
+    VideoCore::RegisterGuestStack(address, size);
+}
+extern "C" void bbgpu_register_guest_stack_end(uintptr_t address, uint64_t size) {
+    VideoCore::UnregisterGuestStack(address, size);
+}
 extern "C" int bbgpu_readbacks_mode(void) {
     return static_cast<int>(EmulatorSettings.GetReadbacksMode());
 }
@@ -367,7 +376,12 @@ void TriggerCapture() {}
 void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return false; }
 void RequestScreenshot(ScreenshotRequest) {}
-u32 ConsumeGameOnlyScreenshotRequests() { return 0; }
+// sotc port: BB_FRAME_DUMP_TRIGGER=<file>: when the file appears it is removed and the next
+// presented game frame is saved as a PNG screenshot (user screenshots directory).
+u32 ConsumeGameOnlyScreenshotRequests() {
+    static const char* trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
+    return trigger && std::remove(trigger) == 0 ? 1 : 0;
+}
 bool ConsumeImageDumpRequest() { return false; } // sotc: SOTC_DUMP needs RenderDoc hooks
 u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }

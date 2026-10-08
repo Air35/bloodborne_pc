@@ -43,7 +43,6 @@ struct GraphicsPipelineKey {
     u8 depth_samples;
     std::array<u8, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
     u32 mrt_mask;
-    u32 motion_vectors = 0;
     struct {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;
@@ -89,12 +88,12 @@ public:
                      vk::PipelineCache pipeline_cache,
                      std::span<const Shader::Info*, MaxShaderStages> stages,
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
-                     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader,
+                     const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
                      bool preloading);
     ~GraphicsPipeline();
 
-    const std::optional<const Shader::Gcn::FetchShaderData>& GetFetchShader() const noexcept {
+    const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
         return fetch_shader;
     }
 
@@ -114,7 +113,7 @@ private:
 
 private:
     GraphicsPipelineKey key;
-    std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    Shader::Gcn::FetchShaderData fetch_shader{};
 };
 
 struct ClipDistanceShaderKey {

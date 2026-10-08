@@ -1037,11 +1037,7 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
     default:
-        // sotc: garbage descriptors of bindings the shader never reads (level streaming) must
-        // not abort the compile; decode as the only valid format.
-        LOG_WARNING(Render_Recompiler, "Unsupported 10_11_11 number format {}, decoded as float",
-                    number_format);
-        return Inst(Opcode::UnpackUfloat10_11_11, value);
+        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
     }
 }
 
@@ -2186,8 +2182,20 @@ void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& 
     Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color);
 }
 
-[[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& cube_coords) {
-    return Inst<F32>(Opcode::CubeFaceIndex, cube_coords);
+[[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceIndex, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceCoordS(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceCoordS, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceCoordT(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceCoordT, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceMajorAxis(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceMajorAxis, x, y, z);
 }
 
 // Debug print maps to SPIRV's NonSemantic DebugPrintf instruction

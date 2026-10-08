@@ -26,6 +26,13 @@ struct SharpFetch {
     static constexpr std::size_t N = sizeof(T) / sizeof(u32);
     static_assert(N <= 8);
 
+    enum class Summary : u8 {
+        SingleLoad,
+        MultiLoad,
+        Invalid,
+    };
+
+    Summary summary{Summary::MultiLoad};
     std::array<u32, N> immediates;
     std::array<SharpLocation, N> offsets;
     u8 load_mask;
@@ -35,12 +42,13 @@ struct SharpFetch {
     template <u32 num_dwords = N>
         requires(num_dwords <= N)
     constexpr bool Fetch(const u32* flatbuf, T* out) const {
-        u8 mask = load_mask;
-        for (u32 i = 0; i < num_dwords; i++) {
-            if (offsets[i] == UNKNOWN_LOCATION) {
-                return false;
-            }
+        if (summary == Summary::SingleLoad) [[likely]] {
+            std::memcpy(out, flatbuf + offsets[0], num_dwords * sizeof(u32));
+            return true;
+        } else if (summary == Summary::Invalid) [[unlikely]] {
+            return false;
         }
+        u8 mask = load_mask;
         std::array<u32, num_dwords> out_dw;
         for (u32 i = 0; i < num_dwords; i++) {
             out_dw[i] = (mask & 1) ? flatbuf[offsets[i]] : immediates[i];
@@ -90,13 +98,13 @@ struct BufferResource {
 
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
         AmdGpu::Buffer buffer;
-        if (!sharp_fetch.Fetch(info.FlatUserData().data(), &buffer)) {
+        if (!sharp_fetch.Fetch(info.flattened_ud_buf.data(), &buffer)) {
             return AmdGpu::Buffer::Null();
         }
         if (post_op == SharpFetchPostOp::BitwiseOrDw1WithImm) {
             reinterpret_cast<u32*>(&buffer)[1] |= post_op_dw1_mask;
         } else if (post_op == SharpFetchPostOp::OffsetByProgramBase) {
-            buffer.base_address += info.ProgramBase();
+            buffer.base_address += info.pgm_base;
         }
         if (!buffer.Valid()) {
             return AmdGpu::Buffer::Null();
@@ -119,16 +127,13 @@ struct ImageResource {
     bool is_array{};
     bool is_written{};
     bool is_r128{};
-    /// bbport: read other than by normalized sampling without offsets (texel loads, size
-    /// queries, offsets): needs the native-size image, not a reduced scene proxy.
-    bool needs_native{};
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
-        if (!Fetch(info.FlatUserData().data(), &image)) {
+        if (!Fetch(info.flattened_ud_buf.data(), &image)) {
             return AmdGpu::Image::Null(is_depth);
         }
         if (post_op == SharpFetchPostOp::ConvertCubeTo2DArray) {
@@ -177,9 +182,9 @@ struct SamplerResource {
 
     constexpr AmdGpu::Sampler GetSharp(const auto& info) const noexcept {
         AmdGpu::Sampler sampler{};
-        sharp_fetch.Fetch(info.FlatUserData().data(), &sampler);
+        sharp_fetch.Fetch(info.flattened_ud_buf.data(), &sampler);
         if (post_op == SharpFetchPostOp::DisableAnisoIfSingleLod) {
-            const u32 tsharp_dw3 = info.FlatUserData()[post_op_tsharp_dw3_off];
+            const u32 tsharp_dw3 = info.flattened_ud_buf[post_op_tsharp_dw3_off];
             if (((tsharp_dw3 >> 12) & 0xff) == 0) {
                 sampler.max_aniso.Assign(AmdGpu::AnisoRatio::One);
             }
@@ -214,19 +219,13 @@ struct PushData {
     static constexpr u32 YOffsetIndex = 1;
     static constexpr u32 XScaleIndex = 2;
     static constexpr u32 YScaleIndex = 3;
-    static constexpr u32 UdRegsIndex = 4;
-    static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
-    static constexpr u32 MotionParamIndex = BufOffsetIndex + NUM_BUFFERS / 16 + 1;
-    static constexpr u32 SceneSizeIndex = MotionParamIndex + 1;
+    static constexpr u32 BufOffsetIndex = 4;
 
     float xoffset;
     float yoffset;
     float xscale;
     float yscale;
-    std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
-    u32 motion_param; ///< bbport: object motion parameter index (0: off)
-    u32 scene_size; ///< reduced width | height << 16; zero means native pixel coordinates
 
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());

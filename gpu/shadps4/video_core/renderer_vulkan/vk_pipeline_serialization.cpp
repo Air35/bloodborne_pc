@@ -13,11 +13,10 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-// sotc: bumped past both the bbport and the shadPS4 SotC fork generations: caches of either
-// build are dropped.
-static constexpr u32 ShaderBinaryVersion = 30u;
-static constexpr u32 ShaderMetaVersion = 30u;
-static constexpr u32 PipelineKeyVersion = 30u;
+// Above both lines before the upstream merge: generation changed, so old caches are dropped.
+static constexpr u32 ShaderBinaryVersion = 21u;
+static constexpr u32 ShaderMetaVersion = 12u;
+static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
 namespace Vulkan {
@@ -95,7 +94,6 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 }
 
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
-                    std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                     Shader::StageSpecialization& spec, size_t& perm_idx) {
     Serialization::Reader meta{ar};
 
@@ -116,18 +114,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     meta.Read(perm_idx);
 
     spec.Deserialize(ar);
-    if (!info.Deserialize(ar)) {
-        return false;
-    }
-
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return false;
-    }
-
-    fetch_shader_data = spec.fetch_shader_data;
-    return true;
+    return info.Deserialize(ar);
 }
 
 void ComputePipelineKey::Serialize(Serialization::Archive& ar) const {
@@ -154,9 +141,9 @@ bool ComputePipeline::SerializationSupport::Deserialize(Serialization::Archive& 
 bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
     // Stages left over from a pipeline whose load failed half-way must not leak into this one:
     // a stale entry for a stage this key does not use would be bound without user data.
-    sel.infos.fill(nullptr);
-    sel.modules.fill(nullptr);
-    sel.fetch_shader = std::nullopt;
+    infos.fill(nullptr);
+    modules.fill(nullptr);
+    fetch_shader = nullptr;
     compute_key.Deserialize(ar);
 
     ComputePipeline::SerializationSupport sdata{};
@@ -180,10 +167,10 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
 
     it.value() =
         std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
-                                          compute_key, *sel.infos[0], sel.modules[0], sdata, true);
+                                          compute_key, *infos[0], modules[0], sdata, true);
 
-    sel.infos.fill(nullptr);
-    sel.modules.fill(nullptr);
+    infos.fill(nullptr);
+    modules.fill(nullptr);
 
     return true;
 }
@@ -225,18 +212,18 @@ bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive&
 }
 
 bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
-    // sotc: stages left over from a pipeline whose load failed half-way must not leak into this
-    // one: a stale entry for a stage this key does not use would be bound without user data.
-    sel.infos.fill(nullptr);
-    sel.modules.fill(nullptr);
-    sel.fetch_shader = std::nullopt;
-    sel.graphics_key.Deserialize(ar);
+    // Stages left over from a pipeline whose load failed half-way must not leak into this one:
+    // a stale entry for a stage this key does not use would be bound without user data.
+    infos.fill(nullptr);
+    modules.fill(nullptr);
+    fetch_shader = nullptr;
+    graphics_key.Deserialize(ar);
 
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
 
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
-        const auto& hash = sel.graphics_key.stage_hashes[stage_idx];
+        const auto& hash = graphics_key.stage_hashes[stage_idx];
         if (!hash) {
             continue;
         }
@@ -255,16 +242,16 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         }
     }
 
-    const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
+    const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     ASSERT(is_new);
 
     it.value() = std::make_unique<GraphicsPipeline>(
-        instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
-        sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, true);
+        instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
+        runtime_infos, fetch_shader, modules, sdata, true);
 
-    sel.infos.fill(nullptr);
-    sel.modules.fill(nullptr);
-    sel.fetch_shader.reset();
+    infos.fill(nullptr);
+    modules.fill(nullptr);
+    fetch_shader = nullptr;
 
     return true;
 }
@@ -274,7 +261,7 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx)) {
+    if (!LoadShaderMeta(ar, program->info, spec, perm_idx)) {
         return false;
     }
 
@@ -328,8 +315,11 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     spec.info = &it_pgm.value()->info;
     it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
 
-    sel.infos[stage] = &it_pgm.value()->info;
-    sel.modules[stage] = module;
+    infos[stage] = &it_pgm.value()->info;
+    modules[stage] = module;
+    if (auto& fetch = it_pgm.value()->modules[perm_idx].spec.fetch_shader_data; !fetch.Empty()) {
+        fetch_shader = &fetch;
+    }
 
     return true;
 }
@@ -354,24 +344,19 @@ void PipelineCache::WarmUp() {
         return;
     }
     if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render, "Pipeline cache profile has unexpected size ({} != {})",
+        LOG_WARNING(Render,
+                    "Pipeline cache profile has unexpected size ({} != {}). Ignoring the cache",
                     profile_data.size(), sizeof(Shader::Profile));
+        Storage::DataBase::Instance().Close();
+        return;
     }
+
     Shader::Profile cached_profile{};
-    if (profile_data.size() == sizeof(Shader::Profile)) {
-        std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
-    }
-    if (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile) {
-        // bbport: upstream closed the cache for the session here, so it was never rewritten
-        // and every later session compiled every shader again (stutters on each new area).
-        // Start a fresh cache for this build and GPU instead.
-        LOG_WARNING(Render, "Pipeline cache isn't compatible with current system: rebuilding it");
-        Storage::DataBase::Instance().Clear();
-        Storage::DataBase::Instance().FinishPreload();
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
-        Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
+    std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
+    if (cached_profile != profile) {
+        LOG_WARNING(Render,
+                    "Pipeline cache isn't compatible with current system. Ignoring the cache");
+        Storage::DataBase::Instance().Close();
         return;
     }
 
@@ -403,9 +388,9 @@ void PipelineCache::WarmUp() {
                 }
             } catch (const Serialization::CorruptedData&) {
                 // A truncated entry (e.g. from a killed session) is just skipped.
-                sel.infos.fill(nullptr);
-                sel.modules.fill(nullptr);
-                sel.fetch_shader = std::nullopt;
+                infos.fill(nullptr);
+                modules.fill(nullptr);
+                fetch_shader = nullptr;
                 result = false;
             }
 
@@ -507,9 +492,9 @@ void StageSpecialization::Serialize(Serialization::Archive& ar) const {
 
     spec.Write(bitset.to_string());
 
-    if (fetch_shader_data) {
-        spec.Write(sizeof(*fetch_shader_data));
-        fetch_shader_data->Serialize(ar);
+    if (!fetch_shader_data.Empty()) {
+        spec.Write(sizeof(fetch_shader_data));
+        fetch_shader_data.Serialize(ar);
     } else {
         spec.Write(size_t{0});
     }

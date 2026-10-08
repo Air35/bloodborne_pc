@@ -3,9 +3,9 @@
 
 #pragma once
 
+#include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
-#include "video_core/renderer_vulkan/vk_barrier_tracker.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 #include "video_core/texture_cache/image.h"
 #include "video_core/texture_cache/types.h"
@@ -16,9 +16,6 @@ class BlitHelper;
 
 namespace Vulkan {
 
-class GpuProfiler;
-class SceneTargets;
-
 class Instance;
 class Scheduler;
 
@@ -26,10 +23,6 @@ class Runtime {
 public:
     explicit Runtime(const Instance& instance, Scheduler& scheduler);
     ~Runtime() = default;
-
-    Scheduler& GetScheduler() {
-        return scheduler;
-    }
 
     const Instance& GetInstance() const {
         return instance;
@@ -40,7 +33,6 @@ public:
     }
 
     void TickFrame();
-    SceneTargets* scene_targets = nullptr;
 
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
@@ -53,19 +45,6 @@ public:
                  vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                  std::optional<VideoCore::SubresourceRange> subres_range = {});
 
-    /// BB_GPU_PROFILE: a profiler segment for a transfer of `image` while it lives; the
-    /// segment it interrupted continues afterwards.
-    class TransferMark {
-    public:
-        TransferMark(Runtime& runtime, const char* what, const VideoCore::Image& image);
-        ~TransferMark();
-        TransferMark(const TransferMark&) = delete;
-        TransferMark& operator=(const TransferMark&) = delete;
-
-    private:
-        GpuProfiler* profiler = nullptr;
-        u64 resume = 0;
-    };
     void UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
                      std::span<const vk::BufferImageCopy> upload_copies);
     void DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
@@ -97,39 +76,24 @@ public:
 
     void FlushBarriers();
 
-    /// bbport: runs before this thread changes image state (layouts, pending image
-    /// barriers): the rasterizer joins its texture binding helper there (BindHelper).
-    void SetImageAccessHook(void (*hook)(void*), void* context) {
-        image_access_hook = hook;
-        image_access_context = context;
-    }
-    void BeforeImageAccess() {
-        if (image_access_hook) {
-            image_access_hook(image_access_context);
-        }
-    }
+private:
+    void MakeCurrent(const VideoCore::Buffer* handle);
 
 private:
-    void (*image_access_hook)(void*) = nullptr;
-    void* image_access_context = nullptr;
     const Instance& instance;
     Scheduler& scheduler;
     std::unique_ptr<VideoCore::BlitHelper> blit_helper;
     StagingBufferPool staging_pool;
-    BarrierTracker barrier_tracker;
+    struct BufferBarriers {
+        const VideoCore::Buffer* handle;
+        using AccessList = IntervalList<Interval>;
+        AccessList read_ranges;
+        AccessList write_ranges;
+    };
+    BufferBarriers* resource{};
+    std::vector<BufferBarriers> resources;
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
-    // bbport: ranges inserted into barrier_tracker since its last Clear(); re-inserting a
-    // contained range is a no-op, and draws re-bind the same ranges constantly.
-    struct AccessMemo {
-        u64 resource;
-        u64 start;
-        u64 end;
-        u32 epoch;
-        u32 access;
-    };
-    std::array<AccessMemo, 512> access_memo{};
-    u32 access_epoch = 1;
 };
 
 } // namespace Vulkan

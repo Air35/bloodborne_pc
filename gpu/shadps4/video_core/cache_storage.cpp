@@ -151,20 +151,9 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                     LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
                 }
             } else {
-                // bbport: write beside and rename into place, so a game that ends during the
-                // write (the queue is not drained at exit) never leaves a truncated blob that
-                // the next start would load.
                 using namespace Common::FS;
-                auto temp{path};
-                temp += ".tmp";
-                {
-                    const auto file = IOFile{temp, FileAccessMode::Create};
-                    if (!file.IsOpen() || file.Write(v) != v.size()) {
-                        return;
-                    }
-                }
-                std::error_code error;
-                std::filesystem::rename(temp, path, error);
+                const auto file = IOFile{path, FileAccessMode::Create};
+                file.Write(v);
             }
         }};
         std::scoped_lock lock{m_request};
@@ -268,20 +257,6 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
             }
         }
     }
-}
-
-void DataBase::Clear() {
-    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
-        return;
-    }
-    std::error_code ec;
-    u64 removed = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(cache_path, ec)) {
-        if (entry.is_regular_file(ec) && std::filesystem::remove(entry.path(), ec)) {
-            ++removed;
-        }
-    }
-    LOG_WARNING(Render, "Pipeline cache cleared ({} files): it is rebuilt for this build", removed);
 }
 
 void DataBase::FinishPreload() {

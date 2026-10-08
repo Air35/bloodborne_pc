@@ -3,8 +3,6 @@
 
 #pragma once
 
-#include "bbport_copy.h"
-
 #include <chrono>
 #include <deque>
 #include <unordered_map>
@@ -40,18 +38,13 @@ class PageManager;
 
 class BufferCache {
     static constexpr u64 ADDRESS_SPACE_BITS = 40;
-    // bbport: arena pages are 4 GiB unless the driver's buffer size limit is lower (AMD's
-    // Windows driver: 2 GiB); an arena spans up to two pages, so they shrink to half the limit.
-    static constexpr u64 MAX_ARENA_PAGE_BITS = 32;
-    static constexpr u64 MIN_ARENA_PAGE_BITS = 30;
-    static constexpr u64 MAX_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - MIN_ARENA_PAGE_BITS);
+    static constexpr u64 ARENA_PAGE_BITS = 32;
+    static constexpr u64 ARENA_PAGE_SIZE = u64{1} << ARENA_PAGE_BITS;
+    static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
-
-public:
-    /// Read-only bindings up to this size are copied into a stream buffer (bbport: public for
-    /// the draw pipeline's constant ring).
     static constexpr u64 STREAM_THRESHOLD = 16_KB;
 
+public:
     explicit BufferCache(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
                          Vulkan::Runtime& runtime, AmdGpu::Liverpool* liverpool,
                          TextureCache& texture_cache, PageManager& tracker);
@@ -73,7 +66,7 @@ public:
     }
 
     /// Retrieves the stream buffer.
-    StreamBuffer& GetStreamBuffer() noexcept {
+    [[nodiscard]] StreamBuffer& GetStreamBuffer() noexcept {
         return stream_buffer;
     }
 
@@ -82,16 +75,10 @@ public:
         return block_shift;
     }
 
+    void TickFrame();
+
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
-
-    /// sotc: the guest unmapped the range: its GPU-written data is dropped, never read back.
-    /// A readback would land in whatever the range maps by the time it runs (the runtime
-    /// applies a whole batch of unmaps and maps before the hooks), overwriting fresh data.
-    void DiscardMemory(VAddr device_addr, u64 size);
-
-    /// bbport: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
-    void ExtendWriteFault(VAddr device_addr);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
@@ -110,8 +97,6 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
-    /// Processes the fault buffer.
-    void ProcessFaultBuffer();
     /// Byte-precise: true when a written binding covered any byte of the range since its last
     /// readback. Readbacks copy only these bytes, so the backing holds every other byte.
     /// Command processor thread only.
@@ -161,24 +146,10 @@ private:
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
 
-    /// bbport: batched small copies on the copy threads (BbCopy::QueueCopy).
-    static void RunGuestCopy(const BbCopy::Item& item);
-    void SmallGuestCopy(const BbCopy::Item& item);
-
-    const Buffer* UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,
-                               size_t total_size_bytes);
-
     bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
-    // bbport: texel buffer ranges known not to alias an image, per image registry generation.
-    struct ImageMiss {
-        VAddr address = 0;
-        u32 size = 0;
-        u64 generation = ~0ULL;
-    };
-    std::array<ImageMiss, 256> image_miss_cache{};
     Vulkan::Runtime& runtime;
     Vulkan::StagingBufferPool& staging_pool;
     AmdGpu::Liverpool* liverpool;
@@ -192,11 +163,9 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    bool fault_process_pending{};
 
-    std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
-    u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
-    u64 arena_page_size{u64{1} << MAX_ARENA_PAGE_BITS};
-    u64 num_arena_pages{u64{1} << (ADDRESS_SPACE_BITS - MAX_ARENA_PAGE_BITS)};
+    std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;

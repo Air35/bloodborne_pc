@@ -3,6 +3,7 @@
  * moves the guest's callee-saved registers and stack pointer; the host thread stays the same,
  * so the current fiber context lives in host TLS instead of the PS4 TCB. */
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -188,7 +189,10 @@ static int32_t fiber_refused(const char *call, const Fiber *f, int32_t error) {
                 f ? atomic_load(&((Fiber *)f)->state) : 0,(unsigned)error);
     return error;
 }
+/* The GPU page tracker must never protect a fiber stack: a fault there could not push its
+ * exception frame and Windows ends the process without running any handler. */
 static void stack_prepare(Fiber *f) {
+    bbgpu_register_guest_stack((uintptr_t)f->addr_context,f->size_context);
     f->context_start=f->addr_context;
     f->context_end=(unsigned char *)f->addr_context+f->size_context;
     *(uint64_t *)f->addr_context=STACK_SIGNATURE;
@@ -243,6 +247,9 @@ static int32_t initialize(Fiber *f, const char *name, FiberEntry entry, uint64_t
     f->context=NULL; f->flags=flags;
     f->magic_start=SIGNATURE0; f->magic_end=SIGNATURE1;
     if (addr) stack_prepare(f);
+    static int log_stacks=-1;
+    if (log_stacks<0) log_stacks=getenv("SOTC_FIBER_STACKS")!=NULL;
+    if (log_stacks) fprintf(stderr,"FIBER '%s' stack %p-%p\n",f->name,addr,(void *)((unsigned char *)addr+size));
     atomic_store(&f->state,STATE_IDLE);
     atomic_fetch_add(&fibers_created,1);
     return 0;
@@ -267,6 +274,7 @@ static ABI int32_t fiber_finalize(Fiber *f) {
     if (!valid(f)) return FIBER_ERROR_INVALID;
     uint32_t expected=STATE_IDLE;
     if (!atomic_compare_exchange_strong(&f->state,&expected,STATE_TERMINATED)) return fiber_refused("sceFiberFinalize",f,FIBER_ERROR_STATE);
+    if (f->addr_context) bbgpu_register_guest_stack_end((uintptr_t)f->addr_context,f->size_context);
     return 0;
 }
 static ABI int32_t fiber_run_impl(Fiber *f, void *addr, uint64_t size, uint64_t arg, uint64_t *arg_on_return) {

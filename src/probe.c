@@ -291,9 +291,31 @@ __asm__(".text\n.p2align 4\n.globl call_on_stack\ncall_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #define ALT_STACK_SIZE (512u * 1024u)
 static _Thread_local unsigned char *alt_stack;
+/* BB_FAULT_RING=<file>: every exception is recorded in a file-backed ring so the last ones
+ * survive a process the kernel kills without dispatching (diagnostics). */
+struct fault_entry { uint64_t tick, tid, code, addr, rip, rsp, region, below; }; /* region/below: TEB stack limit/base */
+static struct fault_entry *fault_ring;
+static volatile LONG fault_ring_next;
+static void fault_ring_open(const char *path) {
+    HANDLE file=CreateFileA(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,0,NULL);
+    if (file==INVALID_HANDLE_VALUE) return;
+    HANDLE map=CreateFileMappingA(file,NULL,PAGE_READWRITE,0,8192*sizeof(struct fault_entry),NULL);
+    if (map) fault_ring=MapViewOfFile(map,FILE_MAP_WRITE,0,0,0);
+}
+static void fault_ring_add(const EXCEPTION_POINTERS *info) {
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    struct fault_entry *e=&fault_ring[(InterlockedIncrement(&fault_ring_next)-1)&8191];
+    const uintptr_t rsp=(uintptr_t)info->ContextRecord->Rsp;
+    const NT_TIB *tib=(const NT_TIB *)NtCurrentTeb();
+    e->tick=GetTickCount64(); e->tid=GetCurrentThreadId(); e->code=record->ExceptionCode;
+    e->addr=record->NumberParameters>=2 ? record->ExceptionInformation[1] : 0;
+    e->rip=info->ContextRecord->Rip; e->rsp=rsp;
+    e->region=(uintptr_t)tib->StackLimit; e->below=(uintptr_t)tib->StackBase;
+}
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
     const uintptr_t sp=(uintptr_t)__builtin_frame_address(0);
+    if (fault_ring) fault_ring_add(info);
     if (sp>=(uintptr_t)tib->StackLimit && sp<(uintptr_t)tib->StackBase) return vectored_fault_impl(info);
     if (!alt_stack) alt_stack=VirtualAlloc(NULL,ALT_STACK_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
     if (!alt_stack) return vectored_fault_impl(info);
@@ -632,6 +654,7 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
+    if (getenv("BB_FAULT_RING")) fault_ring_open(getenv("BB_FAULT_RING"));
     if (getenv("BB_STACKS_TRIGGER")) CreateThread(NULL,0,stacks_watcher,(void *)getenv("BB_STACKS_TRIGGER"),0,NULL);
     SetUnhandledExceptionFilter(unhandled_fault);
     if (getenv("BB_STRICT_HANDLES")) {

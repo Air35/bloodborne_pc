@@ -48,11 +48,6 @@ public:
         return m_ptr == m_end;
     }
 
-    // bbport: current read position (fetch shader parse cache)
-    const u32* position() const {
-        return m_ptr;
-    }
-
 private:
     const u32* m_ptr{};
     const u32* m_end{};

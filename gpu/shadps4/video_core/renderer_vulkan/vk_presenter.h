@@ -3,11 +3,10 @@
 
 #pragma once
 
-#include <deque>
-
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
+#include <imgui.h> // sotc port: ImTextureID only
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -38,6 +37,7 @@ struct Frame {
     bool is_hdr{false};
     u8 id{};
 
+    ImTextureID imgui_texture;
 };
 
 enum SchedulerType {
@@ -121,7 +121,6 @@ private:
     HostPasses::PostProcessingPass pp_pass;
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
-    std::deque<u64> recent_frame_ticks; ///< bbport: BB_FRAMES_AHEAD bound (PrepareFrame)
     Scheduler present_scheduler;
     Scheduler flip_scheduler;
     Swapchain swapchain;

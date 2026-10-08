@@ -4,15 +4,14 @@
 #include <limits>
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
-#include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
 #include "shader_recompiler/ir/operand_helper.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
-#include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/ir/reinterpret.h"
 #include "shader_recompiler/profile.h"
+#include "shader_recompiler/resource.h"
 #include "video_core/amdgpu/resource.h"
 
 namespace Shader::Optimization {
@@ -122,7 +121,6 @@ public:
         auto& image = image_resources[index];
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
-        image.needs_native |= desc.needs_native;
         return index;
     }
 
@@ -188,6 +186,7 @@ SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
 
 template <typename T>
 SharpFetch<T> ConstructSharpFetch(const SharpReference& sharp) {
+    using Summary = SharpFetch<T>::Summary;
     SharpFetch<T> sharp_fetch{};
     for (u32 i = 0; i < sharp.num_dwords; i++) {
         auto dword = sharp.dwords[i];
@@ -196,7 +195,19 @@ SharpFetch<T> ConstructSharpFetch(const SharpReference& sharp) {
         } else {
             sharp_fetch.offsets[i] = SharpLocationFromSource(dword.Inst());
             sharp_fetch.load_mask |= (1 << i);
+            if (sharp_fetch.offsets[i] == UNKNOWN_LOCATION) {
+                sharp_fetch.summary = Summary::Invalid;
+            }
         }
+    }
+    if (sharp_fetch.summary != Summary::Invalid) {
+        const u32 base = sharp_fetch.offsets[0];
+        for (u32 i = 1; i < sharp.num_dwords; ++i) {
+            if (sharp_fetch.offsets[i] - base != i) {
+                return sharp_fetch;
+            }
+        }
+        sharp_fetch.summary = Summary::SingleLoad;
     }
     return sharp_fetch;
 }
@@ -233,15 +244,6 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
     // need fallback (TODO is this 100% true?)
     const bool needs_mip_storage_fallback =
         inst_info.has_lod && is_written && !profile.supports_image_load_store_lod;
-    const auto opcode = inst.GetOpcode();
-    const bool normalized_sample =
-        (opcode == IR::Opcode::ImageSampleRaw || opcode == IR::Opcode::ImageSampleImplicitLod ||
-         opcode == IR::Opcode::ImageSampleExplicitLod ||
-         opcode == IR::Opcode::ImageSampleDrefImplicitLod ||
-         opcode == IR::Opcode::ImageSampleDrefExplicitLod || opcode == IR::Opcode::ImageGather ||
-         opcode == IR::Opcode::ImageGatherDref || opcode == IR::Opcode::ImageGradient ||
-         opcode == IR::Opcode::ImageQueryLod) &&
-        !inst_info.has_offset && !inst_info.is_unnormalized;
     ImageResource image_res = {
         .sharp_fetch = ConstructSharpFetch<AmdGpu::Image>(resource.sharps[0]),
         .is_depth = bool(inst_info.is_depth),
@@ -249,7 +251,6 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
         .is_array = bool(inst_info.is_array),
         .is_written = is_written,
         .is_r128 = bool(inst_info.is_r128),
-        .needs_native = !normalized_sample,
         .post_op = resource.sharps[0].post_op,
     };
 
@@ -271,6 +272,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
             case AmdGpu::ImageType::Color2D:      // x, y, [lod]
                 return body->Arg(2);
             case AmdGpu::ImageType::Color2DArray: // x, y, slice, [lod]
+            case AmdGpu::ImageType::Cube:         // x, y, face, [lod]
             case AmdGpu::ImageType::Color3D:      // x, y, z, [lod]
                 return body->Arg(3);
             case AmdGpu::ImageType::Color2DMsaa:
@@ -440,7 +442,7 @@ static void RemoveAppendBufferLaneOffset(IR::Inst& vx) {
         ASSERT(!vy.IsEmpty() && !vy.IsImmediate());
         auto zero_const = IsMbcntWithExec(vy, true, exec);
         ASSERT(!zero_const.IsEmpty() && zero_const.IsImmediate() && zero_const.U32() == 0u);
-        vz.Inst()->ReplaceUsesWithAndRemove(IR::Value{u32{0u}});
+        user->SetArg(1 - operand, IR::Value{u32{0u}});
     }
 }
 
@@ -649,20 +651,6 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
                 CalculateBufferAddress(ir, inst, info, buffer, buffer.stride));
 }
 
-IR::Value FixCubeCoords(IR::IREmitter& ir, const AmdGpu::Image& image, const IR::Value& x,
-                        const IR::Value& y, const IR::Value& face) {
-    if (!image.IsCube()) {
-        return ir.CompositeConstruct(x, y, face);
-    }
-    // AMD cube math results in coordinates in the range [1.0, 2.0]. We need
-    // to convert this to the range [0.0, 1.0] to get correct results.
-    const auto fixed_x = ir.FPSub(IR::F32{x}, ir.Imm32(1.f));
-    const auto fixed_y = ir.FPSub(IR::F32{y}, ir.Imm32(1.f));
-    const auto fixed_face =
-        ir.FPFma(ir.FPFloor(ir.FPDiv(IR::F32{face}, ir.Imm32(8.f))), ir.Imm32(-2.f), IR::F32{face});
-    return ir.CompositeConstruct(fixed_x, fixed_y, fixed_face);
-}
-
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
                           const AmdGpu::Image& image) {
     const auto handle = inst.Arg(0);
@@ -725,6 +713,7 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Cube:
             return ir.CompositeConstruct(read(0), read(8));
         case AmdGpu::ImageType::Color3D:
             return ir.CompositeConstruct(read(0), read(8), read(16));
@@ -747,6 +736,7 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
+        case AmdGpu::ImageType::Cube:
             // (du/dx, dv/dx), (du/dy, dv/dy)
             addr_reg = addr_reg + 4;
             return {ir.CompositeConstruct(get_addr_reg(addr_reg - 4), get_addr_reg(addr_reg - 3)),
@@ -803,11 +793,8 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             addr_reg = addr_reg + 2;
             return ir.CompositeConstruct(get_coord(addr_reg - 2, 0), get_coord(addr_reg - 1, 1));
         case AmdGpu::ImageType::Color2DArray: // x, y, slice
-            addr_reg = addr_reg + 3;
-            // Note we can use FixCubeCoords with fallthrough cases since it checks for image type.
-            return FixCubeCoords(ir, image, get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
-                                 get_addr_reg(addr_reg - 1));
-        case AmdGpu::ImageType::Color3D: // x, y, z
+        case AmdGpu::ImageType::Cube:         // x, y, face
+        case AmdGpu::ImageType::Color3D:      // x, y, z
             addr_reg = addr_reg + 3;
             return ir.CompositeConstruct(get_coord(addr_reg - 3, 0), get_coord(addr_reg - 2, 1),
                                          get_coord(addr_reg - 1, 2));
@@ -907,6 +894,7 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
         case AmdGpu::ImageType::Color2DArray:     // x, y, slice, [lod]
         case AmdGpu::ImageType::Color2DMsaaArray: // x, y, slice. (sample is passed on different
                                                   // argument)
+        case AmdGpu::ImageType::Cube:             // x, y, face, [lod]
         case AmdGpu::ImageType::Color3D:          // x, y, z, [lod]
             return {ir.CompositeConstruct(body->Arg(0), body->Arg(1), body->Arg(2)), body->Arg(3)};
         default:

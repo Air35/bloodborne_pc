@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "bbport_toggles.h"
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -34,8 +33,10 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
             }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
             // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used.
-            usage |= vk::ImageUsageFlagBits::eStorage;
+            // flag is also used. The exception here is for multisample images when storage is not
+            // supported, where even with ExtendedUsage we may get only one supported sample back.
+            if (info.num_samples == 1 || instance.IsMultisampleStorageImageSupported())
+                usage |= vk::ImageUsageFlagBits::eStorage;
         }
     } else {
         // Similarly to above, we specify storage usage. This is typically not supported by
@@ -51,10 +52,10 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color1DArray:
-        return vk::ImageType::e1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Cube:
         return vk::ImageType::e2D;
     case AmdGpu::ImageType::Color3D:
         return vk::ImageType::e3D;
@@ -136,9 +137,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
              Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_)
-    : guest_begin{info_.guest_address}, guest_end{info_.guest_address + info_.guest_size},
-      info{info_}, runtime{&runtime_}, slot_image_views{&slot_image_views_} {
-    BbStats::Timer timer{BbStats::t_image_create};
+    : runtime{&runtime_}, slot_image_views{&slot_image_views_}, info{info_} {
     if (info.pixel_format == vk::Format::eUndefined) {
         return;
     }
@@ -168,29 +167,15 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 
     constexpr auto tiling = vk::ImageTiling::eOptimal;
     const auto supported_format = instance.GetSupportedFormat(info.pixel_format, format_features);
-    vk::PhysicalDeviceImageFormatInfo2 format_info{
+    const vk::PhysicalDeviceImageFormatInfo2 format_info{
         .format = supported_format,
         .type = ConvertImageType(info.type),
         .tiling = tiling,
         .usage = usage_flags,
         .flags = flags,
     };
-    auto image_format_properties =
+    const auto image_format_properties =
         instance.GetPhysicalDevice().getImageFormatProperties2(format_info);
-    // bbport: storage usage is speculative (see ImageUsageFlags). Drivers that refuse it for a
-    // format (AMD's Windows driver for BC6H) get the image without it: creating the unsupported
-    // combination anyway loses the device a few frames later.
-    if (image_format_properties.result == vk::Result::eErrorFormatNotSupported &&
-        (usage_flags & vk::ImageUsageFlagBits::eStorage)) {
-        format_info.usage = usage_flags & ~vk::ImageUsageFlagBits::eStorage;
-        image_format_properties = instance.GetPhysicalDevice().getImageFormatProperties2(format_info);
-        if (image_format_properties.result == vk::Result::eSuccess) {
-            usage_flags = format_info.usage;
-            format_features = FormatFeatureFlags(usage_flags);
-        } else {
-            format_info.usage = usage_flags;
-        }
-    }
     if (image_format_properties.result == vk::Result::eErrorFormatNotSupported) {
         LOG_ERROR(Render_Vulkan, "image format {} type {} is not supported (flags {}, usage {})",
                   vk::to_string(supported_format), vk::to_string(format_info.type),
@@ -236,13 +221,9 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
         runtime->SetBackingSamples(this, info.num_samples);
     }
     const auto& view_infos = backing->image_view_infos;
-    if (backing->last_view < view_infos.size() && view_infos[backing->last_view] == view_info) {
-        return (*slot_image_views)[backing->image_view_ids[backing->last_view]];
-    }
     const auto it = std::ranges::find(view_infos, view_info);
     if (it != view_infos.end()) {
-        backing->last_view = static_cast<u32>(std::distance(view_infos.begin(), it));
-        const auto view_id = backing->image_view_ids[backing->last_view];
+        const auto view_id = backing->image_view_ids[std::distance(view_infos.begin(), it)];
         return (*slot_image_views)[view_id];
     }
     const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
@@ -331,7 +312,6 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return;
         }
-
         barriers.emplace_back(vk::ImageMemoryBarrier2{
             .srcStageMask = last_state.pl_stage,
             .srcAccessMask = last_state.access_mask,

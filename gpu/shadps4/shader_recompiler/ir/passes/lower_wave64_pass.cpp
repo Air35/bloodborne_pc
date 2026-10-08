@@ -114,6 +114,23 @@ std::vector<IR::Block*> FindWave64UniformBlocks(
     return blocks;
 }
 
+static IR::Inst* FindBallotForMaskedBitCount(const IR::Inst& mbcnt) {
+    IR::Value value = mbcnt.Arg(0);
+    if (value.IsImmediate()) {
+        return nullptr;
+    }
+    IR::Inst* inst = value.Inst();
+    if (inst->GetOpcode() != IR::Opcode::CompositeExtractU32x2 || inst->Arg(0).IsImmediate()) {
+        return nullptr;
+    }
+    inst = inst->Arg(0).Inst();
+    if (inst->GetOpcode() != IR::Opcode::UnpackUint2x32 || inst->Arg(0).IsImmediate()) {
+        return nullptr;
+    }
+    inst = inst->Arg(0).Inst();
+    return inst->GetOpcode() == IR::Opcode::Ballot ? inst : nullptr;
+}
+
 static const IR::Inst* SkipBitCasts(const IR::Value& value) {
     if (value.IsImmediate()) {
         return nullptr;
@@ -183,6 +200,7 @@ bool Wave64UniformBranchesEnabled() {
     }();
     return enabled;
 }
+
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile) {
     if (program.info.hw_stage != HwStage::Compute || profile.subgroup_size == 64) {
@@ -271,16 +289,12 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
         for (IR::Inst& inst : block->Instructions()) {
             if (is_lowered(inst)) {
                 push_worklist(inst);
-            } else if (inst.GetOpcode() == IR::Opcode::Ballot) {
-                const auto is_unpack = [](const IR::Use& use) {
-                    return use.user->GetOpcode() == IR::Opcode::UnpackUint2x32;
-                };
-                if (std::ranges::any_of(inst.Uses(), is_unpack)) {
-                    push_worklist(inst);
+            } else if (inst.GetOpcode() == IR::Opcode::MaskedBitCount32) {
+                IR::Inst* const ballot = FindBallotForMaskedBitCount(inst);
+                if (ballot == nullptr ||
+                    std::ranges::contains(uniform_blocks, ballot->GetParent())) {
+                    worklist.push_back(&inst);
                 }
-            } else if (inst.GetOpcode() == IR::Opcode::GetAttributeU32 &&
-                       inst.Arg(0).Attribute() == IR::Attribute::SubgroupLtMask) {
-                worklist.push_back(&inst);
             }
         }
     }
@@ -322,13 +336,15 @@ void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info
                                               ir.ShiftLeftLogical(half, ir.Imm32(2u))))};
             ir.Barrier();
             inst->ReplaceUsesWithAndRemove(value);
-        } else if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
-                   inst->Arg(0).Attribute() == IR::Attribute::SubgroupLtMask) {
+        } else if (inst->GetOpcode() == IR::Opcode::MaskedBitCount32) {
             const IR::U32 subgroup_invocation_id = ir.BitwiseAnd(invocation_index, ir.Imm32(63));
             const IR::U64 mask = ir.ISub(
                 ir.ShiftLeftLogical(ir.Imm64(u64{1}), subgroup_invocation_id), ir.Imm64(u64{1}));
-            inst->ReplaceUsesWithAndRemove(
-                ir.CompositeExtract(ir.UnpackUint2x32(mask), inst->Arg(1).U32()));
+            const IR::U32 thread_mask{
+                ir.CompositeExtract(ir.UnpackUint2x32(mask), inst->Arg(2).U1() ? 1u : 0u)};
+            const IR::U32 masked_value{
+                ir.BitCount(ir.BitwiseAnd(IR::U32{inst->Arg(0)}, thread_mask))};
+            inst->ReplaceUsesWithAndRemove(ir.IAdd(masked_value, IR::U32{inst->Arg(1)}));
         }
     }
 }

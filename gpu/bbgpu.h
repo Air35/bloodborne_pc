@@ -24,6 +24,9 @@ uintptr_t bbgpu_resolve(const char *scoped_nid);
 int bbgpu_handle_fault(void *ucontext, void *address);
 /* sotc: the GPU command thread or the draw recording thread (faults handled inline). */
 int bbgpu_is_gpu_side_thread(void);
+/* sotc: guest fiber stacks; the page tracker keeps them accessible while registered. */
+void bbgpu_register_guest_stack(uintptr_t address, uint64_t size);
+void bbgpu_register_guest_stack_end(uintptr_t address, uint64_t size);
 /* sotc: readbacks mode (0 disabled, 1 relaxed, 2 precise). */
 int bbgpu_readbacks_mode(void);
 /* BB_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */

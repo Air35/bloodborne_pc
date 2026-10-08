@@ -15,13 +15,12 @@ namespace VideoCore {
 vk::ImageViewType ConvertImageViewType(AmdGpu::ImageType type) {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
-        return vk::ImageViewType::e1D;
-    case AmdGpu::ImageType::Color1DArray:
-        return vk::ImageViewType::e1DArray;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
         return vk::ImageViewType::e2D;
+    case AmdGpu::ImageType::Color1DArray:
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Cube:
         return vk::ImageViewType::e2DArray;
     case AmdGpu::ImageType::Color3D:
         return vk::ImageViewType::e3D;
@@ -34,12 +33,13 @@ bool IsViewTypeCompatible(AmdGpu::ImageType view_type, AmdGpu::ImageType image_t
     switch (view_type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color1DArray:
-        return image_type == AmdGpu::ImageType::Color1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DArray:
     case AmdGpu::ImageType::Color2DMsaa:
     case AmdGpu::ImageType::Color2DMsaaArray:
-        return image_type == AmdGpu::ImageType::Color2D || image_type == AmdGpu::ImageType::Color3D;
+    case AmdGpu::ImageType::Cube:
+        return image_type == AmdGpu::ImageType::Color1D ||
+               image_type == AmdGpu::ImageType::Color2D || image_type == AmdGpu::ImageType::Color3D;
     case AmdGpu::ImageType::Color3D:
         return image_type == AmdGpu::ImageType::Color3D;
     default:
@@ -117,32 +117,7 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         aspect = vk::ImageAspectFlagBits::eStencil;
     }
 
-    // bbport: storage writes never convert to sRGB and sRGB formats cannot be storage images
-    // (AMD's driver loses the device on such a view; NVIDIA tolerates it): write through the
-    // UNORM format, which stores the same bytes.
-    if (info.is_storage) {
-        switch (format) {
-        case vk::Format::eR8G8B8A8Srgb:
-            format = vk::Format::eR8G8B8A8Unorm;
-            break;
-        case vk::Format::eB8G8R8A8Srgb:
-            format = vk::Format::eB8G8R8A8Unorm;
-            break;
-        case vk::Format::eA8B8G8R8SrgbPack32:
-            format = vk::Format::eA8B8G8R8UnormPack32;
-            break;
-        case vk::Format::eR8Srgb:
-            format = vk::Format::eR8Unorm;
-            break;
-        case vk::Format::eR8G8Srgb:
-            format = vk::Format::eR8G8Unorm;
-            break;
-        default:
-            break;
-        }
-    }
-
-    const vk::ImageViewCreateInfo image_view_ci = {
+    vk::ImageViewCreateInfo image_view_ci = {
         .pNext = &usage_ci,
         .image = image.GetImage(),
         .viewType = ConvertImageViewType(info.type),
