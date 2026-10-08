@@ -2,6 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <tuple>
+#include <vector>
 #include <utility>
 #include <boost/icl/interval_map.hpp>
 #include <boost/icl/interval_set.hpp>
@@ -597,6 +604,66 @@ struct SignalImpl : public PageManager::Impl {
         impl.Protect(address, size, perms);
     }
 
+    // sotc: SOTC_RB_STATS=1 prints, every 10 s, the read faults that cost a readback, grouped by
+    // reader (guest or GPU thread), faulting instruction and 64 KiB region.
+    static void NoteReadFault(void* context, VAddr addr, bool is_gpu_thread) {
+        static const bool enabled = std::getenv("SOTC_RB_STATS") != nullptr;
+        if (!enabled) {
+            return;
+        }
+        static std::mutex stats_mutex;
+        static std::map<std::tuple<bool, u64, VAddr>, u64> counts;
+        static auto last = std::chrono::steady_clock::now();
+#ifdef _WIN32
+        const u64 rip = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord->Rip;
+#else
+        const u64 rip = 0;
+#endif
+        std::scoped_lock lk{stats_mutex};
+        ++counts[{is_gpu_thread, rip, addr & ~VAddr{0xFFFF}}];
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds(10)) {
+            return;
+        }
+        last = now;
+        std::vector<std::pair<u64, std::tuple<bool, u64, VAddr>>> sorted;
+        u64 total = 0;
+        for (const auto& [key, count] : counts) {
+            sorted.emplace_back(count, key);
+            total += count;
+        }
+        std::sort(sorted.rbegin(), sorted.rend());
+        std::fprintf(stderr, "SOTC readback faults in 10 s: %llu\n", static_cast<unsigned long long>(total));
+        for (size_t i = 0; i < sorted.size() && i < 12; ++i) {
+            const auto& [count, key] = sorted[i];
+            char where[MAX_PATH] = "?";
+#ifdef _WIN32
+            HMODULE module = nullptr;
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(std::get<1>(key)), &module)) {
+                char path[MAX_PATH];
+                GetModuleFileNameA(module, path, MAX_PATH);
+                const char* name = std::strrchr(path, '\\');
+                std::snprintf(where, sizeof(where), "%s+%#llx", name ? name + 1 : path,
+                              static_cast<unsigned long long>(std::get<1>(key) -
+                                                              reinterpret_cast<u64>(module)));
+            } else {
+                MEMORY_BASIC_INFORMATION info{};
+                VirtualQuery(reinterpret_cast<void*>(std::get<1>(key)), &info, sizeof(info));
+                std::snprintf(where, sizeof(where), "alloc %p+%#llx", info.AllocationBase,
+                              static_cast<unsigned long long>(
+                                  std::get<1>(key) - reinterpret_cast<u64>(info.AllocationBase)));
+            }
+#endif
+            std::fprintf(stderr, "  %6llu %s rip=%#llx (%s) region=%#llx\n",
+                         static_cast<unsigned long long>(count), std::get<0>(key) ? "gpu  " : "guest",
+                         static_cast<unsigned long long>(std::get<1>(key)), where,
+                         static_cast<unsigned long long>(std::get<2>(key)));
+        }
+        counts.clear();
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         const auto size = std::min<u64>(8, PageManager::GetNextPageAddr(addr) - addr);
@@ -608,6 +675,7 @@ struct SignalImpl : public PageManager::Impl {
         if (Common::IsWriteError(context)) {
             return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
         } else {
+            NoteReadFault(context, addr, is_gpu_thread);
             return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }
         return false;

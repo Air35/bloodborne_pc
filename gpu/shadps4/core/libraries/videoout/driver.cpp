@@ -15,6 +15,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/sotc_stats.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -253,8 +254,12 @@ void VideoOutDriver::Flip(const Request& req) {
         const auto now = std::chrono::steady_clock::now();
         if (now - window_start >= std::chrono::seconds(5)) {
             const double seconds = std::chrono::duration<double>(now - window_start).count();
-            std::fprintf(stderr, "SOTC FPS %.1f at %.0fs\n", flips / seconds,
-                         std::chrono::duration<double>(now - run_start).count());
+            const uint64_t readbacks = SotcStats::readbacks.exchange(0, std::memory_order_relaxed);
+            const uint64_t readback_ns =
+                SotcStats::readback_ns.exchange(0, std::memory_order_relaxed);
+            std::fprintf(stderr, "SOTC FPS %.1f at %.0fs; readbacks %.0f/s, %.0f ms/s\n",
+                         flips / seconds, std::chrono::duration<double>(now - run_start).count(),
+                         readbacks / seconds, readback_ns / 1e6 / seconds);
             flips = 0;
             window_start = now;
         }

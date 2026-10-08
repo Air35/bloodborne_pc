@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/alignment.h"
@@ -12,6 +14,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/buffer_cache/memory_tracker.h"
+#include "video_core/sotc_stats.h"
 #include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
@@ -143,6 +146,8 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    SotcStats::readbacks.fetch_add(1, std::memory_order_relaxed);
+    const SotcStats::ScopedTimer readback_timer{SotcStats::readback_ns};
     // A readback costs a full CPU/GPU sync. Games tend to read back the same few regions every
     // frame, one after another, so while the GPU is idle anyway also bring along the other
     // regions read back recently ("hot" readbacks) that the GPU has modified since. The reads
@@ -353,6 +358,19 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
 }
 
 void BufferCache::AddGpuModified(VAddr addr, u64 size) {
+    // sotc: SOTC_GPUMOD_WATCH=<address>: who marks it as GPU-written (first 40 times).
+    static const VAddr watch = [] {
+        const char* v = std::getenv("SOTC_GPUMOD_WATCH");
+        return v ? static_cast<VAddr>(std::strtoull(v, nullptr, 0)) : VAddr{0};
+    }();
+    if (watch && addr < watch + 0x10000 && watch < addr + size) {
+        static int shown = 0;
+        if (shown++ < 40) {
+            std::fprintf(stderr, "SOTC gpu-modified %#llx+%#llx by %p <- %p\n",
+                         static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size),
+                         __builtin_return_address(0), __builtin_return_address(1));
+        }
+    }
     gpu_modified_ranges.Add(addr, size);
     if (!clean_pages_used || size == 0) {
         return;
