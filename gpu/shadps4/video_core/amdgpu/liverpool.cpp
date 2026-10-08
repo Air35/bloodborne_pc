@@ -1266,7 +1266,26 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
+                const auto gfx_wait_start = std::chrono::steady_clock::now(); // sotc: diagnosis
+                bool gfx_wait_reported = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    if (!gfx_wait_reported &&
+                        std::chrono::steady_clock::now() - gfx_wait_start > std::chrono::seconds(2)) {
+                        gfx_wait_reported = true;
+                        const bool mem = wait_reg_mem->mem_space.Value() ==
+                                         PM4CmdWaitRegMem::MemSpace::Memory;
+                        std::fprintf(stderr,
+                                     "SOTC graphics WAIT_REG_MEM stuck 2s: %s %#llx func %u ref %#x "
+                                     "mask %#x value %#x, %u compute queues\n",
+                                     mem ? "mem" : "reg",
+                                     mem ? static_cast<unsigned long long>(
+                                               wait_reg_mem->Address<uintptr_t>())
+                                         : static_cast<unsigned long long>(wait_reg_mem->Reg()),
+                                     static_cast<u32>(wait_reg_mem->function.Value()),
+                                     wait_reg_mem->ref, wait_reg_mem->mask,
+                                     mem ? *wait_reg_mem->Address() : regs.reg_array[wait_reg_mem->Reg()],
+                                     num_mapped_queues);
+                    }
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;

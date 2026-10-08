@@ -1037,7 +1037,11 @@ Value IREmitter::Unpack10_11_11(const AmdGpu::NumberFormat number_format, const 
     case AmdGpu::NumberFormat::Float:
         return Inst(Opcode::UnpackUfloat10_11_11, value);
     default:
-        UNREACHABLE_MSG("Unsupported 10_11_11 number format: {}", number_format);
+        // sotc: garbage descriptors of bindings the shader never reads (level streaming) must
+        // not abort the compile; decode as the only valid format.
+        LOG_WARNING(Render_Recompiler, "Unsupported 10_11_11 number format {}, decoded as float",
+                    number_format);
+        return Inst(Opcode::UnpackUfloat10_11_11, value);
     }
 }
 

@@ -117,6 +117,15 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 
 BufferCache::~BufferCache() = default;
 
+void BufferCache::DiscardMemory(VAddr device_addr, u64 size) {
+    memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+    // The byte-precise GPU-written ranges are command processor state.
+    liverpool->SendCommand<false>([this, device_addr, size] {
+        gpu_modified_ranges.Subtract(device_addr, size);
+    });
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     Core::MemoryManager::NoteHostWrite(device_addr, size, 9,
                                        reinterpret_cast<u64>(__builtin_return_address(0)));

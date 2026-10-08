@@ -77,7 +77,7 @@ static void *allocate_image(size_t size) {
     if (size > EBOOT_RESERVATION) fail("the image does not fit the eboot reservation");
     void *p=VirtualAlloc(eboot_reservation, size, MEM_COMMIT, PAGE_READWRITE);
     if (!p) fail("cannot commit the eboot range");
-    printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need)\n",p);
+    printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need); loader at %p\n",p,(void *)GetModuleHandleA(NULL));
     return p;
 }
 #endif
@@ -278,7 +278,34 @@ static int helper_single_step(EXCEPTION_POINTERS *info) {
     info->ContextRecord->EFlags&=~(DWORD)0x100;
     return 1;
 }
+static LONG vectored_fault_impl(EXCEPTION_POINTERS *info);
+/* sotc (from the shadPS4 SotC fork, signals.cpp): Shadow of the Colossus runs its jobs on fibers
+ * with 16-64 KiB stacks packed back to back without guard pages. The exception handler runs on
+ * whatever stack faulted, and the GPU page-tracking path needs far more: it overflowed into the
+ * neighbouring stack or the process died without any report. A fault on a stack that is not the
+ * thread's own runs the handler on a per-thread 512 KiB stack; the TEB bounds point at it
+ * meanwhile so stack probes and nested faults see a consistent stack. */
+LONG call_on_stack(EXCEPTION_POINTERS *info, LONG (*fn)(EXCEPTION_POINTERS *), void *top);
+__asm__(".text\n.p2align 4\n.globl call_on_stack\ncall_on_stack:\n"
+        " push %rbp\n mov %rsp,%rbp\n mov %r8,%rsp\n sub $32,%rsp\n call *%rdx\n"
+        " mov %rbp,%rsp\n pop %rbp\n ret\n");
+#define ALT_STACK_SIZE (512u * 1024u)
+static _Thread_local unsigned char *alt_stack;
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
+    NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
+    const uintptr_t sp=(uintptr_t)__builtin_frame_address(0);
+    if (sp>=(uintptr_t)tib->StackLimit && sp<(uintptr_t)tib->StackBase) return vectored_fault_impl(info);
+    if (!alt_stack) alt_stack=VirtualAlloc(NULL,ALT_STACK_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if (!alt_stack) return vectored_fault_impl(info);
+    void *const base=tib->StackBase, *const limit=tib->StackLimit;
+    tib->StackBase=alt_stack+ALT_STACK_SIZE;
+    tib->StackLimit=alt_stack;
+    const LONG result=call_on_stack(info,vectored_fault_impl,alt_stack+ALT_STACK_SIZE);
+    tib->StackBase=base;
+    tib->StackLimit=limit;
+    return result;
+}
+static LONG vectored_fault_impl(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
     if (code==EXCEPTION_SINGLE_STEP && helper_single_step(info)) return EXCEPTION_CONTINUE_EXECUTION;

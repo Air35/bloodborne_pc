@@ -85,6 +85,11 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// sotc: the guest unmapped the range: its GPU-written data is dropped, never read back.
+    /// A readback would land in whatever the range maps by the time it runs (the runtime
+    /// applies a whole batch of unmaps and maps before the hooks), overwriting fresh data.
+    void DiscardMemory(VAddr device_addr, u64 size);
+
     /// bbport: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);
 

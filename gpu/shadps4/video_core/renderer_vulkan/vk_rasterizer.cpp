@@ -3327,7 +3327,7 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     DrainDrawPipe();
     buffer_cache.OnMappingChanged();
-    buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.DiscardMemory(addr, size); // sotc: was InvalidateMemory (read back GPU data)
     // Give the arena memory back; it runs on the GPU thread, ordered before later draws.
     // Releasing arena memory on unmap still races with in-flight GPU work during loads
     // (device lost, silent crashes loading a save), so it is opt-in for now.

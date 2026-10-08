@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdio>
 #include "common/assert.h"
 #include "common/types.h"
 #include "shader_recompiler/params.h"
@@ -237,12 +239,49 @@ static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
             return *info;
         }
     }
+    // sotc: report what was there before giving up.
+    std::fprintf(stderr, "SOTC shader binary info not found at %p (caller %p): %08x %08x %08x %08x\n",
+                 static_cast<const void*>(code), __builtin_return_address(0), code[0], code[1],
+                 code[2], code[3]);
     UNREACHABLE_MSG("Shader binary info not found.");
 }
 
-static constexpr Shader::ShaderParams GetParams(const auto& sh) {
+/// sotc: like SearchBinaryInfo, but nullptr when there is none. While Shadow of the Colossus
+/// streams a level, a program register can still point at code memory already reused for
+/// other data; the draw is skipped instead of aborting.
+static const BinaryInfo* FindBinaryInfo(const u32* code) {
+    constexpr u32 token_mov_vcchi = 0xBEEB03FF;
+    if (code[0] == token_mov_vcchi) {
+        const auto* info = std::bit_cast<const BinaryInfo*>(code + (code[1] + 1) * 2);
+        if (info->Valid()) {
+            return info;
+        }
+    } else {
+        // Every program of the game starts with s_mov_b32 vcc_hi: anything else is reused
+        // memory, and a forward search would find the header of some other program.
+        return nullptr;
+    }
+    constexpr u32 search_limit = 0x4000;
+    for (const u32* it = code; it < code + search_limit; ++it) {
+        if (const BinaryInfo* info = std::bit_cast<const BinaryInfo*>(it); info->Valid()) {
+            return info;
+        }
+    }
+    return nullptr;
+}
+
+static Shader::ShaderParams GetParams(const auto& sh) {
     const auto* code = sh.template Address<u32*>();
-    const auto& bininfo = SearchBinaryInfo(code);
+    const BinaryInfo* found = FindBinaryInfo(code);
+    if (!found) {
+        static std::atomic<u32> reported{0};
+        if (reported++ < 16) {
+            std::fprintf(stderr, "SOTC shader binary info not found at %p: draw skipped\n",
+                         static_cast<const void*>(code));
+        }
+        return {.user_data = sh.user_data, .code = {}, .hash = 0};
+    }
+    const auto& bininfo = *found;
     return {
         .user_data = sh.user_data,
         .code = std::span{code, bininfo.length / sizeof(u32)},

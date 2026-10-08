@@ -23,7 +23,9 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/motion_history.h"
@@ -684,6 +686,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     sel.fetch_shader = std::nullopt;
 
     Shader::Backend::Bindings binding{};
+    bool missing_program = false; // sotc: a stage register points at no program
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
         const auto stage_in_idx = static_cast<u32>(stage_in);
         const auto stage_out_idx = static_cast<u32>(stage_out);
@@ -701,6 +704,20 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         }
 
         const auto params = AmdGpu::GetParams(*pgm);
+        if (params.hash == 0 && params.code.empty()) { // sotc: no program there (stale register)
+            key.stage_hashes[stage_out_idx] = 0;
+            sel.infos[stage_out_idx] = nullptr;
+            missing_program = true;
+            static std::atomic<u32> reported{0};
+            if (reported++ < 8) {
+                const VAddr addr = pgm->template Address<VAddr>();
+                LOG_WARNING(Render_Vulkan,
+                            "SOTC draw without program (stage {}) at {:#x} skipped (GPU-written {})",
+                            static_cast<u32>(stage_in), addr,
+                            Core::Memory::Instance()->GetRasterizer()->IsRangeGpuWritten(addr, 256));
+            }
+            return false;
+        }
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader_;
         std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], fetch_shader_,
                  key.stage_hashes[stage_out_idx]) =
@@ -715,6 +732,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     sel.modules.fill(nullptr);
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    if (missing_program) {
+        return false;
+    }
 
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -778,6 +798,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         break;
     case AmdGpu::ShaderStageEnable::VgtStages::Vs:
         bind_stage(HwStage::Vertex, SwStage::Vertex);
+        if (missing_program) {
+            return false;
+        }
         break;
     default:
         LOG_WARNING(Render_Vulkan, "unimplemented shader stage {}", (u32)regs.stage_enable.raw);
@@ -806,6 +829,16 @@ bool PipelineCache::RefreshComputeKey() {
     Shader::Backend::Bindings binding{};
     const auto& cs_pgm = liverpool->GetCsRegs();
     const auto cs_params = AmdGpu::GetParams(cs_pgm);
+    if (cs_params.hash == 0 && cs_params.code.empty()) { // sotc: no program there
+        static std::atomic<u32> reported{0};
+        if (reported++ < 8) {
+            const VAddr addr = cs_pgm.template Address<VAddr>();
+            LOG_WARNING(Render_Vulkan,
+                        "SOTC compute dispatch without program at {:#x} skipped (GPU-written {})",
+                        addr, Core::Memory::Instance()->GetRasterizer()->IsRangeGpuWritten(addr, 256));
+        }
+        return false;
+    }
     std::tie(sel.infos[0], sel.modules[0], sel.fetch_shader, compute_key.value) =
         GetProgram(sel, HwStage::Compute, SwStage::Compute, cs_params, binding);
     return true;

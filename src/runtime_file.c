@@ -294,9 +294,35 @@ static void touch_for_write(void *buffer,uint64_t size) {
         *b=*b;
     }
 }
+/* sotc: reads land in a bounce buffer and are copied into guest memory in user mode. Touching
+ * the pages first is not enough: the GPU tracker may protect a page again (after an upload)
+ * before the kernel's copy, which then fails with EFAULT or, worse, lands without the tracker
+ * noticing, and the GPU keeps a stale copy (Shadow of the Colossus streams shaders, textures
+ * and descriptors straight from the pak files into GPU-read memory while loading). */
+#define BOUNCE_LIMIT (UINT64_C(64) << 20)
+static _Thread_local unsigned char *bounce;
+static _Thread_local uint64_t bounce_size;
+static unsigned char *bounce_buffer(uint64_t size) {
+    if (size>BOUNCE_LIMIT) return NULL;
+    if (bounce_size<size) {
+        uint64_t want=size<UINT64_C(1)<<20 ? UINT64_C(1)<<20 : size;
+        unsigned char *next=realloc(bounce,want);
+        if (!next) return NULL;
+        bounce=next; bounce_size=want;
+    }
+    return bounce;
+}
 static int64_t do_read(int fd,void *buffer,uint64_t size) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    unsigned char *staging=bounce_buffer(size);
+    if (staging) {
+        ssize_t n=host_read(h,staging,size);
+        if (n<0) return -errno;
+        memcpy(buffer,staging,(size_t)n);
+        __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+        return n;
+    }
     touch_for_write(buffer,size);
     ssize_t n=host_read(h,buffer,size);
     if (n<0) { if (audio_trace()) printf("Audio trace: read(fd %d, %llu) failed, errno %d\n",fd,(unsigned long long)size,errno); return -errno; }
@@ -306,6 +332,14 @@ static int64_t do_read(int fd,void *buffer,uint64_t size) {
 static int64_t do_pread(int fd,void *buffer,uint64_t size,int64_t offset) {
     int h=host_fd(fd);
     if (h<0) return -EBADF;
+    unsigned char *staging=bounce_buffer(size);
+    if (staging) {
+        ssize_t n=pread(h,staging,size,offset);
+        if (n<0) return -errno;
+        memcpy(buffer,staging,(size_t)n);
+        __atomic_add_fetch(&reads,1,__ATOMIC_RELAXED); __atomic_add_fetch(&bytes_read,(uint64_t)n,__ATOMIC_RELAXED);
+        return n;
+    }
     touch_for_write(buffer,size);
     ssize_t n=pread(h,buffer,size,offset);
     if (n<0) { if (audio_trace()) printf("Audio trace: pread(fd %d, %llu @%lld) failed, errno %d\n",fd,(unsigned long long)size,(long long)offset,errno); return -errno; }
