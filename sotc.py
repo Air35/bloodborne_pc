@@ -12,6 +12,8 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
     SOTC_MODES        optional, comma-separated: af16 (16x anisotropic filtering),
                       fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz)
+    BB_GAMEPAD        the gamepad to use (its name or part of it), when several are connected
+    key.<input>=Keys, pad.<input>=buttons   remap the controls (README.md, Controles)
 The image is prepared again only when the game, the modules or the scripts change.
 Extra arguments go to bb-probe.exe.
 """
@@ -124,6 +126,8 @@ def main():
     user = Path(env.get('SOTC_USER_DIR', PORT / 'user')).resolve()
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))
+    # Controls: key.<input>= / pad.<input>= lines of sotc.ini remap keys and buttons (src/runtime_pad.c).
+    env.setdefault('BB_CONFIG', str(PORT / 'sotc.ini'))
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
                '--app0', str(game), '--user', str(user), *sys.argv[1:]]

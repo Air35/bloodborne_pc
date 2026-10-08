@@ -152,8 +152,20 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                 }
             } else {
                 using namespace Common::FS;
-                const auto file = IOFile{path, FileAccessMode::Create};
-                file.Write(v);
+                // sotc: written whole or not at all. The game process is often ended (launcher
+                // Stop, a crash) while blobs are being written, and a truncated blob from the
+                // last session is read back at the next start.
+                auto temporary = path;
+                temporary += ".tmp";
+                {
+                    const auto file = IOFile{temporary, FileAccessMode::Create};
+                    file.Write(v);
+                }
+                std::error_code error;
+                std::filesystem::rename(temporary, path, error);
+                if (error) {
+                    std::filesystem::remove(temporary, error);
+                }
             }
         }};
         std::scoped_lock lock{m_request};

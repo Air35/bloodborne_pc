@@ -47,8 +47,9 @@ versão EU 1.01. Em outra versão eles não são aplicados.
 
 ## Controles
 
-Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Sem controle,
-o teclado fica assim:
+Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Com vários conectados,
+escolha um em **Controles** no lançador (ou `BB_GAMEPAD=` no `sotc.ini`). O teclado funciona
+junto com o controle:
 
 | Teclado | PS4 |
 |---|---|
@@ -64,6 +65,14 @@ o teclado fica assim:
 | Enter | Options |
 | I J K L | direcional |
 | Tab / Backspace | touchpad (esquerda / direita) |
+
+Para remapear, ponha linhas no `sotc.ini`, por exemplo `key.cross=Space,J` ou
+`pad.circle=b`. As entradas são:
+
+- botões: `cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right`;
+- direcional: `up down left right`;
+- no teclado, os analógicos: `move_up` `move_down` `move_left` `move_right` e
+  `look_up` `look_down` `look_left` `look_right`.
 
 ## Estado
 

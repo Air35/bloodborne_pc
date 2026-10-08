@@ -49,3 +49,35 @@ Candidatos, em ordem de risco:
 
 Cada item é uma fusão manual entre núcleos que divergiram em ~17 mil linhas. O ganho
 esperado está no modo 60 FPS: o modo padrão já atinge os 30 do PS4.
+
+## Memória do jogo no lugar: protótipo (08/10/2026)
+
+O bbport original (deadinside28, versão 0.3) tem um "modelo de memória de PC"
+(`BB_GUEST_IN_PLACE`): a GPU usa a memória do jogo onde ela está e os rótulos EOP são escritos
+quando a GPU realmente terminou. Assim somem as cópias para a VRAM, a proteção de páginas e as
+leituras de volta. Medido no Bloodborne: 95 → 115–124 FPS nas cenas pesadas. Lá ele usa dma-buf,
+que existe só no Linux e só funciona em AMD.
+
+No Windows o caminho é `VK_EXT_external_memory_host`. O teste `tools/host_import_test.c` mapeia
+uma seção do pagefile do mesmo jeito que `src/runtime_memory.c` faz (visão "backing" e visão do
+jogo sobre um placeholder) e importa a visão "backing". Resultado na RTX 2060 SUPER:
+
+| Tamanho | Importa | GPU escreve → CPU vê | CPU escreve → GPU lê | GPU lê a memória importada |
+|---|---|---|---|---|
+| 256 MiB | sim (50 ms) | sim | sim | 5,4 GB/s |
+| 2 GiB | sim (460 ms) | sim | sim | 5,7 GB/s |
+| 5 GiB | sim (1,5 s) | sim | sim | 5,5 GB/s |
+
+O tipo de memória é host-coherent, sem cache na CPU, e o alinhamento mínimo é 4 KiB. A cópia
+VRAM→VRAM foi a 65–184 GB/s. Por isso, texturas e geometria continuam na VRAM; o ganho está nos
+dados que a GPU escreve e a CPU lê (o que hoje exige readbacks precisos) e nos rótulos.
+
+**Integração proposta, em etapas mensuráveis:**
+
+1. Importar a visão "backing" inteira na inicialização, como uma `VkDeviceMemory`.
+2. Fazer os readbacks copiarem da VRAM direto para a memória do jogo, sem staging e sem memcpy.
+   O risco é baixo e o ganho pequeno, mas valida a peça.
+3. Mover para a memória importada as regiões que viram "hot readbacks" (as que o jogo relê
+   todo quadro). A GPU passa a escrever nelas direto, sem proteção de página nem readback.
+4. Rótulos EOP "honestos" (escritos depois da conclusão na GPU) para essas regiões. Com isso a
+   sincronização do próprio jogo basta.

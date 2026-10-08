@@ -102,7 +102,7 @@ def windows_language():
 APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), 'sys_modules': '',
                 'user_dir': '', 'af16': True, 'fps60': False, 'fullscreen': False,
                 'present_mode': 'Mailbox', 'language': '', 'player_name': '', 'show_fps': False,
-                'readbacks': '', 'extra_env': '', 'close_on_play': False}
+                'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': ''}
 PRESENT_MODES = [('Mailbox', ('Mailbox (baixa latência, sem cortes)', 'Mailbox (low latency, no tearing)')),
                  ('Fifo', ('FIFO (VSync)', 'FIFO (VSync)')),
                  ('Immediate', ('Immediate (pode cortar a imagem)', 'Immediate (tearing)'))]
@@ -186,6 +186,9 @@ def game_environment(s):
         env['SOTC_FPS'] = '1'
     if s['readbacks']:
         env['BB_READBACKS'] = s['readbacks']
+    if str(s.get('gamepad', '')).strip():
+        env['BB_GAMEPAD'] = str(s['gamepad']).strip()
+    env['BB_CONFIG'] = str(PORT_DIR / 'sotc.ini')
     for item in str(s['extra_env']).split():
         if '=' in item:
             key, value = item.split('=', 1)
@@ -590,13 +593,23 @@ class Launcher:
         f = self.scrolled_page('controls', _('Controles', 'Controls'),
                                _('Um controle (DualShock 4, DualSense, Xbox…) é usado automaticamente.',
                                  'A gamepad (DualShock 4, DualSense, Xbox…) is used automatically.'))
-        self.section(f, _('Teclado (sem controle)', 'Keyboard (without a gamepad)'), top=4)
+        self.section(f, _('Controle', 'Gamepad'), top=4)
+        self.row(f, _('Controle preferido', 'Preferred gamepad'), ttk.Entry(f, textvariable=self.var('gamepad'), width=30),
+                 _('Nome (ou parte) do controle a usar quando houver vários; vazio = o primeiro.',
+                   'Name (or part of it) of the gamepad to use when several are connected; empty = the first.'))
+        self.section(f, _('Teclado (funciona junto com o controle)', 'Keyboard (works next to a gamepad)'))
         for key, action in CONTROLS:
             key = _(*key) if isinstance(key, tuple) else key
             action = _(*action) if isinstance(action, tuple) else action
             r = self.next_row(f)
             ttk.Label(f, text=key, foreground=GOLD).grid(row=r, column=0, sticky='w', padx=(0, 24), pady=2)
             ttk.Label(f, text=action).grid(row=r, column=1, sticky='w', pady=2)
+        self.note(f, _('Para remapear, ponha linhas no sotc.ini da pasta do port, por exemplo key.cross=Space,J '
+                       'ou pad.circle=b. Entradas: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad '
+                       'touchpad_right up down left right move_up/down/left/right look_up/down/left/right.',
+                       'To remap, add lines to sotc.ini in the port folder, e.g. key.cross=Space,J or pad.circle=b. '
+                       'Inputs: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right up '
+                       'down left right move_up/down/left/right look_up/down/left/right.'))
 
     def build_advanced(self):
         ttk = self.ttk
