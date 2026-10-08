@@ -77,6 +77,7 @@ void runtime_ajm_report(void);
 uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
 uintptr_t runtime_pad_resolve(const char *name);
+uintptr_t runtime_sotc_resolve(const char *name);
 void runtime_pad_report(void);
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);

@@ -40,6 +40,8 @@ static uint64_t pool_size_bytes(void) {
 #define PAGE UINT64_C(16384)
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
+#define SYSTEM_LOW_MIN UINT64_C(0x0700000000)
+#define SYSTEM_LOW_MAX UINT64_C(0x0800000000)
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
@@ -141,6 +143,12 @@ void runtime_memory_reserve(void) {
     if (!VirtualAlloc2(NULL,(void *)USER_MIN,USER_MAX-USER_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
         win_fail("reserving the PS4 address range (link with --disable-high-entropy-va)",USER_MIN,USER_MAX-USER_MIN);
     region_insert(0,(HostRegion){USER_MIN,USER_MAX,0,0});
+    /* sotc: Shadow of the Colossus maps fixed ranges below the user area (0x7f0000000),
+     * in the PS4 system-managed window. A second placeholder covers it; mappings never
+     * span both reservations because the host's low maps lie between them. */
+    if (!VirtualAlloc2(NULL,(void *)SYSTEM_LOW_MIN,SYSTEM_LOW_MAX-SYSTEM_LOW_MIN,MEM_RESERVE|MEM_RESERVE_PLACEHOLDER,PAGE_NOACCESS,NULL,0))
+        win_fail("reserving the PS4 system-managed window",SYSTEM_LOW_MIN,SYSTEM_LOW_MAX-SYSTEM_LOW_MIN);
+    region_insert(0,(HostRegion){SYSTEM_LOW_MIN,SYSTEM_LOW_MAX,0,0});
 }
 static void view_map(const HostRegion *r, DWORD protect) {
     DWORD initial=protect==PAGE_NOACCESS ? PAGE_READWRITE : protect, old;
@@ -372,6 +380,10 @@ static int32_t place(void **inout, uint64_t size, int prot, int flags, uint64_t 
     uintptr_t address=(uintptr_t)*inout;
     if (flags & MAP_FIXED_FLAG) {
         if (!address || address%PAGE) return INVALID;
+        if (address<USER_MIN && (address<SYSTEM_LOW_MIN || address+size>SYSTEM_LOW_MAX)) {
+            fprintf(stderr,"Runtime: fixed mapping outside the guest windows: %p +0x%" PRIx64 "\n",(void *)address,size);
+            return NO_MEMORY;
+        }
         if ((flags & MAP_NO_OVERWRITE) && overlaps(address,address+size,1)) return NO_MEMORY;
     } else {
         address=find_free(address,size,alignment);
@@ -633,7 +645,37 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
 static ABI int32_t batch_map(BatchEntry *entries, int count, int *processed) {
     return batch_map2(entries,count,processed,MAP_FIXED_FLAG);
 }
+/* sotc: largest free direct-memory range in [low,high) at the given alignment. */
+static ABI int32_t direct_available(int64_t low, int64_t high, uint64_t alignment, int64_t *physical, uint64_t *size) {
+    if (!alignment) alignment = PAGE;
+    if (!physical || !size || low < 0 || high < 0 || !valid_alignment(alignment)) return INVALID;
+    uint64_t end = (uint64_t)high < POOL_SIZE ? (uint64_t)high : POOL_SIZE, best=0, best_start=0;
+    write_lock();
+    uint64_t cursor = (uint64_t)low;
+    while (cursor < end) {
+        uint64_t next = end, resume = end;
+        for (int i=0; i<LIMIT; ++i) {
+            Block b = blocks[i];
+            if (!b.used || b.start+b.size <= cursor) continue;
+            if (b.start <= cursor) { next = cursor; resume = b.start+b.size; break; }
+            if (b.start < next) { next = b.start; resume = b.start+b.size; }
+        }
+        uint64_t start = align_up(cursor, alignment);
+        if (next > start && next-start > best) { best = next-start; best_start = start; }
+        cursor = resume;
+    }
+    write_unlock();
+    if (!best) return NO_MEMORY;
+    *physical = (int64_t)best_start; *size = best;
+    return 0;
+}
+static ABI int32_t flexible_available(uint64_t *size) {
+    if (!size) return INVALID;
+    *size = FLEXIBLE_SIZE - flexible_bytes;
+    return 0;
+}
 static const RuntimeExport exports[]={
+    {"sceKernelAvailableDirectMemorySize",direct_available}, {"sceKernelAvailableFlexibleMemorySize",flexible_available},
     {"sceKernelGetDirectMemorySize",direct_size}, {"sceKernelAllocateDirectMemory",direct_allocate},
     {"sceKernelMapDirectMemory",direct_map}, {"sceKernelMapNamedDirectMemory",direct_map_named},
     {"sceKernelReleaseDirectMemory",direct_release}, {"sceKernelMunmap",direct_unmap}, {"munmap",direct_unmap},

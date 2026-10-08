@@ -242,6 +242,8 @@ uintptr_t runtime_resolve(const char *scoped, int is_data) {
     if (save) return save;
     uintptr_t file = runtime_file_resolve(name);
     if (file) return file;
+    uintptr_t sotc = runtime_sotc_resolve(name);
+    if (sotc) return sotc;
     return bbgpu_resolve(name);
 }
 static const struct { const char *nid, *symbol; } import_names[]={
