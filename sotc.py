@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Shadow of the Colossus (CUSA08809, EU 1.01) on PC: prepares the game image and starts it.
+
+    python sotc.py                      (or double-click SotC.bat)
+
+Settings (environment variables, or sotc.ini beside this script as NAME=value lines):
+    SOTC_GAME_DIR     the dumped game folder (the one with eboot.bin); default ../CUSA08809
+    SOTC_SYS_MODULES  folder with YOUR OWN console's decrypted libSceNgs2.sprx and
+                      libSceUlt.sprx (shadPS4's user/sys_modules). Without it the game is silent.
+                      These files are Sony firmware: they are never distributed with the port.
+    SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
+The image is prepared again only when the game, the modules or the scripts change.
+Extra arguments go to bb-probe.exe.
+"""
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+PORT = Path(__file__).resolve().parent
+SCRIPTS = PORT / 'scripts'
+SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def load_ini():
+    ini = PORT / 'sotc.ini'
+    if ini.is_file():
+        for line in ini.read_text(encoding='utf-8', errors='replace').splitlines():
+            line = line.strip()
+            if line and not line.startswith(('#', ';')) and '=' in line:
+                name, value = line.split('=', 1)
+                os.environ.setdefault(name.strip(), value.strip())
+
+
+def find_probe():
+    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
+        if candidate.is_file():
+            return candidate
+    fail('bb-probe.exe not found: build it with build.sh (MSYS2 CLANG64) or use a packaged build.')
+
+
+def run_script(name, *args):
+    result = subprocess.run([sys.executable, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL)
+    if result.returncode:
+        sys.exit(result.returncode)
+
+
+def fingerprint(game, modules):
+    """Inputs of the prepared image: eboot, bundled modules, the user's modules, the scripts."""
+    digest = hashlib.sha256()
+    files = [game / 'eboot.bin', *sorted((game / 'sce_module').glob('*.prx')), *modules,
+             *sorted(SCRIPTS.glob('*.py'))]
+    for path in files:
+        stat = path.stat()
+        digest.update(f'{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}\n'.encode())
+    return digest.hexdigest()
+
+
+def main():
+    load_ini()
+    env = os.environ
+    os.chdir(PORT)
+    out = PORT / 'out'
+    out.mkdir(exist_ok=True)
+    game = Path(env.get('SOTC_GAME_DIR', PORT.parent / 'CUSA08809')).resolve()
+    if not (game / 'eboot.bin').is_file():
+        fail(f'No eboot.bin in {game}: set SOTC_GAME_DIR (environment or sotc.ini).')
+
+    modules = []
+    sys_modules = env.get('SOTC_SYS_MODULES')
+    if sys_modules:
+        modules = [Path(sys_modules) / name for name in SYS_MODULES]
+        missing = [m.name for m in modules if not m.is_file()]
+        if missing:
+            print(f'SOTC_SYS_MODULES: {", ".join(missing)} not found in {sys_modules}; no sound', file=sys.stderr)
+            modules = []
+    else:
+        print('SOTC_SYS_MODULES not set: no sound (see sotc.py)', file=sys.stderr)
+
+    stamp = out / 'prepared.txt'
+    wanted = fingerprint(game, modules)
+    images = [out / name for name in ('boot-linked.bin', 'content.bin', 'sotc-cpu.bin')]
+    if not stamp.is_file() or stamp.read_text().strip() != wanted or not all(p.is_file() for p in images):
+        print('Preparing the game image...')
+        run_script('prepare.py', game, '--out', out)
+        link = ['link_modules.py', game, '--out', out]
+        if modules:
+            link += ['--sys-modules', modules[0].parent]
+        run_script(*link)
+        run_script('content_profile.py', game, '--out', out)
+        run_script('sotc_cpu.py', game, '--out', out)
+        stamp.write_text(wanted + '\n')
+
+    probe = find_probe()
+    # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
+    if not (probe.parent / 'SDL3.dll').is_file():
+        clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
+        if clang64.is_dir():
+            env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
+    user = Path(env.get('SOTC_USER_DIR', PORT / 'user')).resolve()
+    user.mkdir(parents=True, exist_ok=True)
+    env.setdefault('BB_GPU_USER_DIR', str(user))
+    command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
+               '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', str(game), '--user', str(user), *sys.argv[1:]]
+    return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
