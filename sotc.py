@@ -10,6 +10,8 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
                       libSceUlt.sprx (shadPS4's user/sys_modules). Without it the game is silent.
                       These files are Sony firmware: they are never distributed with the port.
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
+    SOTC_MODES        optional, comma-separated: af16 (16x anisotropic filtering),
+                      fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz)
 The image is prepared again only when the game, the modules or the scripts change.
 Extra arguments go to bb-probe.exe.
 """
@@ -98,6 +100,12 @@ def main():
         run_script('sotc_cpu.py', game, '--out', out)
         stamp.write_text(wanted + '\n')
 
+    modes = env.get('SOTC_MODES', '')
+    run_script('sotc_modes.py', game, '--out', out, '--modes', modes)
+    if 'fps60' in modes.lower():
+        # The game waits for vblanks: at 60 Hz an uncapped frame still rounds up to 30 FPS.
+        env.setdefault('BB_VBLANK_HZ', '120')
+
     probe = find_probe()
     # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
     if not (probe.parent / 'SDL3.dll').is_file():
@@ -108,7 +116,8 @@ def main():
     user.mkdir(parents=True, exist_ok=True)
     env.setdefault('BB_GPU_USER_DIR', str(user))
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
-               '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', str(game), '--user', str(user), *sys.argv[1:]]
+               '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
+               '--app0', str(game), '--user', str(user), *sys.argv[1:]]
     return subprocess.run(command, stdin=subprocess.DEVNULL).returncode
 
 

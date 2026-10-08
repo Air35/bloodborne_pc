@@ -29,6 +29,18 @@ quando o jogo ou os módulos mudam. Os saves e o cache de shaders ficam em `user
 Para usar um save do shadPS4, copie
 `shadPS4/user/home/1000/savedata/CUSA08809` para `user/savedata/1/CUSA08809`.
 
+## Modos opcionais
+
+Em `sotc.ini`, `SOTC_MODES=` aceita uma lista separada por vírgulas:
+
+- `af16`: filtro anisotrópico 16x. O chão, a grama e as rochas ficam nítidos à distância,
+  quase sem custo.
+- `fps60`: tira o limite de 30 FPS do jogo (patch GoldHEN de illusion). O vblank passa a
+  120 Hz. **Experimental**: no campo aberto mediu 38 FPS; no templo, cerca de 25.
+
+Exemplo: `SOTC_MODES=af16,fps60`. Os modos vêm do fork shadPS4 SotC e só valem para a
+versão EU 1.01. Em outra versão eles não são aplicados.
+
 ## Controles
 
 Um controle (DualShock 4, DualSense, Xbox...) é usado automaticamente. Sem controle,

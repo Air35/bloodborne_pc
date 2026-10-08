@@ -19,7 +19,7 @@ ldd "$dest/bin/bb-probe.exe" | awk '/\/clang64\/bin\// {print $3}' | sort -u | w
     cp -u "$dll" "$dest/bin/"
 done
 cp scripts/prepare.py scripts/link_libc.py scripts/link_modules.py scripts/content_profile.py \
-   scripts/sotc_cpu.py "$dest/scripts/"
+   scripts/sotc_cpu.py scripts/sotc_modes.py "$dest/scripts/"
 cp sotc.py SotC.bat LICENSE "$dest/"
 cp docs/sotc/README-SotC.md "$dest/README.md"
 cat > "$dest/sotc.ini" <<'EOF'
@@ -28,6 +28,8 @@ cat > "$dest/sotc.ini" <<'EOF'
 SOTC_GAME_DIR=..\CUSA08809
 # Folder with libSceNgs2.sprx and libSceUlt.sprx from YOUR OWN console (for sound):
 # SOTC_SYS_MODULES=C:\path\to\sys_modules
+# Optional modes: af16 (sharp textures), fps60 (no 30 FPS cap, experimental):
+# SOTC_MODES=af16
 EOF
 # Sony firmware must never be in the package.
 if find "$dest" -iname '*.sprx' -o -iname '*.prx' | grep -q .; then

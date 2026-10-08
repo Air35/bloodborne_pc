@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--from-main-loop', action='store_true')
     parser.add_argument('--log', default='out/run.txt')
     parser.add_argument('--env', action='append', default=[], help='NAME=VALUE for the game')
+    parser.add_argument('--patches', help='BBPATCH2 file (scripts/sotc_modes.py)')
     args = parser.parse_args()
     os.chdir(ROOT)
     out = Path('out')
@@ -57,6 +58,8 @@ def main():
         env[name] = value
     command = [str(out / 'bb-probe.exe'), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--app0', GAME, '--user', str(out / 'user')]
+    if args.patches:
+        command += ['--patches', args.patches]
     log = open(args.log, 'wb')
     process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     start = time.monotonic()
