@@ -108,6 +108,25 @@ public:
     template <Type type, StateOp cpu_op, StateOp gpu_op, bool locked = true>
     void ForEachModifiedRange(u64 offset, s64 size, auto&& func) {
         auto& state = GetRegionBits<type>();
+        // sotc: every draw synchronizes its buffers here, and the region mutex is contended by
+        // the guest threads' write faults. Nothing CPU-modified and no GPU state to change is the
+        // common case: answered from an unlocked look at the bits (aligned 64-bit loads); a write
+        // fault landing right after it is the same as one landing right after the locked scan.
+        if constexpr (type == Type::CPU &&
+                      (cpu_op == StateOp::Clear || cpu_op == StateOp::None) &&
+                      (gpu_op == StateOp::None || gpu_op == StateOp::Set)) {
+            bool any_cpu = false;
+            bool all_gpu = true;
+            IterateWords(GetBounds(offset, size), [&](u64 index, u64 mask) {
+                any_cpu |= (__atomic_load_n(&cpu[index], __ATOMIC_ACQUIRE) & mask) != 0;
+                if constexpr (gpu_op == StateOp::Set) {
+                    all_gpu &= (__atomic_load_n(&gpu[index], __ATOMIC_ACQUIRE) & mask) == mask;
+                }
+            });
+            if (!any_cpu && (gpu_op == StateOp::None || all_gpu)) {
+                return;
+            }
+        }
         RegionBits write_prot;
         RegionBits read_prot;
         u64 start_page{};

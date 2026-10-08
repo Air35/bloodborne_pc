@@ -320,6 +320,17 @@ static DWORD WINAPI profiler(void *name) {
     timeEndPeriod(1);
     char where[MAX_PATH+64];
     fprintf(stderr,"SOTC profile of %s: %u samples\n",(const char *)name,samples);
+    /* SOTC_PROFILE_OUT=<file>: every sampled address (module offset, leaf, inclusive), for
+     * per-function totals offline (tools/profile_sym.py --functions). */
+    if (getenv("SOTC_PROFILE_OUT")) {
+        FILE *out=fopen(getenv("SOTC_PROFILE_OUT"),"w");
+        for (size_t i=0; out && i<PROFILE_SLOTS; ++i) {
+            if (!profile_slots[i].address) continue;
+            describe_address(where,sizeof(where),profile_slots[i].address);
+            fprintf(out,"%s %u %u\n",where,profile_slots[i].leaf,profile_slots[i].inclusive);
+        }
+        if (out) { fprintf(out,"samples %u\n",samples); fclose(out); }
+    }
     qsort(profile_slots,PROFILE_SLOTS,sizeof(*profile_slots),profile_by_leaf);
     fprintf(stderr,"  leaf:\n");
     for (int i=0;i<40 && profile_slots[i].leaf;++i) {

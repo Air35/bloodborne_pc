@@ -397,7 +397,15 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+    // sotc: SOTC_STREAM_THRESHOLD=<bytes> (default 16 KiB) for A/B: small read-only buffers are
+    // copied into the stream buffer on every bind instead of using the synchronized arena.
+    static const u64 stream_threshold = [] {
+        const char* v = std::getenv("SOTC_STREAM_THRESHOLD");
+        // sotc: 0 by default: with the unlocked no-change check the arena is cheaper than copying
+        // (+7% on the heavy benchmark, attract demo min 20 -> 24 FPS).
+        return v ? std::strtoull(v, nullptr, 0) : u64{0};
+    }();
+    if (!is_written && size <= stream_threshold && !IsRegionGpuModified(device_addr, size)) {
         const auto [data, offset] = stream_buffer.Map(size, instance.UniformMinAlignment());
         memory->CopySparseMemory(device_addr, data, size);
         stream_buffer.Commit();
