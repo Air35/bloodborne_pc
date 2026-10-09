@@ -105,7 +105,8 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'readbacks': '', 'extra_env': '', 'close_on_play': False, 'gamepad': '',
                 'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
-                'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True}
+                'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True,
+                'perf_record_thread': True}
 # Engine effects verified to change the image when set on the command line (A/B, 08/10/2026).
 EFFECTS = [('fx_vignette', ('Vinheta (cantos escurecidos)', 'Vignette (darkened corners)'),
             'r_vignetteOverrideEnable=1 r_vignetteEnable=0'),
@@ -207,6 +208,7 @@ def game_environment(s):
         cvars += ['doIndexBufferCulling=0', 'doSunShadowIndexBufferCulling=0']
     cvars += str(s.get('engine_cvars', '')).split()
     env['SOTC_CVARS'] = ' '.join(cvars)
+    env['SOTC_RECORD_THREAD'] = '1' if s.get('perf_record_thread', True) else '0'
     env['SOTC_NEO'] = '1' if s.get('neo') else '0'
     env['SOTC_OUTPUT_RES'] = s.get('output_res') or '1920x1080'
     env['BB_FSR1'] = '1' if s.get('upscaler', 'fsr1') == 'fsr1' else '0'
@@ -640,6 +642,12 @@ class Launcher:
                      'esperas pela GPU. No santuário: ~22 → ~28 FPS.',
                      'Turns off the GPU index-buffer culling (Pink-shadPS4): same image, far fewer GPU waits. '
                      'Sanctuary: ~22 → ~28 FPS.'))
+        self.check(f, 'perf_record_thread', _('Comandos Vulkan em thread própria (recomendado)',
+                                               'Vulkan commands on their own thread (recommended)'),
+                   _('Grava e envia os comandos da GPU em outra thread (cp_record_thread do Pink-shadPS4). '
+                     'Ponte do cânion no demo: ~24 → ~28 FPS. Desligue se notar travamentos.',
+                     'Records and submits the GPU commands on another thread (cp_record_thread of '
+                     'Pink-shadPS4). Canyon bridge in the demo: ~24 → ~28 FPS. Turn it off if the game hangs.'))
         self.section(f, _('Efeitos', 'Effects'))
         for key, title, _off in EFFECTS:
             self.check(f, key, _(*title))

@@ -195,6 +195,13 @@ private:
     static constexpr size_t MaxHotReadbacks = 64;
     static constexpr auto HotReadbackLifetime = std::chrono::seconds(2);
     std::vector<HotReadback> hot_readbacks;
+    /// sotc: pages the guest read back recently (the faulting ranges, not the windows). A GPU
+    /// write into one of them asks for an early submit (TakeHotWrite).
+    static constexpr size_t NumHotReads = 32;
+    std::array<std::pair<VAddr, VAddr>, NumHotReads> hot_reads{};
+    size_t hot_reads_next{};
+    bool hot_write_pending{};
+    void NoteHotRead(VAddr addr, u64 size);
     struct CleanPage {
         VAddr page_addr = ~0ULL;
         u64 map_generation{};
@@ -214,6 +221,13 @@ private:
     RangeSet current_writes;
     u64 current_writes_tick{};
     void RecordCurrentWrite(VAddr addr, u64 size);
+
+public:
+    /// sotc: true once after the command buffer being built wrote a page the guest reads back:
+    /// submitting it now lets the GPU finish it before the guest asks for it.
+    bool TakeHotWrite() noexcept;
+
+private:
 
     /// Number of resident blocks still bound to each backing allocation.
     std::unordered_map<VkDeviceMemory, u64> backing_blocks;

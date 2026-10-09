@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <unordered_map>
 #include <algorithm>
 #include <filesystem>
 #include "common/path_util.h"
@@ -198,6 +201,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto& regs = liverpool->regs;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     SotcStats::current_program.store(1, std::memory_order_relaxed);
+    SotcStats::cmd_kinds[0].fetch_add(1, std::memory_order_relaxed);
     if (!pipeline) {
         return;
     }
@@ -252,6 +256,21 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    static const bool cmd_stats = std::getenv("SOTC_CMD_STATS") != nullptr;
+    if (cmd_stats) {
+        const u64 args_size = u64{stride} * max_count;
+        if (buffer_cache.IsRegionGpuModified(arg_address + offset, args_size) ||
+            (count_address && buffer_cache.IsRegionGpuModified(count_address, 4))) {
+            SotcStats::cmd_kinds[1].fetch_add(1, std::memory_order_relaxed);
+        } else {
+            SotcStats::cmd_kinds[2].fetch_add(1, std::memory_order_relaxed);
+            u32 first[2]{1, 1};
+            if (count_address == 0 && memory->TryReadBacking(arg_address + offset, first, 8) &&
+                (first[0] == 0 || first[1] == 0)) {
+                SotcStats::cmd_kinds[3].fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     const DrawIndirectParams params = {
         .vertex_sgpr_offset = vertex_sgpr_offset,
         .instance_sgpr_offset = instance_sgpr_offset,
@@ -270,6 +289,47 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     BindVertexBuffers(pipeline);
     if (is_indexed) {
         BindIndexBuffer();
+    }
+
+    // sotc: SotC writes the arguments of most indirect draws with WRITE_DATA right before them
+    // (thousands per frame). With the arguments CPU-side, read them here and draw directly: no
+    // upload of the argument range, no barrier against the next WRITE_DATA. The pipeline is the
+    // same; the base vertex/instance reach the shader through the draw call in both cases.
+    // SOTC_INDIRECT_DIRECT=0 keeps the indirect draws.
+    static const bool direct_args = [] {
+        const char* v = std::getenv("SOTC_INDIRECT_DIRECT");
+        return !v || v[0] != '0';
+    }();
+    // Read through the backing view: the page may be read-protected for other GPU-written bytes.
+    union {
+        VkDrawIndexedIndirectCommand indexed;
+        VkDrawIndirectCommand plain;
+    } args;
+    if (direct_args && count_address == 0 && max_count == 1 &&
+        stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                              : sizeof(VkDrawIndirectCommand)) &&
+        !buffer_cache.IsRegionGpuModified(arg_address + offset, stride) &&
+        memory->TryReadBacking(arg_address + offset, &args, stride)) {
+        if (needs_barrier) {
+            runtime.FlushBarriers();
+        }
+        pipeline->BindResources(set_writes, push_data);
+        UpdateDynamicState(pipeline, is_indexed);
+        scheduler.BeginRendering(state);
+        const auto cmdbuf = scheduler.CommandBuffer();
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
+        if (is_indexed) {
+            const auto& a = args.indexed;
+            cmdbuf.drawIndexed(a.indexCount, a.instanceCount, a.firstIndex, a.vertexOffset,
+                               a.firstInstance);
+        } else {
+            const auto& a = args.plain;
+            cmdbuf.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
+        }
+        DebugState.IncDrawCall();
+        ResetBindings(false);
+        FlushPeriodic();
+        return;
     }
 
     const auto [buffer, base] =
@@ -344,6 +404,31 @@ void Rasterizer::DispatchDirect() {
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     SotcStats::current_program.store(cs.pgm_hash, std::memory_order_relaxed);
+    SotcStats::cmd_kinds[4].fetch_add(1, std::memory_order_relaxed);
+    // SOTC_CMD_STATS=2: the dispatched shaders, every 10 s (command processor thread only).
+    static const bool shader_stats = [] {
+        const char* v = std::getenv("SOTC_CMD_STATS");
+        return v && v[0] == '2';
+    }();
+    if (shader_stats) {
+        static std::unordered_map<u64, u64> counts;
+        static auto last = std::chrono::steady_clock::now();
+        ++counts[cs.pgm_hash];
+        if (const auto now = std::chrono::steady_clock::now(); now - last > std::chrono::seconds(10)) {
+            last = now;
+            std::vector<std::pair<u64, u64>> sorted;
+            for (const auto& [hash, n] : counts) {
+                sorted.emplace_back(n, hash);
+            }
+            std::sort(sorted.rbegin(), sorted.rend());
+            std::string line = "SOTC dispatches in 10 s:";
+            for (size_t i = 0; i < sorted.size() && i < 12; ++i) {
+                line += fmt::format(" {:#x}={}", sorted[i].second, sorted[i].first);
+            }
+            std::fprintf(stderr, "%s\n", line.c_str());
+            counts.clear();
+        }
+    }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
@@ -371,6 +456,7 @@ void Rasterizer::DispatchDirect() {
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
+    SotcStats::cmd_kinds[5].fetch_add(1, std::memory_order_relaxed);
 
     scheduler.PopPendingOperations();
 
@@ -617,6 +703,19 @@ void Rasterizer::FlushPeriodic() {
                    ? 256u
                    : 0u;
     }();
+    // sotc: the command buffer wrote a page the guest reads back: submit it now, the GPU runs
+    // it while the guest gets there, and the readback finds it done (or nearly). SOTC_RB_EARLY=1
+    // turns it on; measured within noise on the attract demo, so off by default.
+    SotcStats::commands.fetch_add(1, std::memory_order_relaxed);
+    static const bool early = [] {
+        const char* v = std::getenv("SOTC_RB_EARLY");
+        return v && v[0] == '1';
+    }();
+    if (early && !scheduler.IsRendering() && buffer_cache.TakeHotWrite()) {
+        SotcStats::early_flushes.fetch_add(1, std::memory_order_relaxed);
+        scheduler.Flush();
+        return;
+    }
     if (every == 0) {
         return;
     }

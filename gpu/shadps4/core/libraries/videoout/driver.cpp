@@ -262,18 +262,31 @@ void VideoOutDriver::Flip(const Request& req) {
             const uint64_t bytes = SotcStats::readback_bytes.exchange(0);
             const uint64_t bytes_changed = SotcStats::readback_bytes_changed.exchange(0);
             std::fprintf(stderr,
-                         "SOTC FPS %.1f at %.0fs; readbacks %.0f/s (ahead %llu, finish %llu, heap %llu), %.0f ms/s; "
+                         "SOTC FPS %.1f at %.0fs; %.0f cmds/frame; readbacks %.0f/s (ahead %llu, finish %llu, heap %llu, early %llu), %.0f ms/s; "
                          "changed copies %llu/%llu, bytes %llu/%llu\n",
                          flips / seconds, std::chrono::duration<double>(now - run_start).count(),
+                         flips ? double(SotcStats::commands.exchange(0)) / flips : 0.0,
                          readbacks / seconds,
                          static_cast<unsigned long long>(SotcStats::readback_ahead.exchange(0)),
                          static_cast<unsigned long long>(SotcStats::readback_finish.exchange(0)),
                          static_cast<unsigned long long>(SotcStats::heap_guard_builds.exchange(0)),
+                         static_cast<unsigned long long>(SotcStats::early_flushes.exchange(0)),
                          readback_ns / 1e6 / seconds,
                          static_cast<unsigned long long>(copies_changed),
                          static_cast<unsigned long long>(copies),
                          static_cast<unsigned long long>(bytes_changed),
                          static_cast<unsigned long long>(bytes));
+            static const bool cmd_stats = std::getenv("SOTC_CMD_STATS") != nullptr;
+            if (cmd_stats && flips) {
+                double k[6];
+                for (int i = 0; i < 6; ++i) {
+                    k[i] = double(SotcStats::cmd_kinds[i].exchange(0)) / flips;
+                }
+                std::fprintf(stderr,
+                             "SOTC cmds/frame: draw %.0f, indirect %.0f gpu-args + %.0f cpu-args "
+                             "(%.0f empty), dispatch %.0f, dispatch-indirect %.0f\n",
+                             k[0], k[1], k[2], k[3], k[4], k[5]);
+            }
             flips = 0;
             window_start = now;
         }

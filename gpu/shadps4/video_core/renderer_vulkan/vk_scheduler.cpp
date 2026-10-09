@@ -7,16 +7,23 @@
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_recorder.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include <chrono>
+#include <span>
+#include <boost/container/small_vector.hpp>
 #include <immintrin.h>
 
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
 
-Scheduler::Scheduler(const Instance& instance)
+Scheduler::Scheduler(const Instance& instance, bool record_thread)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    if (record_thread) {
+        recorder = std::make_unique<CommandRecorder>();
+        LOG_INFO(Render_Vulkan, "Vulkan commands are recorded on their own thread");
+    }
 #if TRACY_GPU_ENABLED
     profiler_scope = reinterpret_cast<tracy::VkCtxScope*>(std::malloc(sizeof(tracy::VkCtxScope)));
 #endif
@@ -29,6 +36,38 @@ Scheduler::~Scheduler() {
 #if TRACY_GPU_ENABLED
     std::free(profiler_scope);
 #endif
+}
+
+void Scheduler::ClaimRecorder() {
+    if (recorder) {
+        recorder->ClaimProducer();
+    }
+}
+
+void Scheduler::BeginRecorded(vk::CommandBuffer fake) {
+    const vk::CommandBuffer real = command_pool.Commit();
+    Check(real.begin(vk::CommandBufferBeginInfo{
+        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+    }));
+    recorder->Bind(fake, real);
+}
+
+void Scheduler::WaitSubmitted(u64 tick, bool kick) {
+    if (!recorder || recorded_submit_tick.load(std::memory_order_acquire) >= tick) {
+        return;
+    }
+    if (kick) {
+        recorder->Kick();
+    }
+    u64 submitted = recorded_submit_tick.load(std::memory_order_acquire);
+    for (u32 spins = 0; spins < 4096 && submitted < tick; ++spins) {
+        _mm_pause();
+        submitted = recorded_submit_tick.load(std::memory_order_acquire);
+    }
+    while (submitted < tick) {
+        recorded_submit_tick.wait(submitted, std::memory_order_acquire);
+        submitted = recorded_submit_tick.load(std::memory_order_acquire);
+    }
 }
 
 void Scheduler::BeginRendering(const RenderState& new_state) {
@@ -99,6 +138,11 @@ vk::CommandBuffer Scheduler::UploadCommandBuffer() {
     if (upload_cmdbuf) {
         return upload_cmdbuf;
     }
+    if (recorder) {
+        upload_cmdbuf = recorder->NewFakeHandle();
+        recorder->Run([this, fake = upload_cmdbuf] { BeginRecorded(fake); });
+        return upload_cmdbuf;
+    }
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
@@ -125,12 +169,21 @@ void Scheduler::Finish() {
     Wait(presubmit_tick);
 }
 
+void Scheduler::FinishHostRead() {
+    const u64 presubmit_tick = CurrentTick();
+    SubmitInfo info{};
+    SubmitExecution(info);
+    WaitSubmitted(presubmit_tick);
+    work_semaphore.WaitHostRead(presubmit_tick);
+}
+
 void Scheduler::Wait(u64 tick) {
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
         Flush(info);
     }
+    WaitSubmitted(tick);
     work_semaphore.Wait(tick);
 }
 
@@ -161,6 +214,10 @@ vk::CommandBuffer Scheduler::BeginAhead() {
                    vk::to_string(fence_result));
         ahead_fence = std::move(fence);
     } else {
+        // An ahead copy that returned on its marker may still be pending for the driver.
+        if (std::exchange(ahead_unfinished, false)) {
+            Check(device.waitForFences(*ahead_fence, true, std::numeric_limits<u64>::max()));
+        }
         Check(device.resetFences(*ahead_fence));
     }
     Check(ahead_cmdbuf.reset());
@@ -171,7 +228,13 @@ vk::CommandBuffer Scheduler::BeginAhead() {
 }
 
 void Scheduler::SubmitAheadAndWait() {
+    if (work_semaphore.HasMarker()) {
+        work_semaphore.RecordMarker(ahead_cmdbuf, Semaphore::MarkerSlot::Ahead,
+                                    static_cast<u32>(++ahead_sequence));
+    }
     Check(ahead_cmdbuf.end());
+    // With the recorder, the earlier submits must have reached the queue first.
+    WaitSubmitted(CurrentTick() - 1);
     // Queue submission order and the barriers recorded in the command buffer order it after
     // all work submitted before; the command buffer being recorded is not involved.
     const vk::SubmitInfo submit_info = {
@@ -187,6 +250,12 @@ void Scheduler::SubmitAheadAndWait() {
         }
         ASSERT_MSG(submit_result == vk::Result::eSuccess, "Ahead submit failed: {}",
                    vk::to_string(submit_result));
+    }
+    if (work_semaphore.SpinMarker(Semaphore::MarkerSlot::Ahead, ahead_sequence) &&
+        work_semaphore.TrustMarker()) {
+        // The copy is readable; the fence is waited for before the command buffer is reused.
+        ahead_unfinished = true;
+        return;
     }
     if (const u32 spin_us = SotcWaitSpinUs(); spin_us != 0) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(spin_us);
@@ -221,11 +290,16 @@ void Scheduler::BeginSession() {
 
     auto& session = sessions.emplace_back();
 
-    const vk::CommandBufferBeginInfo begin_info = {
-        .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
-    };
-    session.primary = command_pool.Commit();
-    Check(session.primary.begin(begin_info));
+    if (recorder) {
+        session.primary = recorder->NewFakeHandle();
+        recorder->Run([this, fake = session.primary] { BeginRecorded(fake); });
+    } else {
+        const vk::CommandBufferBeginInfo begin_info = {
+            .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
+        };
+        session.primary = command_pool.Commit();
+        Check(session.primary.begin(begin_info));
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -258,38 +332,9 @@ void Scheduler::EndSession() {
     Check(session.primary.end());
 }
 
-void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
-    const u64 signal_value = work_semaphore.NextTick();
-
-#if TRACY_GPU_ENABLED
-    auto* profiler_ctx = instance.GetProfilerContext();
-    if (profiler_ctx) {
-        profiler_scope->~VkCtxScope();
-        TracyVkCollect(profiler_ctx, current_cmdbuf);
-    }
-#endif
-
-    if (on_submit) {
-        on_submit(info);
-    }
-
-    EndSession();
-
-    std::vector<vk::CommandBuffer> cmd_buffers;
-    cmd_buffers.reserve(sessions.size() * 2);
-
-    for (const auto& session : sessions) {
-        if (session.upload) {
-            cmd_buffers.push_back(session.upload);
-        }
-        cmd_buffers.push_back(session.primary);
-    }
-    sessions.clear();
-
-    const vk::Semaphore timeline = work_semaphore.Handle();
-    info.AddSignal(timeline, signal_value);
-
+// The queue submit of SubmitExecution, from the command processor or the recording thread.
+static void QueueSubmit(const Instance& instance, const SubmitInfo& info,
+                        std::span<const vk::CommandBuffer> cmd_buffers) {
     // One stage mask per wait semaphore; SubmitInfo can carry up to 4 waits (it used to provide
     // only 2 masks, so a third/fourth wait read past the array).
     static constexpr std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
@@ -318,11 +363,69 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         .pSignalSemaphores = info.signal_semas.data(),
     };
 
+    std::scoped_lock lk{Scheduler::submit_mutex};
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     if (submit_result == vk::Result::eErrorDeviceLost) {
         instance.ReportDeviceFault();
         UNREACHABLE_MSG("Device lost during submit");
+    }
+}
+
+void Scheduler::SubmitExecution(SubmitInfo& info) {
+    // Only the queue operations take submit_mutex (the sparse binds of on_submit take it on
+    // their own): with the recorder, holding it while queueing commands could wait for the
+    // recording thread, which needs it for its submits.
+    const u64 signal_value = work_semaphore.NextTick();
+
+#if TRACY_GPU_ENABLED
+    auto* profiler_ctx = instance.GetProfilerContext();
+    if (profiler_ctx) {
+        profiler_scope->~VkCtxScope();
+        TracyVkCollect(profiler_ctx, current_cmdbuf);
+    }
+#endif
+
+    if (on_submit) {
+        on_submit(info);
+    }
+
+    // sotc: the GPU writes this tick to host memory once everything before is visible there.
+    if (work_semaphore.HasMarker() && !sessions.empty()) {
+        EndRendering();
+        work_semaphore.RecordMarker(sessions.back().primary, Semaphore::MarkerSlot::Timeline,
+                                    static_cast<u32>(signal_value));
+    }
+
+    EndSession();
+
+    boost::container::small_vector<vk::CommandBuffer, 8> cmd_buffers;
+    for (const auto& session : sessions) {
+        if (session.upload) {
+            cmd_buffers.push_back(session.upload);
+        }
+        cmd_buffers.push_back(session.primary);
+    }
+    sessions.clear();
+
+    const vk::Semaphore timeline = work_semaphore.Handle();
+    info.AddSignal(timeline, signal_value);
+
+    if (recorder) {
+        // The submit runs on the recording thread after the commands of these command buffers.
+        recorder->Run([this, info, fakes = std::move(cmd_buffers), signal_value] {
+            boost::container::small_vector<vk::CommandBuffer, 8> real;
+            for (const vk::CommandBuffer fake : fakes) {
+                real.push_back(recorder->Real(fake));
+            }
+            QueueSubmit(instance, info, real);
+            recorded_submit_tick.store(signal_value, std::memory_order_release);
+            recorded_submit_tick.notify_all();
+            recorder->Retire(static_cast<u32>(fakes.size()));
+        });
+        recorder->Kick();
+    } else {
+        QueueSubmit(instance, info, cmd_buffers);
     }
 
     work_semaphore.Refresh();

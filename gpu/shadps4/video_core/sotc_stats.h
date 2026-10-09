@@ -16,6 +16,11 @@ inline std::atomic<uint64_t> readback_copies{0};          ///< ranges downloaded
 inline std::atomic<uint64_t> readback_copies_changed{0};  ///< ... whose bytes differed from memory
 inline std::atomic<uint64_t> readback_bytes{0};
 inline std::atomic<uint64_t> readback_bytes_changed{0};
+inline std::atomic<uint64_t> commands{0}; ///< draws and dispatches recorded
+/// SOTC_CMD_STATS=1: draws, indirect draws (arguments GPU-written / CPU-side / CPU-side and
+/// empty), dispatches, indirect dispatches.
+inline std::atomic<uint64_t> cmd_kinds[6]{};
+inline std::atomic<uint64_t> early_flushes{0}; ///< submits right after a write to a read-back page
 
 struct ScopedTimer {
     std::atomic<uint64_t>& total;

@@ -125,6 +125,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
+        NoteHotRead(device_addr, size);
         const u32 first_block = device_addr >> block_shift;
         const u32 last_block = (device_addr + size - 1) >> block_shift;
         const auto* arena = GetArena(first_block, last_block);
@@ -321,7 +322,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         for (const auto& item : pending) {
             runtime.CopyBuffer(item.arena, download.buffer, item.copies);
         }
-        scheduler.Finish();
+        scheduler.FinishHostRead();
     }
 
     download.buffer->Invalidate(download.offset, download.size);
@@ -503,7 +504,32 @@ bool BufferCache::ReadClean(VAddr addr, void* out, u32 size) {
     return true;
 }
 
+bool BufferCache::TakeHotWrite() noexcept {
+    // Only while that write is still in the command buffer being built.
+    return std::exchange(hot_write_pending, false) && current_writes_tick == scheduler.CurrentTick();
+}
+
+void BufferCache::NoteHotRead(VAddr addr, u64 size) {
+    const VAddr end = addr + size;
+    for (const auto& [start, stop] : hot_reads) {
+        if (start == addr && stop == end) {
+            return;
+        }
+    }
+    hot_reads[hot_reads_next] = {addr, end};
+    hot_reads_next = (hot_reads_next + 1) % NumHotReads;
+}
+
 void BufferCache::RecordCurrentWrite(VAddr addr, u64 size) {
+    if (!hot_write_pending) {
+        const VAddr end = addr + size;
+        for (const auto& [start, stop] : hot_reads) {
+            if (addr < stop && start < end) {
+                hot_write_pending = true;
+                break;
+            }
+        }
+    }
     if (current_writes_tick != scheduler.CurrentTick()) {
         current_writes.Clear();
         current_writes_tick = scheduler.CurrentTick();
@@ -879,6 +905,8 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
+    // Queue access is serialized by submit_mutex, which the scheduler no longer holds here.
+    std::scoped_lock lk{Vulkan::Scheduler::submit_mutex};
     auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 

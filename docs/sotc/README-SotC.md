@@ -99,7 +99,8 @@ cargas cai para 22–25.
   runtime nativo e lançador, base deste port.
 - [shadPS4](https://github.com/shadps4-emu/shadPS4) e o fork shadPS4 SotC: núcleo de vídeo Vulkan.
 - [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): as cvars de culling, a proteção
-  do heap do jogo contra leituras da GPU (`bpe_heap_guard`), o flush periódico e as leituras antecipadas.
+  do heap do jogo contra leituras da GPU (`bpe_heap_guard`), o flush periódico, as leituras antecipadas,
+  o marcador de espera e o gravador de comandos Vulkan em thread própria (`cp_record_thread`).
 
 ## Diagnóstico
 
@@ -111,3 +112,7 @@ Estas variáveis de ambiente ajudam a investigar problemas:
 | `BB_FAULT_RING=arquivo` | grava as últimas exceções (sobrevive a quedas) |
 | `BB_STACKS_TRIGGER=arquivo` | criar o arquivo despeja as pilhas das threads |
 | `BB_READBACKS=0/1/2` | leituras da GPU; o padrão 2 é o exigido pelo jogo |
+| `SOTC_RECORD_THREAD=0` | grava os comandos Vulkan na própria thread de comandos (padrão: thread própria) |
+| `SOTC_INDIRECT_DIRECT=0` | mantém indiretos os draws cujos argumentos estão na CPU |
+| `SOTC_WAIT_MARKER=1/2` | esperas pela GPU consultam um marcador escrito por ela (experimental) |
+| `SOTC_CMD_STATS=1/2` | draws e dispatches por quadro (2: shaders de compute mais usados) |

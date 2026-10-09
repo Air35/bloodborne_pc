@@ -32,6 +32,12 @@ struct RangeSet {
     void Add(VAddr base_address, size_t size) {
         const VAddr end_address = base_address + size;
         IntervalType interval{base_address, end_address};
+        // sotc: draws mark the same written buffers again and again; a lookup costs far less
+        // than an insertion that changes nothing.
+        if (const auto it = m_ranges_set.find(interval);
+            it != m_ranges_set.end() && boost::icl::contains(*it, interval)) {
+            return;
+        }
         m_ranges_set.add(interval);
     }
 

@@ -28,3 +28,10 @@ for name, n in self_time.most_common(40):
 print('outside the loader (by module):')
 for name, n in other.most_common(10):
     print(f'  {100*n/samples:5.1f}%  {name}')
+# Inclusive time by function (return addresses of the same function summed: the calls it made).
+incl = collections.Counter()
+for (where, leaf, inc), name in zip(own, names):
+    incl[name] += inc - leaf
+print('inclusive (callees) by function:')
+for name, n in incl.most_common(int(sys.argv[3]) if len(sys.argv) > 3 else 45):
+    print(f'  {100*n/samples:5.1f}%  {name[:110]}')

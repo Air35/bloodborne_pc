@@ -460,7 +460,14 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
-      draw_scheduler{instance}, present_scheduler{instance}, flip_scheduler{instance},
+      draw_scheduler{instance, [] {
+          // sotc: Vulkan commands of the command processor recorded on a thread of their own
+          // (cp_record_thread of Pink-shadPS4, luizgustavs): canyon of the attract demo
+          // 24 -> 28 FPS. SOTC_RECORD_THREAD=0 records them on the command processor.
+          const char* v = std::getenv("SOTC_RECORD_THREAD");
+          return !v || v[0] != '0';
+      }()},
+      present_scheduler{instance}, flip_scheduler{instance},
       swapchain{instance, window}, runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
@@ -489,7 +496,8 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 }
 
 Presenter::~Presenter() {
-
+    // This thread records the last commands of the rasterizer scheduler.
+    draw_scheduler.ClaimRecorder();
     draw_scheduler.Finish();
     present_scheduler.Finish();
     flip_scheduler.Finish();
@@ -1089,6 +1097,11 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     }
 
     SubmitInfo info{};
+    // sotc: with the command recorder the frame's submit may not be on the queue yet; waiting
+    // for it on the same queue before it is there would block the queue.
+    if (frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()) {
+        draw_scheduler.WaitSubmitted(frame->ready_tick, false);
+    }
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());

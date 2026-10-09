@@ -24,6 +24,7 @@ class VkCtxScope;
 namespace Vulkan {
 
 class Instance;
+class CommandRecorder;
 
 struct RenderAttachment {
     vk::ImageView image_view;
@@ -353,8 +354,18 @@ using SubmitFunc = Common::UniqueFunction<void, SubmitInfo&>;
 
 class Scheduler {
 public:
-    explicit Scheduler(const Instance& instance);
+    /// record_thread: Vulkan commands are recorded and submitted on a thread of their own
+    /// (cp_record_thread of Pink-shadPS4, vk_recorder.h).
+    explicit Scheduler(const Instance& instance, bool record_thread = false);
     ~Scheduler();
+
+    /// Makes the calling thread the one recording (shutdown from another thread).
+    void ClaimRecorder();
+
+    /// Waits until the recording thread has put the submit of tick on the queue. Another
+    /// thread that queues work waiting for tick on the same queue must call this first: a wait
+    /// queued before its signal blocks the queue for good. kick: the recording thread only.
+    void WaitSubmitted(u64 tick, bool kick = true);
 
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
@@ -366,6 +377,10 @@ public:
 
     /// Sends the current execution context to the GPU and waits for it to complete.
     void Finish();
+
+    /// sotc: Finish for readbacks: returns once the host can read what was submitted, which with
+    /// SOTC_WAIT_MARKER=2 can be before the driver reports it (Semaphore::WaitHostRead).
+    void FinishHostRead();
 
     /// Waits for the given tick to trigger on the GPU.
     void Wait(u64 tick);
@@ -465,6 +480,10 @@ private:
 
     void SubmitExecution(SubmitInfo& info);
 
+    /// Recording thread: a real command buffer for the fake handle the producer uses.
+    void BeginRecorded(vk::CommandBuffer fake);
+
+
     void PriorityPendingOpsThread(std::stop_token stoken);
 
 private:
@@ -495,7 +514,13 @@ private:
     vk::UniqueCommandPool ahead_pool;
     vk::CommandBuffer ahead_cmdbuf;
     vk::UniqueFence ahead_fence;
+    u64 ahead_sequence{};
+    bool ahead_unfinished{};
     tracy::VkCtxScope* profiler_scope{};
+    /// Newest tick the recording thread has put on the queue.
+    std::atomic<u64> recorded_submit_tick{0};
+    /// Last member: stops (after running everything queued) before the rest is destroyed.
+    std::unique_ptr<CommandRecorder> recorder;
 };
 
 } // namespace Vulkan
