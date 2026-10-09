@@ -286,6 +286,16 @@ void VideoOutDriver::Flip(const Request& req) {
                              "SOTC cmds/frame: draw %.0f, indirect %.0f gpu-args + %.0f cpu-args "
                              "(%.0f empty), dispatch %.0f, dispatch-indirect %.0f\n",
                              k[0], k[1], k[2], k[3], k[4], k[5]);
+                std::fprintf(stderr,
+                             "SOTC faults/s: guest writes %.0f, walker loads %.0f, CP reads %.0f\n",
+                             SotcStats::fault_writes.exchange(0) / seconds,
+                             SotcStats::fault_walker.exchange(0) / seconds,
+                             SotcStats::fault_gpu_reads.exchange(0) / seconds);
+                std::fprintf(stderr,
+                             "SOTC per frame: uploads %.0f (%.0f KB), render pass breaks %.0f\n",
+                             double(SotcStats::uploads.exchange(0)) / flips,
+                             double(SotcStats::upload_bytes.exchange(0)) / 1024.0 / flips,
+                             double(SotcStats::render_breaks.exchange(0)) / flips);
             }
             flips = 0;
             window_start = now;

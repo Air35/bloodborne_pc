@@ -557,6 +557,28 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     ASSERT(info.guest_address != 0);
 
     std::scoped_lock lock{mutex};
+    // sotc: thousands of lookups per frame find the same images; a perfect match stays one
+    // until an image is registered or unregistered (SOTC_FIND_MEMO=0: always search).
+    static const bool memo_enabled = [] {
+        const char* v = std::getenv("SOTC_FIND_MEMO");
+        return !v || v[0] != '0';
+    }();
+    const u64 memo_hash = (info.guest_address * 0x9E3779B97F4A7C15ULL) ^
+                          (u64{info.guest_size} * 0xC2B2AE3D27D4EB4FULL) ^
+                          (u64(info.pixel_format) << 7) ^ (u64{info.size.width} << 23) ^
+                          (u64{info.size.height} << 41) ^ u64{exact_fmt};
+    FindMemo& memo = find_memos[(memo_hash ^ (memo_hash >> 31)) % NumFindMemos];
+    if (memo_enabled && memo.generation == image_set_generation &&
+        memo.guest_address == info.guest_address && memo.guest_size == info.guest_size &&
+        memo.size == info.size && memo.pixel_format == info.pixel_format &&
+        memo.type == info.type && memo.exact_fmt == exact_fmt) {
+        Image& image = slot_images[memo.image_id];
+        if (!(image.info.resources < info.resources)) {
+            image.tick_accessed_last = scheduler.CurrentTick();
+            TouchImage(image);
+            return memo.image_id;
+        }
+    }
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
@@ -583,6 +605,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             continue;
         }
         image_id = cache_id;
+    }
+    if (image_id && !(slot_images[image_id].info.resources < info.resources)) {
+        memo = {info.guest_address, info.guest_size, info.size, info.pixel_format, info.type,
+                exact_fmt,         image_set_generation, image_id};
     }
 
     // Try to resolve overlaps (if any)
@@ -854,6 +880,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
+    ++image_set_generation;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     ForEachPage(image.info.guest_address, image.info.guest_size,
@@ -865,6 +892,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
     ASSERT_MSG(True(image.flags & ImageFlagBits::Registered),
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
+    ++image_set_generation;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {

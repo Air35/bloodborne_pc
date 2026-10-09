@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstring>
+#include <memory>
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
@@ -119,6 +122,28 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
+    // sotc: every texture of every draw describes its image again, mip layout included (a few
+    // thousand per frame in SotC's open world), mostly the same few hundred T#s. The result only
+    // depends on the T# and is_depth: answered from a small per-thread cache.
+    struct Entry {
+        std::array<u64, 4> sharp;
+        bool is_depth;
+        bool valid;
+        ImageInfo info;
+    };
+    static constexpr size_t NumEntries = 512;
+    static thread_local std::unique_ptr<std::array<Entry, NumEntries>> cache =
+        std::make_unique<std::array<Entry, NumEntries>>();
+    std::array<u64, 4> sharp;
+    std::memcpy(sharp.data(), &image, sizeof(sharp));
+    const u64 hash = (sharp[0] * 0x9E3779B97F4A7C15ULL) ^ (sharp[1] * 0xC2B2AE3D27D4EB4FULL) ^
+                     (sharp[2] * 0x165667B19E3779F9ULL) ^ (sharp[3] * 0x27D4EB2F165667C5ULL) ^
+                     u64{desc.is_depth};
+    Entry& entry = (*cache)[(hash ^ (hash >> 29)) % NumEntries];
+    if (entry.valid && entry.is_depth == desc.is_depth && entry.sharp == sharp) {
+        *this = entry.info;
+        return;
+    }
     tile_mode = image.GetTileMode();
     array_mode = AmdGpu::GetArrayMode(tile_mode);
     pixel_format = LiverpoolToVK::SurfaceFormat(image.GetDataFmt(), image.GetNumberFmt());
@@ -145,6 +170,10 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    entry.sharp = sharp;
+    entry.is_depth = desc.is_depth;
+    entry.info = *this;
+    entry.valid = true;
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {

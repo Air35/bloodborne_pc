@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_recorder.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/sotc_stats.h"
 #include <chrono>
 #include <span>
 #include <boost/container/small_vector.hpp>
@@ -129,6 +130,7 @@ void Scheduler::EndRendering() {
     if (!is_rendering) {
         return;
     }
+    SotcStats::render_breaks.fetch_add(1, std::memory_order_relaxed);
     is_rendering = false;
     CommandBuffer().endRendering();
 }

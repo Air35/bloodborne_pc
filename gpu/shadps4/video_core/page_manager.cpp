@@ -29,6 +29,7 @@
 #include "core/signals.h"
 #include "shader_recompiler/ir/passes/srt.h"
 #include "video_core/page_manager.h"
+#include "video_core/sotc_stats.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifndef _WIN64
@@ -606,9 +607,10 @@ struct SignalImpl : public PageManager::Impl {
 
     // sotc: SOTC_RB_STATS=1 prints, every 10 s, the read faults that cost a readback, grouped by
     // reader (guest or GPU thread), faulting instruction and 64 KiB region.
-    static void NoteReadFault(void* context, VAddr addr, bool is_gpu_thread) {
-        static const bool enabled = std::getenv("SOTC_RB_STATS") != nullptr;
-        if (!enabled) {
+    // SOTC_RB_STATS=w: the write faults instead.
+    static void NoteReadFault(void* context, VAddr addr, bool is_gpu_thread, bool write = false) {
+        static const char* const mode = std::getenv("SOTC_RB_STATS");
+        if (!mode || (mode[0] == 'w') != write) {
             return;
         }
         static std::mutex stats_mutex;
@@ -670,11 +672,21 @@ struct SignalImpl : public PageManager::Impl {
         const auto is_gpu_thread =
             std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread();
         if (!Common::IsWriteError(context) && is_gpu_thread && TryCleanWalkerLoad(context)) {
+            SotcStats::fault_walker.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
         if (Common::IsWriteError(context)) {
-            return rasterizer->InvalidateMemory(addr, size, is_gpu_thread);
+            SotcStats::fault_writes.fetch_add(1, std::memory_order_relaxed);
+            NoteReadFault(context, addr, is_gpu_thread, true);
+            if (!rasterizer->InvalidateMemory(addr, size, is_gpu_thread)) {
+                return false;
+            }
+            rasterizer->MarkWriteAhead(addr);
+            return true;
         } else {
+            if (is_gpu_thread) {
+                SotcStats::fault_gpu_reads.fetch_add(1, std::memory_order_relaxed);
+            }
             NoteReadFault(context, addr, is_gpu_thread);
             return rasterizer->ReadMemory(addr, size, is_gpu_thread);
         }

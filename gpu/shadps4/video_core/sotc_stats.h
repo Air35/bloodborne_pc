@@ -16,6 +16,12 @@ inline std::atomic<uint64_t> readback_copies{0};          ///< ranges downloaded
 inline std::atomic<uint64_t> readback_copies_changed{0};  ///< ... whose bytes differed from memory
 inline std::atomic<uint64_t> readback_bytes{0};
 inline std::atomic<uint64_t> readback_bytes_changed{0};
+inline std::atomic<uint64_t> uploads{0};        ///< SynchronizeMemory copies (CPU data to GPU)
+inline std::atomic<uint64_t> upload_bytes{0};
+inline std::atomic<uint64_t> render_breaks{0};  ///< EndRendering that closed a render pass
+inline std::atomic<uint64_t> fault_writes{0};       ///< guest write faults on tracked pages
+inline std::atomic<uint64_t> fault_walker{0};       ///< SRT walker loads emulated after a fault
+inline std::atomic<uint64_t> fault_gpu_reads{0};    ///< other read faults on the command processor
 inline std::atomic<uint64_t> commands{0}; ///< draws and dispatches recorded
 /// SOTC_CMD_STATS=1: draws, indirect draws (arguments GPU-written / CPU-side / CPU-side and
 /// empty), dispatches, indirect dispatches.

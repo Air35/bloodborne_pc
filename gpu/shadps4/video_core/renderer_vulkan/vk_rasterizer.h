@@ -73,6 +73,10 @@ public:
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
     bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// sotc: after a guest write fault at addr (BufferCache::MarkWriteAhead).
+    void MarkWriteAhead(VAddr addr) {
+        buffer_cache.MarkWriteAhead(addr);
+    }
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     bool IsMapped(VAddr addr, u64 size);
     /// Command processor thread only, see BufferCache::IsRangeGpuWritten.

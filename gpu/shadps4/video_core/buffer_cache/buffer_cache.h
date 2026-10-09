@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <deque>
+#include <span>
+#include <vector>
 #include <unordered_map>
 #include <boost/container/small_vector.hpp>
 
@@ -97,6 +99,10 @@ public:
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
 
+    /// sotc: a guest write fault at addr: unprotect the following pages too (MemoryTracker::
+    /// MarkAheadAsCpuModified). SOTC_WRITE_AHEAD_PAGES (default 15, 0 = off).
+    void MarkWriteAhead(VAddr addr);
+
     /// sotc: writes `data` to guest memory from the CPU as a GPU write would, when no other
     /// GPU-written bytes share its pages: the range stops being GPU-modified, so reading it
     /// back costs no readback. False (nothing done) otherwise.
@@ -147,6 +153,53 @@ private:
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
+
+    /// One range to read back: its GPU-modified parts, as copies from the arena.
+    struct ReadbackItem {
+        const Buffer* arena;
+        VAddr addr;
+        u64 size;
+        boost::container::small_vector<vk::BufferCopy, 4> copies;
+        /// The GPU-modified ranges downloaded, when GatherDownloads leaves them in the set.
+        boost::container::small_vector<std::pair<VAddr, u64>, 4> gpu_ranges;
+    };
+    /// Collects what a readback of [device_addr, +size) and the hot readbacks must copy, taking
+    /// it out of the GPU-modified set. Returns the bytes to download.
+    u64 GatherDownloads(const Buffer* arena, VAddr device_addr, u64 size,
+                        boost::container::small_vector<ReadbackItem, 16>& pending,
+                        bool subtract = true);
+    /// Writes downloaded data (mapped, at the copies' destination offsets minus mapped_offset)
+    /// into guest memory and unmarks the ranges as GPU-modified.
+    void ApplyDownloads(std::span<const ReadbackItem> pending, const u8* mapped,
+                        u64 mapped_offset);
+
+    /// sotc (SOTC_RB_ASYNC=1): a readback asked by a guest thread in two steps on the command
+    /// processor: the copies are recorded and submitted without waiting (the command processor
+    /// goes on with its queue), the guest thread waits for the GPU, then the data is applied
+    /// unless a later GPU write hit the ranges meanwhile (then it is read back again).
+    struct AsyncReadback {
+        VAddr device_addr{};
+        u64 size{};
+        bool is_write{};
+        bool waiting{};
+        bool dirty{};
+        bool dependent{};
+        bool finished{};
+        u64 tick{};
+        const Buffer* arena{};
+        VAddr window_start{};
+        u64 window_size{};
+        u64 download_offset{};
+        const u8* download_mapped{};
+        Buffer* download_buffer{};
+        u64 download_size{};
+        boost::container::small_vector<ReadbackItem, 16> pending;
+    };
+    void BeginAsyncReadback(AsyncReadback& readback);
+    void FinishAsyncReadback(AsyncReadback& readback);
+    AsyncReadback* FindInflightReadback(VAddr addr, u64 size);
+    void MarkInflightReadbacksDirty(VAddr addr, u64 size);
+    std::vector<AsyncReadback*> inflight_readbacks;
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);

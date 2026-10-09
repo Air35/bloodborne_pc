@@ -364,6 +364,20 @@ private:
     const bool readback_linear_images;
     PageTable page_table;
     std::mutex mutex;
+    /// sotc: FindImage's perfect matches, valid while no image is registered or unregistered.
+    struct FindMemo {
+        VAddr guest_address{};
+        u64 guest_size{};
+        Extent3D size{};
+        vk::Format pixel_format{};
+        AmdGpu::ImageType type{};
+        bool exact_fmt{};
+        u64 generation{~0ULL};
+        ImageId image_id{};
+    };
+    static constexpr size_t NumFindMemos = 1024;
+    std::array<FindMemo, NumFindMemos> find_memos{};
+    u64 image_set_generation{};
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
     struct MetaDataInfo {

@@ -48,6 +48,29 @@ public:
         });
     }
 
+    /// sotc: after a write fault, also marks the following pages (up to size bytes from
+    /// cpu_addr, page aligned) CPU-modified, which unprotects them, as long as they hold no GPU
+    /// data and are still tracked. SotC copies large blocks with memcpy every frame: one fault
+    /// per page otherwise. A page marked but not written only costs an upload.
+    void MarkAheadAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
+        IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
+            const auto bounds = manager->GetBounds(offset, size);
+            manager->Lock(bounds);
+            u64 run = 0;
+            while (run < size &&
+                   !manager->template IsRegionModified<Type::GPU>(offset + run, BYTES_PER_PAGE) &&
+                   !manager->template IsRegionModified<Type::CPU>(offset + run, BYTES_PER_PAGE)) {
+                run += BYTES_PER_PAGE;
+            }
+            if (run != 0) {
+                manager->template ChangeRegionState<StateOp::Set, StateOp::None, false>(offset,
+                                                                                        run);
+            }
+            manager->Unlock(bounds);
+            return run < size;
+        });
+    }
+
     /// Mark region as modified from the CPU
     void MarkRegionAsCpuModified(VAddr cpu_addr, u64 size) noexcept {
         IteratePages(cpu_addr, size, [](RegionManager* manager, u64 offset, u64 size) {
