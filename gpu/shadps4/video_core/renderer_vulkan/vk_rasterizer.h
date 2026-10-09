@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -143,6 +145,7 @@ private:
     void FlushPeriodic();
     u64 commands_tick{};
     u64 commands_since_submit{};
+    std::chrono::steady_clock::time_point commands_since{};
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);

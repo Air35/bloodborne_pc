@@ -28,6 +28,9 @@ struct SrtWalkerContext {
 const SrtWalkerContext* GetSrtWalkerContext();
 void SetSrtCleanLoad(bool (*clean_load)(u64, u32, u64*));
 void MarkSrtCleanPages(u64 address, u32 size);
+/// sotc: keeps clean_pages equal to the pages currently read-protected (page manager), so
+/// walker loads from pages no longer protected stop going through clean_load.
+void SetSrtReadProtectedPages(u64 address, u64 size, bool read_protected);
 
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/,
                                             PFN_SrtCopyWindow /*copy_window*/,

@@ -578,6 +578,17 @@ struct SignalImpl : public PageManager::Impl {
         auto& impl = memory->GetAddressSpace();
         ASSERT_MSG(perms != Core::MemoryPermission::Write,
                    "Attempted to protect region as write-only which is not a valid permission");
+        // sotc: the walker's clean-load bitmap follows the read protection: set before
+        // protecting, cleared after unprotecting (a stale bit only costs a clean load).
+        const bool read_protected = False(perms & Core::MemoryPermission::Read);
+        if (read_protected) {
+            Shader::SetSrtReadProtectedPages(address, size, true);
+        }
+        const auto clear_after = [&] {
+            if (!read_protected) {
+                Shader::SetSrtReadProtectedPages(address, size, false);
+            }
+        };
         if (perms != Core::MemoryPermission::ReadWrite) {
             // Keep guest stacks accessible, only protect the rest of the range.
             boost::icl::interval_set<VAddr> ranges;
@@ -600,9 +611,11 @@ struct SignalImpl : public PageManager::Impl {
             for (const auto& range : ranges) {
                 impl.Protect(range.lower(), range.upper() - range.lower(), perms);
             }
+            clear_after();
             return;
         }
         impl.Protect(address, size, perms);
+        clear_after();
     }
 
     // sotc: SOTC_RB_STATS=1 prints, every 10 s, the read faults that cost a readback, grouped by

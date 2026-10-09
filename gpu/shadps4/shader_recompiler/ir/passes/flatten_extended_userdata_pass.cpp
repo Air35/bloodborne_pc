@@ -112,6 +112,23 @@ void SetSrtCleanLoad(bool (*clean_load)(u64, u32, u64*)) {
     WalkerContext().clean_load = clean_load;
 }
 
+void SetSrtReadProtectedPages(u64 address, u64 size, bool read_protected) {
+    auto& context = WalkerContext();
+    if (!context.clean_pages || size == 0 || address >= SrtCleanPageLimit) {
+        return;
+    }
+    const u64 last = std::min<u64>((address + size - 1) >> 12, (SrtCleanPageLimit >> 12) - 1);
+    for (u64 page = address >> 12; page <= last; ++page) {
+        u64* word = &context.clean_pages[page >> 6];
+        const u64 bit = 1ULL << (page & 63);
+        if (read_protected) {
+            __atomic_fetch_or(word, bit, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_and(word, ~bit, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 void MarkSrtCleanPages(u64 address, u32 size) {
     auto& context = WalkerContext();
     if (!context.clean_pages) {
@@ -1130,6 +1147,7 @@ const SrtWalkerContext* GetSrtWalkerContext() {
 void SetSrtCleanLoad(bool (*)(u64, u32, u64*)) {}
 
 void MarkSrtCleanPages(u64, u32) {}
+void SetSrtReadProtectedPages(u64, u64, bool) {}
 
 namespace Optimization {
 
