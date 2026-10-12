@@ -207,7 +207,23 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_open(const void *p) { (void)p; return dialog_open(i); } \
     static ABI int32_t tag##_status(void) { return dialog_status(i); } \
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
-DIALOG(msg,1) DIALOG(save,2) DIALOG(profile,3) DIALOG(commerce,4)
+#define DIALOG_NO_OPEN(tag,i) \
+    static ABI int32_t tag##_init(void) { return dialog_init(i); } \
+    static ABI int32_t tag##_status(void) { return dialog_status(i); } \
+    static ABI int32_t tag##_term(void) { return dialog_term(i); }
+DIALOG(msg,1) DIALOG_NO_OPEN(save,2) DIALOG(profile,3) DIALOG(commerce,4)
+/* OrbisSaveDataDialogParam: base param (48 bytes), size, mode, dispType, then pointers to the
+ * animation, items, user message, system message, error code and progress bar params. */
+static ABI int32_t save_open(const void *p) {
+    if (p) {
+        const unsigned char *b=p;
+        int32_t mode, disp; memcpy(&mode,b+0x34,4); memcpy(&disp,b+0x38,4);
+        const int32_t *sys, *err; memcpy(&sys,b+0x58,8); memcpy(&err,b+0x60,8);
+        printf("Runtime: SaveDataDialog mode=%d disp=%d sys=%d err=0x%x\n",mode,disp,
+               mode==3 && sys ? sys[0] : -1,mode==4 && err ? (unsigned)err[0] : 0);
+    }
+    return dialog_open(2);
+}
 static ABI int32_t profile_result(void *result) { if (result) memset(result,0,4); return 0; }
 /* sotc: the remaining dialog calls of Shadow of the Colossus. Dialogs complete at once with
  * OK/Yes (button 1): result structs start with mode, result, buttonId. */

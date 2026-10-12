@@ -65,7 +65,7 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used; uint64_t blocks; char host[700], meta[700]; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -135,6 +135,42 @@ static int read_param(const char *meta, Param *p) {
     if (!stat(path,&st)) p->mtime=st.st_mtime;
     return n==1 ? 0 : -1;
 }
+/* Sizes in 32 KiB blocks, as the system reports them: a save's quota is the block count it
+ * was created with (at least 96, the system minimum), kept in <dir>.sce_sys/blocks. Reporting
+ * a large quota for every save makes Shadow of the Colossus add them up and refuse to save
+ * ("no space"). */
+#define BLOCK_SIZE 32768ull
+#define BLOCKS_MIN 96ull
+static uint64_t used_bytes(const char *path) {
+    uint64_t total=0;
+    DIR *d=opendir(path);
+    for (struct dirent *e; d && (e=readdir(d));) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char child[1100]; snprintf(child,sizeof(child),"%s/%s",path,e->d_name);
+        struct stat st;
+        if (stat(child,&st)) continue;
+        total+=S_ISDIR(st.st_mode) ? used_bytes(child) : (uint64_t)st.st_size;
+    }
+    if (d) closedir(d);
+    return total;
+}
+static uint64_t used_blocks(const char *host) { return (used_bytes(host)+BLOCK_SIZE-1)/BLOCK_SIZE; }
+static uint64_t quota_blocks(const char *meta) {
+    char path[720]; snprintf(path,sizeof(path),"%s/blocks",meta);
+    unsigned long long blocks=0;
+    FILE *f=fopen(path,"r");
+    if (f) { if (fscanf(f,"%llu",&blocks)!=1) blocks=0; fclose(f); }
+    return blocks>BLOCKS_MIN ? blocks : BLOCKS_MIN;
+}
+static void write_quota(const char *meta, uint64_t blocks) {
+    char path[720]; snprintf(path,sizeof(path),"%s/blocks",meta);
+    FILE *f=fopen(path,"w");
+    if (f) { fprintf(f,"%llu\n",(unsigned long long)blocks); fclose(f); }
+}
+static void space(const char *host, const char *meta, uint64_t *blocks, uint64_t *free_blocks) {
+    const uint64_t quota=quota_blocks(meta), used=used_blocks(host);
+    *blocks=quota; *free_blocks=quota>used ? quota-used : 0;
+}
 #ifdef _WIN32
 static void remove_tree(const char *path) { compat_remove_tree(path); }
 #else
@@ -149,7 +185,7 @@ static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     initialized=0; return 0;
 }
-static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+static int32_t mount(int32_t user, const char *title, const DirName *dir, uint64_t blocks, uint32_t mode, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
@@ -170,6 +206,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (slot<0) { pthread_mutex_unlock(&lock); return ERR_MOUNT_FULL; }
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
+    if (!exists || blocks>quota_blocks(meta)) write_quota(meta,blocks>BLOCKS_MIN ? blocks : BLOCKS_MIN);
     slots[slot].used=1;
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
@@ -187,11 +224,15 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->mode,result);
+    return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->blocks,m->mode,result);
 }
 static ABI int32_t save_mount2(const Mount2 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,NULL,m->dir,m->mode,result);
+    const int32_t r=mount(m->user,NULL,m->dir,m->blocks,m->mode,result);
+    if (r || getenv("SOTC_SAVE_TRACE"))
+        printf("Runtime: sceSaveDataMount2(user=%d, '%.32s', blocks=%llu, mode=0x%x) -> 0x%x\n",m->user,
+               m->dir ? m->dir->data : "",(unsigned long long)m->blocks,m->mode,(unsigned)r);
+    return r;
 }
 static int slot_of(const MountPoint *point) {
     if (!point || strncmp(point->data,"/savedata",9)) return -1;
@@ -204,6 +245,8 @@ static ABI int32_t save_umount(const MountPoint *point) {
     int slot=slot_of(point);
     if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
     pthread_mutex_unlock(&lock);
+    if (slot<0 || getenv("SOTC_SAVE_TRACE"))
+        printf("Runtime: sceSaveDataUmount(%.16s) -> 0x%x\n",point ? point->data : "",slot>=0 ? 0 : (unsigned)ERR_NOT_FOUND);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {
@@ -263,7 +306,7 @@ static int like(const char *s, const char *p) {
     if (*p=='%') { for (;;++s) { if (like(s,p+1)) return 1; if (!*s) return 0; } }
     return *s && (*p=='_' || *p==*s) && like(s+1,p+1);
 }
-typedef struct { char name[32]; Param param; } Entry;
+typedef struct { char name[32]; Param param; uint64_t blocks, free_blocks; } Entry;
 static uint32_t sort_key, sort_order;
 static int compare(const void *a, const void *b) {
     const Entry *x=a, *y=b;
@@ -283,10 +326,14 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
         size_t n=strlen(e->d_name);
         if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
         if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
+        char host[680]; snprintf(host,sizeof(host),"%s/%s",base,e->d_name);
+        struct stat st;
+        if (stat(host,&st) || !S_ISDIR(st.st_mode)) continue; /* save data are directories */
         if (count==capacity) { capacity=capacity ? capacity*2 : 16; entries=realloc(entries,capacity*sizeof(*entries)); }
         snprintf(entries[count].name,32,"%s",e->d_name);
         char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);
         read_param(meta,&entries[count].param);
+        space(host,meta,&entries[count].blocks,&entries[count].free_blocks);
         ++count;
     }
     if (d) closedir(d);
@@ -297,10 +344,16 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
     for (uint32_t i=0;i<set;++i) {
         if (result->names) memcpy(result->names[i].data,entries[i].name,32);
         if (result->params) result->params[i]=entries[i].param;
-        if (result->infos) { memset(&result->infos[i],0,sizeof(SearchInfo)); result->infos[i].blocks=32768; result->infos[i].free_blocks=16384; }
+        if (result->infos) {
+            memset(&result->infos[i],0,sizeof(SearchInfo));
+            result->infos[i].blocks=entries[i].blocks; result->infos[i].free_blocks=entries[i].free_blocks;
+        }
     }
     result->set_count=set;
     free(entries);
+    if (getenv("SOTC_SAVE_TRACE"))
+        printf("Runtime: sceSaveDataDirNameSearch('%.32s', key=%u) -> %u hits\n",cond->dir ? cond->dir->data : "",
+               cond->key,result->hits);
     return 0;
 }
 /* SaveDataMemory: one fixed-size blob per user/title. */
@@ -348,9 +401,16 @@ static ABI int32_t memory_set(int32_t user, void *buffer, uint64_t size, int64_t
 
 static ABI int32_t save_no_backup(const void *param) { (void)param; return (int32_t)0x809F0008; } /* NOT_FOUND */
 /* SceSaveDataMountInfo: blocks, freeBlocks (32 KiB each), reserved[32]. */
-static ABI int32_t save_mount_info(const void *mount_point, uint64_t *info) {
+static ABI int32_t save_mount_info(const MountPoint *mount_point, uint64_t *info) {
     if (!mount_point || !info) return (int32_t)0x809F0001;
-    info[0]=32768; info[1]=32768-64; memset(info+2,0,32);
+    pthread_mutex_lock(&lock);
+    const int slot=slot_of(mount_point);
+    if (slot<0) { pthread_mutex_unlock(&lock); return ERR_NOT_MOUNTED; }
+    space(slots[slot].host,slots[slot].meta,&info[0],&info[1]);
+    pthread_mutex_unlock(&lock);
+    memset(info+2,0,32);
+    if (getenv("SOTC_SAVE_TRACE")) printf("Runtime: sceSaveDataGetMountInfo(%.16s) -> %llu blocks, %llu free\n",mount_point->data,
+                                          (unsigned long long)info[0],(unsigned long long)info[1]);
     return 0;
 }
 static const RuntimeExport exports[]={
