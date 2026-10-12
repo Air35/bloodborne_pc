@@ -20,6 +20,11 @@
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/sotc_lod_stats.h"
+
+// sotc: writes guest memory through the backing view (runtime_memory.c).
+extern "C" int runtime_memory_write_backing(unsigned long long address, const void* data,
+                                            unsigned long long size);
 
 // Counted for the SOTC_PROBE diagnostic log (emulator.cpp).
 std::atomic<u64> g_sotc_zpass_dumps{0};
@@ -855,10 +860,35 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::GetLodStats: {
-                // sotc: once; the game sends it every frame.
-                static bool reported = false;
-                if (!std::exchange(reported, true)) {
-                    LOG_WARNING(Render_Vulkan, "Unimplemented IT_GET_LOD_STATS (reported once)");
+                // sotc: the texture LOD statistics Shadow of the Colossus streams its fine mips
+                // from (sotc_lod_stats.h). Packet (from the game's Gnm getLodStats, 0x86a880):
+                // size - 32, address >> 6, address bits 38-39 | 0xbfc00. The game reads 256 u64
+                // bank entries at +0x40 and again at +0x840 (it alternates between the two).
+                // SOTC_LOD_STATS=0 leaves the buffer untouched (as before).
+                static const bool lod_stats = [] {
+                    const char* v = std::getenv("SOTC_LOD_STATS");
+                    return !v || v[0] != '0';
+                }();
+                const u32* d = reinterpret_cast<const u32*>(header) + 1;
+                if (lod_stats && count >= 3) {
+                    const VAddr base = (VAddr{d[1]} << 6) | (VAddr{d[2] & 3u} << 38);
+                    const u32 size = d[0] + 0x20;
+                    u64 entries[256];
+                    SotcLod::Collect(entries);
+                    for (u32 half = 0; 0x40 + (half + 1) * sizeof(entries) <= size; ++half) {
+                        runtime_memory_write_backing(base + 0x40 + half * sizeof(entries), entries,
+                                                     sizeof(entries));
+                    }
+                    static const bool lod_trace = std::getenv("SOTC_LOD_TRACE") != nullptr;
+                    static u64 packets = 0;
+                    if (lod_trace && packets++ % 600 == 0) {
+                        u32 used = 0;
+                        for (const u64 e : entries) {
+                            used += (e >> 56) != 0xf;
+                        }
+                        LOG_WARNING(Render_Vulkan, "sotc GET_LOD_STATS {:#x}+{:#x}: {} banks sampled",
+                                    base, size, used);
+                    }
                 }
                 break;
             }

@@ -13,6 +13,10 @@
 #include <boost/asio/io_context.hpp>
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
+#ifdef _WIN32
+#include <windows.h>
+#include "../third_party/renderdoc/renderdoc_app.h"
+#endif
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -95,6 +99,14 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
             auto* r = Memory::Instance()->GetRasterizer();
             r->RegisterMemory(address, size);
             r->MapMemory(address, size);
+            // sotc: images over a range mapped now (the fine mips Shadow of the Colossus streams
+            // into memory it maps later) were uploaded and tracked without these pages; the data
+            // the game writes there next would go unnoticed. Reupload them on their next use.
+            static const bool map_invalidate = [] {
+                const char* v = std::getenv("SOTC_MAP_INVALIDATE");
+                return !v || v[0] != '0';
+            }();
+            if (map_invalidate) r->InvalidateMemory(address, size);
         },
         [](uintptr_t address, uint64_t size) { Memory::Instance()->GetRasterizer()->UnmapMemory(address, size); },
         [](uintptr_t address, uint64_t size) {
@@ -179,8 +191,9 @@ const u8* MemoryManager::GetBackingRun(VAddr address, VAddr* run_start, u64* run
 const u8* MemoryManager::GetBackingPointer(VAddr address) const {
     return runtime_memory_backing_pointer(address);
 }
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size, u32) {
-    BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, BbWriteLog::Backing);
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size, u32 source) {
+    BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size,
+                     static_cast<BbWriteLog::Source>(10 + source));
     return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
@@ -382,14 +395,53 @@ int* PS4_SYSV_ABI __Error() {
 }
 } // namespace Libraries::Kernel
 
-// RenderDoc capture hooks: not used by the port.
+// sotc port: RenderDoc captures of one GPU submission when the game runs under RenderDoc
+// (renderdoccmd capture ...): SOTC_RDOC_TRIGGER=<file> appears -> the next submission the
+// command processor runs is captured (Liverpool calls StartCapture/EndCapture around it).
 namespace VideoCore {
+#ifdef _WIN32
+static RENDERDOC_API_1_6_0* rdoc_api;
+static int rdoc_state; // 0 idle, 1 triggered, 2 capturing
+void LoadRenderDoc() {
+    static bool tried;
+    if (std::exchange(tried, true)) return;
+    if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+        const auto get_api = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (get_api && get_api(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&rdoc_api)) == 1) {
+            rdoc_api->SetCaptureKeys(nullptr, 0);
+            std::fprintf(stderr, "sotc: RenderDoc attached (SOTC_RDOC_TRIGGER captures a submission)\n");
+        }
+    }
+}
+void StartCapture() {
+    static const char* trigger = std::getenv("SOTC_RDOC_TRIGGER");
+    if (!trigger) return;
+    LoadRenderDoc();
+    if (!rdoc_api) return;
+    if (rdoc_state == 0 && std::remove(trigger) == 0) rdoc_state = 1;
+    if (rdoc_state == 1) {
+        rdoc_api->StartFrameCapture(nullptr, nullptr);
+        rdoc_state = 2;
+    }
+}
+void EndCapture() {
+    if (rdoc_api && rdoc_state == 2) {
+        const bool ok = rdoc_api->EndFrameCapture(nullptr, nullptr) == 1;
+        std::fprintf(stderr, "sotc: RenderDoc capture %s\n", ok ? "saved" : "FAILED");
+        rdoc_state = 0;
+    }
+}
+void TriggerCapture() { rdoc_state = rdoc_state ? rdoc_state : 1; }
+void SetOutputDir(const std::filesystem::path&, const std::string&) {}
+bool IsRenderDocLoaded() { return rdoc_api != nullptr; }
+#else
 void LoadRenderDoc() {}
 void StartCapture() {}
 void EndCapture() {}
 void TriggerCapture() {}
 void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return false; }
+#endif
 void RequestScreenshot(ScreenshotRequest) {}
 // sotc port: BB_FRAME_DUMP_TRIGGER=<file>: when the file appears it is removed and the next
 // presented game frame is saved as a PNG screenshot (user screenshots directory).

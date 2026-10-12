@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #ifdef _WIN32
 #include <windows.h>
 #undef near
@@ -61,6 +62,23 @@ void Note(std::uint64_t address, const void* data, std::uint64_t size, Source so
 }
 
 void Record(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
+    // Per-source totals every 10 s (which kind of write runs when the guest's data breaks).
+    static std::atomic<std::uint64_t> counts[32], byte_totals[32], last_report{0};
+    const std::uint32_t slot = source < 32 ? source : 31;
+    counts[slot].fetch_add(1, std::memory_order_relaxed);
+    byte_totals[slot].fetch_add(size, std::memory_order_relaxed);
+    const std::uint64_t tsc_now = __rdtsc();
+    std::uint64_t prev = last_report.load(std::memory_order_relaxed);
+    if (tsc_now - prev > 30'000'000'000ull && last_report.compare_exchange_strong(prev, tsc_now)) {
+        std::string line = "Write log totals:";
+        for (std::uint32_t i = 0; i < 32; ++i) {
+            if (const std::uint64_t c = counts[i].exchange(0)) {
+                line += " src" + std::to_string(i) + "=" + std::to_string(c) + "/" +
+                        std::to_string(byte_totals[i].exchange(0) >> 10) + "KiB";
+            }
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
     static thread_local const std::uint32_t tid = static_cast<std::uint32_t>(gettid());
     Entry e{address, size, 0, __rdtsc(), source, tid};
     std::memcpy(&e.first, data, size < 8 ? size : 8);
@@ -111,7 +129,13 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     const auto print = [&](const Entry& e, const char* what) {
         std::fprintf(stderr,
                      "Write log: %s %s %#llx +%llu first %#llx tid %u, %.3f s before the fault\n",
-                     what, e.source < 6 ? sources[e.source] : "?", (unsigned long long)e.address,
+                     what, e.source < 6 ? sources[e.source]
+                           : e.source == 11 ? "buffer readback"
+                           : e.source == 12 ? "fence/label"
+                           : e.source == 13 ? "image download"
+                           : e.source == 20 ? "replace from CPU"
+                           : "backing (other)",
+                     (unsigned long long)e.address,
                      (unsigned long long)e.size, (unsigned long long)e.first, e.tid,
                      double(now - e.tsc) / 3.0e9);
     };

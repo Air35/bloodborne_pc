@@ -63,6 +63,12 @@ def main():
         command += ['--patches', args.patches]
     if args.cmdline:
         command += ['--sotc-cmdline', args.cmdline]
+    # SOTC_PLAY_WRAP: a launcher in front of the game, a JSON list (renderdoccmd capture -w -c file); the
+    # event "rdoc" then captures the next GPU submission (SOTC_RDOC_TRIGGER, gpu/shim/bbgpu.cpp).
+    if os.environ.get('SOTC_PLAY_WRAP'):
+        import json
+        command = json.loads(os.environ['SOTC_PLAY_WRAP']) + command
+        env['SOTC_RDOC_TRIGGER'] = str(out / 'rdoc.trigger')
     log = open(args.log, 'wb')
     process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     start = time.monotonic()
@@ -86,6 +92,8 @@ def main():
                 return
             if what == 'shot':
                 (out / 'dump.trigger').touch()
+            elif what == 'rdoc':
+                (out / 'rdoc.trigger').touch()
             elif what == 'stacks':
                 (out / 'stacks.trigger').touch()
             elif what == 'log':
