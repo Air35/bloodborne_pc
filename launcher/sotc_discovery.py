@@ -51,6 +51,64 @@ def is_game_dlc(folder):
     return str(values.get('CATEGORY', '')).startswith('ac') and GAME_ID in str(values.get('CONTENT_ID', ''))
 
 
+def _walk_dirs(root, depth):
+    """Folders under root down to depth levels (root included), skipping the usual noise."""
+    pending = [(str(root), 0)]
+    while pending:
+        path, level = pending.pop()
+        yield path
+        if level >= depth:
+            continue
+        try:
+            for entry in os.scandir(path):
+                if entry.is_dir(follow_symlinks=False) and entry.name.lower() not in SKIP \
+                        and not entry.name.startswith('.'):
+                    pending.append((entry.path, level + 1))
+        except OSError:
+            pass
+
+
+def find_dlc_root(game_dir):
+    """The folder to give the runtime as SOTC_DLC_DIR for the DLC found inside the game folder
+    or next to it (its parent folder, two levels down), or '' without any."""
+    game_dir = Path(game_dir)
+    found = []
+    for root, depth in ((game_dir, 3), (game_dir.parent, 2)):
+        for path in _walk_dirs(root, depth):
+            if (Path(path) / 'sce_sys' / 'param.sfo').is_file() and path not in found and is_game_dlc(path):
+                found.append(path)
+    if not found:
+        return ''
+    parents = {}
+    for path in found:
+        parent = Path(path).parent
+        parents[parent] = parents.get(parent, 0) + 1
+    best = max(parents, key=parents.get)
+    # shadPS4 layout: <addcont>/CUSA08809/<dlc>; the runtime looks in the CUSA08809 subfolder.
+    return str(best.parent if best.name.upper() == GAME_ID else best)
+
+
+def dlc_count(root):
+    """How many DLC folders the runtime will list for SOTC_DLC_DIR root."""
+    if not root or not Path(root).is_dir():
+        return 0
+    base = Path(root) / GAME_ID if (Path(root) / GAME_ID).is_dir() else Path(root)
+    try:
+        return sum(1 for entry in base.iterdir() if entry.is_dir() and is_game_dlc(entry))
+    except OSError:
+        return 0
+
+
+def find_game_in(folder):
+    """The GAME_ID game folder: folder itself or one below it (depth 3), else None."""
+    for path in _walk_dirs(folder, 3):
+        if (Path(path) / 'eboot.bin').is_file():
+            record = game_record(path)
+            if record and record['id'] == GAME_ID:
+                return path
+    return None
+
+
 def library_games(folders, depth=3):
     """Games in the given library folders and below (shadPS4's "game folders"), each once."""
     games, seen = [], set()

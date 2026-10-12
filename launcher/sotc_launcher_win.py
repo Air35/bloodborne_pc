@@ -339,12 +339,9 @@ class Launcher:
         self.build()
         self.show('play')
         self.refresh_library()
-        # First start (or something missing): look for the game, the sound modules and saves.
-        if self.app.get('auto_setup', True) and (not game_info(self.var('game_dir').get()) or
-                                                 not self.sound_ready() or
-                                                 (not self.has_saves() and not self.app.get('save_scan_done'))):
-            self.app['save_scan_done'] = True
-            root.after(400, self.start_discovery)
+        # First start, or the game folder is gone: the setup screen asks for it.
+        if not self.app.get('setup_done') or not game_info(self.var('game_dir').get()):
+            root.after(50, self.show_setup)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         threading.Thread(target=self.detect_gpu, daemon=True).start()
@@ -542,7 +539,7 @@ class Launcher:
         self.nav, self.current_page = {}, None
         for name, title in (('play', _('Jogar', 'Play')), ('game', _('Jogo e saves', 'Game & saves')),
                             ('graphics', _('Imagem e FPS', 'Display & FPS')), ('controls', _('Controles', 'Controls')),
-                            ('advanced', _('Avançado', 'Advanced')), ('log', _('Registro', 'Log'))):
+                            ('advanced', _('Avançado', 'Advanced'))):
             item = tk.Label(side, text='    ' + title, bg=BG, fg=TEXT, anchor='w', font=('Segoe UI', 11),
                             pady=10, cursor='hand2')
             item.pack(fill='x')
@@ -551,9 +548,12 @@ class Launcher:
             item.bind('<Leave>', lambda _e, n=name: n != self.current_page and self.nav[n].configure(bg=BG))
             self.nav[name] = item
         tk.Frame(side, bg=BG).pack(fill='both', expand=True)
-        tk.Label(side, text=_('Sem controle, o teclado\nfunciona (veja Controles).',
-                              'Without a gamepad the\nkeyboard works (see Controls).'),
-                 bg=BG, fg=MUTED, font=('Segoe UI', 9), justify='left').pack(anchor='w', padx=22, pady=(0, 18))
+        for text, command in ((_('Registro do jogo', 'Game log'), lambda: self.show('log')),
+                              (_('Configurar de novo', 'Set up again'), self.show_setup)):
+            link = tk.Label(side, text=text, bg=BG, fg=MUTED, font=('Segoe UI', 9, 'underline'), cursor='hand2')
+            link.pack(anchor='w', padx=22, pady=(0, 6))
+            link.bind('<Button-1>', lambda _e, c=command: c())
+        tk.Frame(side, bg=BG, height=12).pack()
 
         right = tk.Frame(self.root, bg=PANEL)
         right.pack(side='left', fill='both', expand=True)
@@ -610,7 +610,7 @@ class Launcher:
         info.grid(row=0, column=0, sticky='nw', padx=(0, 24))
         ttk.Label(info, text=_('Verificação', 'Ready check'), style='Section.TLabel').pack(anchor='w', pady=(0, 6))
         self.checks = {}
-        for key in ('game', 'sound', 'saves', 'gpu'):
+        for key in ('game', 'dlc', 'sound', 'saves', 'gpu'):
             self.checks[key] = ttk.Label(info, text='', justify='left', wraplength=self.px(440))
             self.checks[key].pack(anchor='w', pady=3)
         quick = ttk.Frame(body)
@@ -919,6 +919,12 @@ class Launcher:
 
     # ---- state -------------------------------------------------------------------------------
     def game_changed(self):
+        game = self.var('game_dir').get()
+        if game_info(game) and not self.var('dlc_dir').get():
+            from sotc_discovery import find_dlc_root
+            dlc = find_dlc_root(game)
+            if dlc:
+                self.var('dlc_dir').set(dlc)
         self.banner_source = None
         self.draw_banner()
         self.set_icon()
@@ -943,7 +949,11 @@ class Launcher:
         saves = user / 'savedata' / '1' / GAME_ID
         save = (_('✓ Saves em {}', '✓ Saves in {}').format(saves) if saves.is_dir() and any(saves.iterdir())
                 else _('• Ainda sem saves: o jogo cria em {}', '• No saves yet: the game creates them in {}').format(saves))
-        for key, text in (('game', game), ('sound', sound), ('saves', save), ('gpu', self.gpu_text)):
+        from sotc_discovery import dlc_count
+        count = dlc_count(self.var('dlc_dir').get())
+        dlc = (_('✓ DLC: {} instalada(s)', '✓ DLC: {} installed').format(count) if count
+               else _('• Sem DLC', '• No DLC'))
+        for key, text in (('game', game), ('dlc', dlc), ('sound', sound), ('saves', save), ('gpu', self.gpu_text)):
             self.checks[key].configure(text=text, foreground=MUTED if text.startswith('•') else
                                        '#d9b441' if text.startswith('⚠') else '#d36b5c' if text.startswith('✗') else TEXT)
         if not self.process:
@@ -1014,6 +1024,181 @@ class Launcher:
         shutil.copytree(source, target)
         self.refresh_status()
         self.messagebox.showinfo('Shadow of the Colossus', _('Save importado para {}.', 'Save imported to {}.').format(target))
+
+    # ---- first start: the setup screen -------------------------------------------------------
+    def show_setup(self):
+        """A full-window welcome screen: asks for the game folder, then sets up DLC, saves and
+        sound on its own and shows what it found."""
+        tk, ttk = self.tk, self.ttk
+        if getattr(self, 'setup_frame', None):
+            self.setup_frame.destroy()
+        frame = self.setup_frame = tk.Frame(self.root, bg=BG)
+        frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+        frame.lift()
+        inner = tk.Frame(frame, bg=BG)
+        inner.place(relx=0.5, rely=0.45, anchor='center')
+        tk.Label(inner, text='SHADOW OF THE COLOSSUS', bg=BG, fg=GOLD, font=('Georgia', 26)).pack()
+        tk.Label(inner, text=_('Bem-vindo. Só falta dizer onde está o jogo.',
+                               'Welcome. Just tell us where the game is.'),
+                 bg=BG, fg=TEXT, font=('Segoe UI', 13)).pack(pady=(8, 26))
+        self.setup_button = ttk.Button(inner, text=_('Escolher a pasta do jogo…', 'Choose the game folder…'),
+                                       style='Play.TButton', command=self.choose_game_for_setup)
+        self.setup_button.pack(ipadx=18)
+        tk.Label(inner, text=_('A pasta do seu dump (CUSA08809) ou a pasta onde ela está.',
+                               'The folder of your dump (CUSA08809) or the folder that holds it.'),
+                 bg=BG, fg=MUTED, font=('Segoe UI', 10)).pack(pady=(10, 0))
+        self.setup_hint = tk.Label(inner, text='', bg=BG, fg=MUTED, font=('Segoe UI', 10), cursor='hand2')
+        self.setup_hint.pack(pady=(18, 0))
+        self.setup_results = tk.Frame(inner, bg=BG)
+        self.setup_results.pack(pady=(18, 0), fill='x')
+        self.setup_found_game = None
+        # Meanwhile look for the game on this PC, to offer it with one click.
+        current = self.var('game_dir').get()
+        if game_info(current):
+            self.offer_game(current)
+        else:
+            self.setup_hint.configure(text=_('Procurando o jogo neste PC…', 'Looking for the game on this PC…'))
+
+            def work():
+                try:
+                    from sotc_discovery import scan
+                    games = scan(seconds=25, extra_roots=[str(PORT_DIR.parent)])['games']
+                except Exception:  # never stop the launcher over a search problem
+                    games = []
+                self.ui_calls.put(lambda: self.offer_game(games[0]['path']) if games else
+                                  self.setup_hint.configure(text=''))
+            threading.Thread(target=work, daemon=True).start()
+
+    def offer_game(self, path):
+        if not getattr(self, 'setup_hint', None) or not self.setup_hint.winfo_exists():
+            return
+        self.setup_found_game = path
+        self.setup_hint.configure(text=_('Encontrado: {}   —   clique aqui para usar', 'Found: {}   —   click here to use it')
+                                  .format(path), fg=GOLD)
+        self.setup_hint.bind('<Button-1>', lambda _e: self.configure_from_game(path))
+
+    def choose_game_for_setup(self):
+        chosen = self.filedialog.askdirectory(title=_('Pasta do jogo Shadow of the Colossus', 'Shadow of the Colossus game folder'),
+                                              initialdir=self.setup_found_game or str(PORT_DIR.parent))
+        if not chosen:
+            return
+        from sotc_discovery import find_game_in
+        game = find_game_in(chosen)
+        if not game:
+            self.messagebox.showerror('Shadow of the Colossus', _(
+                'Não achei o jogo (eboot.bin do CUSA08809) em\n{}\n\nEscolha a pasta do seu dump.',
+                'The game (eboot.bin of CUSA08809) is not in\n{}\n\nChoose the folder of your dump.').format(chosen))
+            return
+        self.configure_from_game(game)
+
+    def configure_from_game(self, game):
+        """Game chosen: DLC from the game folder, saves, sound — in the background."""
+        self.setup_button.configure(state='disabled')
+        self.setup_hint.unbind('<Button-1>')
+        self.setup_hint.configure(text=_('Configurando…', 'Setting up…'), fg=MUTED)
+        user = user_dir({'user_dir': self.var('user_dir').get()})
+
+        def work():
+            from sotc_discovery import find_dlc_root, dlc_count, scan, SYS_MODULES as modules
+            result = {'game': game, 'dlc': find_dlc_root(game), 'sound': None, 'save': None}
+            result['dlc_count'] = dlc_count(result['dlc'])
+            sound_ready = self.app.get('sys_modules') and all(
+                (Path(self.app['sys_modules']) / m).is_file() for m in modules)
+            saves = user / 'savedata' / '1' / GAME_ID
+            has_saves = saves.is_dir() and any(saves.iterdir())
+            found = {'sys_modules': [], 'saves': []}
+            if not sound_ready or not has_saves:
+                try:
+                    found = scan(seconds=30, extra_roots=[str(Path(game).parent), str(PORT_DIR.parent)])
+                except Exception:
+                    pass
+            if sound_ready:
+                result['sound'] = self.app['sys_modules']
+            elif found['sys_modules']:
+                target = user / 'sys_modules'
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    for module in modules:
+                        shutil.copy2(Path(found['sys_modules'][0]) / module, target / module)
+                    result['sound'] = str(target)
+                except OSError:
+                    pass
+            if not has_saves:
+                own = user.resolve()
+                outside = [p for p in found['saves'] if not Path(p).resolve().is_relative_to(own)]
+                if outside:
+                    try:
+                        saves.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(outside[0], saves, dirs_exist_ok=True)
+                        result['save'] = outside[0]
+                    except OSError:
+                        pass
+            self.ui_calls.put(lambda: self.setup_done_screen(result))
+        threading.Thread(target=work, daemon=True).start()
+
+    def setup_done_screen(self, result):
+        tk, ttk = self.tk, self.ttk
+        self.var('game_dir').set(result['game'])
+        self.var('dlc_dir').set(result['dlc'])
+        if result['sound']:
+            self.var('sys_modules').set(result['sound'])
+        folders = self.app.setdefault('library_dirs', [])
+        if str(Path(result['game']).parent) not in folders:
+            folders.append(str(Path(result['game']).parent))
+        self.setup_hint.configure(text='')
+        for child in self.setup_results.winfo_children():
+            child.destroy()
+        info = game_info(result['game'])
+        saves = self.saves_folder()
+        lines = [
+            ('✓', _('Jogo: {} (versão {})', 'Game: {} (version {})').format(*info) if info else result['game']),
+            ('✓' if result['dlc_count'] else '•',
+             _('DLC: {} encontrada(s)', 'DLC: {} found').format(result['dlc_count']) if result['dlc_count']
+             else _('DLC: nenhuma encontrada na pasta do jogo', 'DLC: none found in the game folder')),
+            ('✓', _('Saves: {}', 'Saves: {}').format(saves) + (
+                _('  (copiado do shadPS4)', '  (copied from shadPS4)') if result['save'] else '')),
+            ('✓' if result['sound'] else '⚠',
+             _('Som: pronto', 'Sound: ready') if result['sound'] else
+             _('Som: módulos não encontrados — o jogo roda mudo', 'Sound: modules not found — the game runs silent')),
+        ]
+        for mark, text in lines:
+            color = GOLD if mark == '✓' else '#d9b441' if mark == '⚠' else MUTED
+            row = tk.Frame(self.setup_results, bg=BG)
+            row.pack(anchor='w', pady=2)
+            tk.Label(row, text=mark, bg=BG, fg=color, font=('Segoe UI', 12), width=2).pack(side='left')
+            tk.Label(row, text=text, bg=BG, fg=TEXT, font=('Segoe UI', 11)).pack(side='left')
+        buttons = tk.Frame(self.setup_results, bg=BG)
+        buttons.pack(pady=(20, 0))
+        if not result['sound']:
+            ttk.Button(buttons, text=_('Escolher a pasta do som…', 'Choose the sound folder…'),
+                       command=self.choose_sound_for_setup).pack(side='left', padx=(0, 8))
+        ttk.Button(buttons, text=_('Começar', 'Start'), style='Play.TButton', command=self.finish_setup).pack(side='left')
+        self.setup_button.configure(state='normal', text=_('Trocar a pasta do jogo…', 'Change the game folder…'))
+        self.collect()
+
+    def choose_sound_for_setup(self):
+        chosen = self.filedialog.askdirectory(title=_('Pasta com libSceNgs2.sprx e libSceUlt.sprx',
+                                                      'Folder with libSceNgs2.sprx and libSceUlt.sprx'))
+        if chosen and all((Path(chosen) / m).is_file() for m in SYS_MODULES):
+            target = user_dir(self.app) / 'sys_modules'
+            target.mkdir(parents=True, exist_ok=True)
+            for module in SYS_MODULES:
+                shutil.copy2(Path(chosen) / module, target / module)
+            self.var('sys_modules').set(str(target))
+            self.messagebox.showinfo('Shadow of the Colossus', _('Som pronto.', 'Sound ready.'))
+        elif chosen:
+            self.messagebox.showerror('Shadow of the Colossus', _(
+                'Essa pasta não tem libSceNgs2.sprx e libSceUlt.sprx.',
+                'That folder does not have libSceNgs2.sprx and libSceUlt.sprx.'))
+
+    def finish_setup(self):
+        self.app['setup_done'] = True
+        self.collect()
+        self.setup_frame.destroy()
+        self.setup_frame = None
+        self.refresh_library()
+        self.game_changed()
+        self.show('play')
 
     # ---- library and automatic setup ---------------------------------------------------------
     def library_icon(self, path):

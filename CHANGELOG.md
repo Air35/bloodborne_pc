@@ -1,6 +1,11 @@
 # Changelog
 
 ## 0.0.9 — 2026-10-12
+- **Configuração inicial automática:** na primeira vez o `SotC.exe` abre numa tela de boas-vindas
+  que só pede a pasta do jogo (ou já oferece a que encontrou no PC). Depois ele configura sozinho
+  as DLCs (dentro da pasta do jogo e ao lado dela), os saves (copia um save do shadPS4 se o port
+  ainda não tiver) e o som, e mostra o resultado. **Configurar de novo** repete o processo.
+- Tela principal mais limpa: o registro do jogo virou um link discreto; a verificação mostra as DLCs.
 - **Pasta de DLC** no lançador (Jogo e saves), como no shadPS4. Também é encontrada na busca
   automática: a pasta `addcont` do shadPS4 ou uma pasta com uma subpasta por DLC.
 - O runtime lista ao jogo as DLCs instaladas (`sceAppContentGetAddcontInfoList`), lendo o
