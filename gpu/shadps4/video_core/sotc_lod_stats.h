@@ -52,7 +52,12 @@ inline void Collect(u64 (&entries)[256]) {
         } else if (idle[i] < linger) {
             ++idle[i];
         }
+        // Banks not seen lately read as not sampled (15), as on the hardware: the game may then
+        // drop their fine mips. SOTC_LOD_KEEP=1 reports them as sampled with no samples instead
+        // (what the zeroed buffer said before; not soak-tested with the streaming).
+        static const bool keep = std::getenv("SOTC_LOD_KEEP") != nullptr;
         entries[i] = idle[i] < linger ? (level << 56) | (u64{std::max<u32>(last_count[i], 1)} << 32)
+                     : keep           ? level << 56
                                       : u64{0xf} << 56;
     }
 }

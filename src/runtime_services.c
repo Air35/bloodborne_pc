@@ -220,6 +220,7 @@ static struct {
     int list, has_new, choice; /* choice: -1 open, -2 cancelled, else the item */
     int32_t mode, disp, user; void *user_data;
     uint32_t count; char names[SAVE_LIST_MAX][32];
+    uint32_t shown; int map[SAVE_LIST_MAX]; /* listed saves: index into names (deleted ones hidden) */
 } save_dialog;
 int runtime_savedata_param(int32_t user, const char *dir, void *param);
 void runtime_savedata_describe(int32_t user, const char *dir, char *out, size_t size, int64_t *mtime);
@@ -234,7 +235,12 @@ static int save_list_show(int selected, uint32_t focus, const char *focus_dir) {
         snprintf(lines[n],sizeof(lines[n]),"%s","+  Nova grava\xc3\xa7\xc3\xa3o");
         line_ptrs[n]=lines[n]; ++n;
     }
+    save_dialog.shown=0;
     for (uint32_t i=0;i<save_dialog.count;++i) {
+        /* The game keeps listing saves deleted from this list earlier: only existing ones. */
+        static unsigned char param[1328];
+        if (runtime_savedata_param(save_dialog.user,save_dialog.names[i],param)) continue;
+        save_dialog.map[save_dialog.shown++]=(int)i;
         int64_t when=0;
         runtime_savedata_describe(save_dialog.user,save_dialog.names[i],lines[n],sizeof(lines[n]),&when);
         if (when>latest_time) { latest_time=when; latest=n; }
@@ -296,14 +302,15 @@ static ABI int32_t save_status(void) {
     if (save_dialog.list && dialogs[2].status==2) {
         const int r=bbgpu_save_list_poll();
         if (r<=-100) { /* delete item -100-r, then show the list again */
-            const int item=-100-r, index=item-(save_dialog.has_new ? 1 : 0);
-            if (index>=0 && (uint32_t)index<save_dialog.count) {
+            const int item=-100-r, shown=item-(save_dialog.has_new ? 1 : 0);
+            if (shown>=0 && (uint32_t)shown<save_dialog.shown) {
+                const int index=save_dialog.map[shown];
                 runtime_savedata_remove(save_dialog.user,save_dialog.names[index]);
                 memmove(save_dialog.names[index],save_dialog.names[index+1],
                         (save_dialog.count-index-1)*sizeof(save_dialog.names[0]));
                 --save_dialog.count;
             }
-            const int left=(int)save_dialog.count+(save_dialog.has_new ? 1 : 0);
+            const int left=(int)save_dialog.shown-1+(save_dialog.has_new ? 1 : 0);
             if (save_list_show(item<left ? item : left-1,0,NULL)) return dialogs[2].status;
             save_dialog.choice=-2; dialogs[2].status=3; /* nothing left to show */
             return dialogs[2].status;
@@ -332,7 +339,8 @@ static ABI int32_t save_result(unsigned char *result) {
     if (save_dialog.list) {
         if (save_dialog.choice<0) { res=1; button=0; }            /* USER_CANCELED */
         else {
-            const int index=save_dialog.choice-(save_dialog.has_new ? 1 : 0);
+            const int shown=save_dialog.choice-(save_dialog.has_new ? 1 : 0);
+            const int index=shown>=0 && (uint32_t)shown<save_dialog.shown ? save_dialog.map[shown] : -1;
             if (index<0) {                                         /* the new save */
                 if (dir) memset(dir,0,32);
                 if (param) memset(param,0,1328);
