@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -38,5 +39,12 @@ bool CapturesInput();
 /// Window thread: the game's text dialog (sceImeDialog). Shown as a box on screen until
 /// `active` is false; typing goes to the window (sdl_window), the box only displays it.
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text);
+
+/// The game's save/load slot list (sceSaveDataDialog LIST): shown until chosen or cancelled.
+/// Any thread. `focus` is the item selected first. False when the overlay is not running.
+bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus);
+/// -1 while the list is open (or none), -2 cancelled, else the chosen item. Closes it when done.
+int PollSaveList();
+void CloseSaveList();
 
 } // namespace BbOverlay

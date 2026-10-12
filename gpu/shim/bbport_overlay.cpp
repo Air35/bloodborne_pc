@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <mutex>
 
 #include <SDL3/SDL.h>
@@ -55,11 +56,27 @@ bool dirty = false; // settings changed while open: saved on close
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
 std::string text_entry_prompt, text_entry_text;
+// The game's save/load slot list (OpenSaveList), guarded by imgui_mutex.
+bool list_active = false;
+std::string list_title;
+std::vector<std::string> list_items;
+int list_selected = 0, list_result = -1;
+bool list_scroll = false, list_stick_down = false, list_stick_up = false;
 float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+
+// sotc: the settings menu is Bloodborne's; the SotC port shows only the game's dialogs
+// (BB_OVERLAY_MENU=1 opens the menu anyway).
+bool MenuAllowed() {
+    static const bool allowed = [] {
+        const char* v = std::getenv("BB_OVERLAY_MENU");
+        return v && v[0] == '1';
+    }();
+    return allowed;
+}
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
@@ -421,6 +438,48 @@ void TextEntryBox() {
     ImGui::End();
 }
 
+// The game's save/load slot list: one entry per save, the selected one highlighted.
+void SaveListBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x * 0.46f, viewport->WorkSize.y * 0.62f),
+                             ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::Begin("##save_list", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", list_title.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Separator();
+    const float footer = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
+    ImGui::BeginChild("##items", ImVec2(0.0f, -footer));
+    for (int i = 0; i < static_cast<int>(list_items.size()); ++i) {
+        ImGui::PushID(i);
+        const bool selected = i == list_selected;
+        if (ImGui::Selectable(list_items[i].c_str(), selected,
+                              ImGuiSelectableFlags_AllowDoubleClick)) {
+            list_selected = i;
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                list_result = i;
+            }
+        }
+        if (selected && list_scroll) {
+            ImGui::SetScrollHereY(0.5f);
+        }
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    list_scroll = false;
+    ImGui::EndChild();
+    ImGui::Separator();
+    ImGui::TextDisabled("Setas / direcional: escolher    Enter / X (A): confirmar    "
+                        "Esc / O (B): voltar    (mouse: duplo clique)");
+    ImGui::End();
+}
+
 void FpsCounter() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float pad = 12.0f * base_scale;
@@ -527,12 +586,104 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
+    if (list_active && !menu_open && list_result == -1) {
+        const int count = static_cast<int>(list_items.size());
+        const auto move = [&](int delta) {
+            if (count) {
+                list_selected = (list_selected + delta + count) % count;
+                list_scroll = true;
+            }
+        };
+        switch (event.type) {
+        case SDL_EVENT_KEY_DOWN:
+            switch (event.key.key) {
+            case SDLK_UP:
+            case SDLK_W:
+                move(-1);
+                break;
+            case SDLK_DOWN:
+            case SDLK_S:
+                move(1);
+                break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_SPACE:
+                if (!event.key.repeat && count) {
+                    list_result = list_selected;
+                }
+                break;
+            case SDLK_ESCAPE:
+            case SDLK_BACKSPACE:
+                if (!event.key.repeat) {
+                    list_result = -2;
+                }
+                break;
+            default:
+                break;
+            }
+            return true;
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            switch (event.gbutton.button) {
+            case SDL_GAMEPAD_BUTTON_DPAD_UP:
+                move(-1);
+                break;
+            case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+                move(1);
+                break;
+            case SDL_GAMEPAD_BUTTON_SOUTH:
+                if (count) {
+                    list_result = list_selected;
+                }
+                break;
+            case SDL_GAMEPAD_BUTTON_EAST:
+                list_result = -2;
+                break;
+            default:
+                break;
+            }
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            return true;
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+                const bool down = event.gaxis.value > 20000, up = event.gaxis.value < -20000;
+                if (down && !list_stick_down) {
+                    move(1);
+                }
+                if (up && !list_stick_up) {
+                    move(-1);
+                }
+                list_stick_down = down;
+                list_stick_up = up;
+            }
+            return true;
+        case SDL_EVENT_MOUSE_MOTION: {
+            const float density = PixelDensity(event.motion.windowID);
+            io.AddMousePosEvent(event.motion.x * density, event.motion.y * density);
+            return true;
+        }
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                io.AddMouseButtonEvent(0, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+            }
+            return true;
+        case SDL_EVENT_MOUSE_WHEEL:
+            io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
+            return true;
+        default:
+            break;
+        }
+    }
     const bool is_open = menu_open;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
+        if (down && !event.key.repeat && MenuAllowed() &&
             (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
@@ -557,7 +708,7 @@ bool HandleEvent(const SDL_Event& event) {
         } else if (button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
             r3_down = down;
         }
-        if (down && l3_down && r3_down) {
+        if (down && l3_down && r3_down && MenuAllowed()) {
             SetOpen(!is_open);
             return true;
         }
@@ -612,11 +763,47 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps);
+    return initialized &&
+           (menu_open || text_entry_active || list_active || BbSettings::Get().show_fps);
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active;
+    return menu_open || text_entry_active || list_active;
+}
+
+bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus) {
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized) {
+        return false; // nothing could show it
+    }
+    list_title = title;
+    list_items = items;
+    list_selected = items.empty() ? 0 : std::clamp(focus, 0, static_cast<int>(items.size()) - 1);
+    list_result = -1;
+    list_scroll = true;
+    list_active = true;
+    ImGui::GetIO().MouseDrawCursor = true;
+    return true;
+}
+
+int PollSaveList() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!list_active || list_result == -1) {
+        return -1;
+    }
+    list_active = false;
+    if (initialized) {
+        ImGui::GetIO().MouseDrawCursor = menu_open.load();
+    }
+    return list_result;
+}
+
+void CloseSaveList() {
+    std::scoped_lock lock{imgui_mutex};
+    list_active = false;
+    if (initialized) {
+        ImGui::GetIO().MouseDrawCursor = menu_open.load();
+    }
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -660,6 +847,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (text_entry_active) {
         TextEntryBox();
+    }
+    if (list_active && !menu_open) {
+        SaveListBox();
     }
     ImGui::Render();
 

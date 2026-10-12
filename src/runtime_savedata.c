@@ -413,6 +413,33 @@ static ABI int32_t save_mount_info(const MountPoint *mount_point, uint64_t *info
                                           (unsigned long long)info[0],(unsigned long long)info[1]);
     return 0;
 }
+/* sotc: for the save/load slot list (runtime_services.c). The param of a save (zeroed when it
+ * has none) and a display line: subtitle, detail and date, or the directory name. */
+int runtime_savedata_param(int32_t user, const char *dir, void *param) {
+    char base[600], meta[700];
+    root(user,NULL,base,sizeof(base));
+    snprintf(meta,sizeof(meta),"%s/%.32s.sce_sys",base,dir);
+    return read_param(meta,(Param *)param);
+}
+void runtime_savedata_describe(int32_t user, const char *dir, char *out, size_t size, int64_t *mtime) {
+    Param p;
+    const int ok=!runtime_savedata_param(user,dir,&p);
+    char when[32]="";
+    if (ok && p.mtime) {
+        time_t t=(time_t)p.mtime; struct tm tm;
+#ifdef _WIN32
+        localtime_s(&tm,&t);
+#else
+        localtime_r(&t,&tm);
+#endif
+        strftime(when,sizeof(when),"%d/%m/%Y %H:%M",&tm);
+    }
+    if (mtime) *mtime=ok ? p.mtime : 0;
+    if (ok && (p.subtitle[0] || p.detail[0]))
+        snprintf(out,size,"%.127s\n%.200s    %s",p.subtitle,p.detail,when);
+    else
+        snprintf(out,size,"%.32s    %s",dir,when);
+}
 static const RuntimeExport exports[]={
     {"sceSaveDataInitialize",save_initialize}, {"sceSaveDataInitialize2",save_initialize},
     {"sceSaveDataInitialize3",save_initialize}, {"sceSaveDataTerminate",save_terminate},

@@ -207,22 +207,122 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_open(const void *p) { (void)p; return dialog_open(i); } \
     static ABI int32_t tag##_status(void) { return dialog_status(i); } \
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
-#define DIALOG_NO_OPEN(tag,i) \
-    static ABI int32_t tag##_init(void) { return dialog_init(i); } \
-    static ABI int32_t tag##_status(void) { return dialog_status(i); } \
-    static ABI int32_t tag##_term(void) { return dialog_term(i); }
-DIALOG(msg,1) DIALOG_NO_OPEN(save,2) DIALOG(profile,3) DIALOG(commerce,4)
-/* OrbisSaveDataDialogParam: base param (48 bytes), size, mode, dispType, then pointers to the
- * animation, items, user message, system message, error code and progress bar params. */
+DIALOG(msg,1) DIALOG(profile,3) DIALOG(commerce,4)
+/* SaveDataDialog. The list mode (pick the save to write, load or delete) is shown on screen by
+ * the overlay (bbgpu_save_list_*) and stays running until a save is chosen or the list is left;
+ * the other modes (messages, progress bars) complete at once with OK/Yes.
+ * OrbisSaveDataDialogParam: base param (48 bytes), size, mode, dispType, then pointers to the
+ * animation, items, user message, system message, error code and progress bar params, userData.
+ * Items: user, titleId*, dirName*, dirNameNum, newItem*, focusPos, focusPosDirName*.
+ * Result: mode, result (1 = cancelled), buttonId, dirName*, param*, userData. */
+#define SAVE_LIST_MAX 128
+static struct {
+    int list, has_new, choice; /* choice: -1 open, -2 cancelled, else the item */
+    int32_t mode; void *user_data;
+    uint32_t count; char names[SAVE_LIST_MAX][32];
+} save_dialog;
+int runtime_savedata_param(int32_t user, const char *dir, void *param);
+void runtime_savedata_describe(int32_t user, const char *dir, char *out, size_t size, int64_t *mtime);
+static ABI int32_t save_init(void) { return dialog_init(2); }
 static ABI int32_t save_open(const void *p) {
-    if (p) {
-        const unsigned char *b=p;
-        int32_t mode, disp; memcpy(&mode,b+0x34,4); memcpy(&disp,b+0x38,4);
-        const int32_t *sys, *err; memcpy(&sys,b+0x58,8); memcpy(&err,b+0x60,8);
-        printf("Runtime: SaveDataDialog mode=%d disp=%d sys=%d err=0x%x\n",mode,disp,
-               mode==3 && sys ? sys[0] : -1,mode==4 && err ? (unsigned)err[0] : 0);
+    if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
+    if (!p) return (int32_t)0x80B80006;
+    const unsigned char *b=p;
+    int32_t mode, disp; memcpy(&mode,b+0x34,4); memcpy(&disp,b+0x38,4);
+    const unsigned char *items; memcpy(&items,b+0x48,8);
+    memcpy(&save_dialog.user_data,b+0x70,8);
+    save_dialog.mode=mode; save_dialog.list=0;
+    if (mode==1 && items) {
+        int32_t user; memcpy(&user,items,4);
+        const char *dirs; memcpy(&dirs,items+0x10,8);
+        uint32_t count; memcpy(&count,items+0x18,4);
+        const void *new_item; memcpy(&new_item,items+0x20,8);
+        uint32_t focus; memcpy(&focus,items+0x28,4);
+        const char *focus_dir; memcpy(&focus_dir,items+0x30,8);
+        if (!dirs) count=0;
+        if (count>SAVE_LIST_MAX) count=SAVE_LIST_MAX;
+        save_dialog.has_new=disp==1 && new_item;
+        save_dialog.count=count;
+        static char lines[SAVE_LIST_MAX+1][400];
+        const char *line_ptrs[SAVE_LIST_MAX+1];
+        int n=0, latest=-1, oldest=-1, named=-1;
+        int64_t latest_time=INT64_MIN, oldest_time=INT64_MAX;
+        if (save_dialog.has_new) { snprintf(lines[n],sizeof(lines[n]),"%s",
+                                            disp==1 ? "+  Nova grava\xc3\xa7\xc3\xa3o" : "+"); line_ptrs[n]=lines[n]; ++n; }
+        for (uint32_t i=0;i<count;++i) {
+            memcpy(save_dialog.names[i],dirs+i*32,32); save_dialog.names[i][31]=0;
+            int64_t when=0;
+            runtime_savedata_describe(user,save_dialog.names[i],lines[n],sizeof(lines[n]),&when);
+            if (when>latest_time) { latest_time=when; latest=n; }
+            if (when<oldest_time) { oldest_time=when; oldest=n; }
+            if (focus_dir && !strncmp(focus_dir,save_dialog.names[i],32)) named=n;
+            line_ptrs[n]=lines[n]; ++n;
+        }
+        const int first_data=save_dialog.has_new ? 1 : 0;
+        int selected=0;
+        switch (focus) {
+        case 1: selected=n-1; break;                                  /* list tail */
+        case 2: selected=first_data; break;                           /* first save */
+        case 3: selected=n-1; break;                                  /* last save */
+        case 4: selected=latest>=0 ? latest : first_data; break;      /* newest */
+        case 5: selected=oldest>=0 ? oldest : first_data; break;      /* oldest */
+        case 6: selected=named>=0 ? named : 0; break;                 /* by name */
+        default: selected=0; break;                                   /* list head */
+        }
+        const char *title=disp==1 ? "Gravar jogo  /  Save game" : disp==2 ? "Carregar jogo  /  Load game"
+                          : "Apagar  /  Delete";
+        if (n && bbgpu_save_list_open(title,line_ptrs,n,selected)) {
+            save_dialog.list=1; save_dialog.choice=-1;
+            dialogs[2].status=2; /* running */
+            printf("Runtime: SaveDataDialog list (%s): %d item(s)\n",disp==1 ? "save" : disp==2 ? "load" : "delete",n);
+            return 0;
+        }
     }
-    return dialog_open(2);
+    const int32_t *sys, *err; memcpy(&sys,b+0x58,8); memcpy(&err,b+0x60,8);
+    printf("Runtime: SaveDataDialog mode=%d disp=%d sys=%d err=0x%x completed\n",mode,disp,
+           mode==3 && sys ? sys[0] : -1,mode==4 && err ? (unsigned)err[0] : 0);
+    dialogs[2].status=3; return 0;
+}
+static ABI int32_t save_status(void) {
+    if (save_dialog.list && dialogs[2].status==2) {
+        const int r=bbgpu_save_list_poll();
+        if (r!=-1) {
+            save_dialog.choice=r; dialogs[2].status=3;
+            printf("Runtime: SaveDataDialog list %s\n",r==-2 ? "cancelled" : "item chosen");
+        }
+    }
+    return dialogs[2].status;
+}
+static ABI int32_t save_close(void) {
+    if (save_dialog.list && dialogs[2].status==2) { bbgpu_save_list_close(); save_dialog.choice=-2; dialogs[2].status=3; }
+    return 0;
+}
+static ABI int32_t save_term(void) {
+    if (save_dialog.list && dialogs[2].status==2) bbgpu_save_list_close();
+    save_dialog.list=0;
+    return dialog_term(2);
+}
+static ABI int32_t save_result(unsigned char *result) {
+    if (!result) return (int32_t)0x80B80006;
+    int32_t mode=save_dialog.mode, res=0, button=1;
+    char *dir; memcpy(&dir,result+0x10,8);
+    void *param; memcpy(&param,result+0x18,8);
+    if (save_dialog.list) {
+        if (save_dialog.choice<0) { res=1; button=0; }            /* USER_CANCELED */
+        else {
+            const int index=save_dialog.choice-(save_dialog.has_new ? 1 : 0);
+            if (index<0) {                                         /* the new save */
+                if (dir) memset(dir,0,32);
+                if (param) memset(param,0,1328);
+            } else {
+                if (dir) memcpy(dir,save_dialog.names[index],32);
+                if (param && runtime_savedata_param(1,save_dialog.names[index],param)) memset(param,0,1328);
+            }
+        }
+    }
+    memcpy(result,&mode,4); memcpy(result+4,&res,4); memcpy(result+8,&button,4);
+    memcpy(result+0x20,&save_dialog.user_data,8);
+    return 0;
 }
 static ABI int32_t profile_result(void *result) { if (result) memset(result,0,4); return 0; }
 /* sotc: the remaining dialog calls of Shadow of the Colossus. Dialogs complete at once with
@@ -493,8 +593,8 @@ static const RuntimeExport exports[]={
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
     {"sceSaveDataDialogInitialize",save_init}, {"sceSaveDataDialogOpen",save_open},
     {"sceSaveDataDialogUpdateStatus",save_status}, {"sceSaveDataDialogTerminate",save_term},
-    {"sceSaveDataDialogGetStatus",save_status}, {"sceSaveDataDialogClose",dialog_close},
-    {"sceSaveDataDialogGetResult",dialog_result_ok}, {"sceSaveDataDialogIsReadyToDisplay",save_ready},
+    {"sceSaveDataDialogGetStatus",save_status}, {"sceSaveDataDialogClose",save_close},
+    {"sceSaveDataDialogGetResult",save_result}, {"sceSaveDataDialogIsReadyToDisplay",save_ready},
     {"sceSaveDataDialogProgressBarSetValue",save_progress},
     {"sceMsgDialogClose",dialog_close}, {"sceMsgDialogGetResult",dialog_result_ok},
     {"sceErrorDialogInitialize",error_init}, {"sceErrorDialogOpen",error_open},

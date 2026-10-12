@@ -34,6 +34,10 @@ void bbgpu_dump_guest_writes(void *ucontext);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
  * no window exists; poll returns 0 typing, 1 confirmed, 2 cancelled (UTF-8 text). */
 int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
+/* sotc: save/load slot list; poll: -1 open, -2 cancelled, else the chosen item. */
+int bbgpu_save_list_open(const char *title, const char *const *items, int count, int focus);
+int bbgpu_save_list_poll(void);
+void bbgpu_save_list_close(void);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* sotc: mouse motion since the last call and held buttons (bit = SDL button); 0 when not captured. */
 int bbgpu_mouse_take(float *dx, float *dy, unsigned *buttons);

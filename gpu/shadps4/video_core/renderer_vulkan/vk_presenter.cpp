@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
+#include "bbport_overlay.h"
 
 #include <algorithm>
 #include <array>
@@ -1019,6 +1020,14 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
                                    vk::PipelineStageFlagBits::eAllCommands,
                                    vk::DependencyFlagBits::eByRegion, {}, {}, back);
+            // sotc port: the in-game overlay on top (the save/load slot list of
+            // sceSaveDataDialog); draws nothing while it has nothing to show.
+            static bool overlay_ready = false;
+            if (!std::exchange(overlay_ready, true)) {
+                BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format,
+                                swapchain.GetImageCount());
+            }
+            BbOverlay::Render(cmdbuf, swapchain_image_view, extent);
         }
 
         if (capture_with_overlays_count > 0) {

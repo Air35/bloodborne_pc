@@ -445,17 +445,41 @@ bool IsRenderDocLoaded() { return false; }
 void RequestScreenshot(ScreenshotRequest) {}
 // sotc port: BB_FRAME_DUMP_TRIGGER=<file>: when the file appears it is removed and the next
 // presented game frame is saved as a PNG screenshot (user screenshots directory).
+// SOTC_SHOT_OVERLAY=1: the screenshot includes the overlay (the save/load list).
+static bool ShotWithOverlay() {
+    static const bool with = std::getenv("SOTC_SHOT_OVERLAY") != nullptr;
+    return with;
+}
 u32 ConsumeGameOnlyScreenshotRequests() {
     static const char* trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
-    return trigger && std::remove(trigger) == 0 ? 1 : 0;
+    return !ShotWithOverlay() && trigger && std::remove(trigger) == 0 ? 1 : 0;
 }
 bool ConsumeImageDumpRequest() { return false; } // sotc: SOTC_DUMP needs RenderDoc hooks
-u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
+u32 ConsumeWithOverlaysScreenshotRequests() {
+    static const char* trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
+    return ShotWithOverlay() && trigger && std::remove(trigger) == 0 ? 1 : 0;
+}
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
 
 extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
+}
+
+// sotc: the game's save/load slot list (sceSaveDataDialog LIST, runtime_services.c).
+extern "C" int bbgpu_save_list_open(const char* title, const char* const* items, int count,
+                                     int focus) {
+    std::vector<std::string> list;
+    for (int i = 0; i < count; ++i) {
+        list.emplace_back(items[i] ? items[i] : "");
+    }
+    return BbOverlay::OpenSaveList(title ? title : "", list, focus) ? 1 : 0;
+}
+extern "C" int bbgpu_save_list_poll(void) {
+    return BbOverlay::PollSaveList();
+}
+extern "C" void bbgpu_save_list_close(void) {
+    BbOverlay::CloseSaveList();
 }
 
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
