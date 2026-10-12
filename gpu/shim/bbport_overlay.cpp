@@ -61,6 +61,8 @@ bool list_active = false;
 std::string list_title;
 std::vector<std::string> list_items;
 int list_selected = 0, list_result = -1;
+int list_confirm = -1;  // item waiting for the delete confirmation, or -1
+int list_first_deletable = 0;
 bool list_scroll = false, list_stick_down = false, list_stick_up = false;
 float base_scale = 1.0f;
 
@@ -475,8 +477,13 @@ void SaveListBox() {
     list_scroll = false;
     ImGui::EndChild();
     ImGui::Separator();
-    ImGui::TextDisabled("Setas / direcional: escolher    Enter / X (A): confirmar    "
-                        "Esc / O (B): voltar    (mouse: duplo clique)");
+    if (list_confirm >= 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                           "Apagar este save?   Enter / X (A): sim    Esc / O (B): nao");
+    } else {
+        ImGui::TextDisabled("Setas / direcional: escolher    Enter / X (A): confirmar    "
+                            "Esc / O (B): voltar    Del / Triangulo (Y): apagar");
+    }
     ImGui::End();
 }
 
@@ -589,6 +596,7 @@ bool HandleEvent(const SDL_Event& event) {
     if (list_active && !menu_open && list_result == -1) {
         const int count = static_cast<int>(list_items.size());
         const auto move = [&](int delta) {
+            list_confirm = -1;
             if (count) {
                 list_selected = (list_selected + delta + count) % count;
                 list_scroll = true;
@@ -608,14 +616,27 @@ bool HandleEvent(const SDL_Event& event) {
             case SDLK_RETURN:
             case SDLK_KP_ENTER:
             case SDLK_SPACE:
-                if (!event.key.repeat && count) {
+                if (!event.key.repeat && list_confirm >= 0) {
+                    list_result = -100 - list_confirm; // delete it (PollSaveList)
+                    list_confirm = -1;
+                } else if (!event.key.repeat && count) {
                     list_result = list_selected;
                 }
                 break;
             case SDLK_ESCAPE:
             case SDLK_BACKSPACE:
                 if (!event.key.repeat) {
-                    list_result = -2;
+                    if (list_confirm >= 0) {
+                        list_confirm = -1;
+                    } else {
+                        list_result = -2;
+                    }
+                }
+                break;
+            case SDLK_DELETE:
+                if (!event.key.repeat && list_selected >= list_first_deletable &&
+                    list_selected < count) {
+                    list_confirm = list_selected;
                 }
                 break;
             default:
@@ -634,12 +655,24 @@ bool HandleEvent(const SDL_Event& event) {
                 move(1);
                 break;
             case SDL_GAMEPAD_BUTTON_SOUTH:
-                if (count) {
+                if (list_confirm >= 0) {
+                    list_result = -100 - list_confirm;
+                    list_confirm = -1;
+                } else if (count) {
                     list_result = list_selected;
                 }
                 break;
             case SDL_GAMEPAD_BUTTON_EAST:
-                list_result = -2;
+                if (list_confirm >= 0) {
+                    list_confirm = -1;
+                } else {
+                    list_result = -2;
+                }
+                break;
+            case SDL_GAMEPAD_BUTTON_NORTH:
+                if (list_selected >= list_first_deletable && list_selected < count) {
+                    list_confirm = list_selected;
+                }
                 break;
             default:
                 break;
@@ -771,7 +804,8 @@ bool CapturesInput() {
     return menu_open || text_entry_active || list_active;
 }
 
-bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus) {
+bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus,
+                  int first_deletable) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
         return false; // nothing could show it
@@ -780,6 +814,8 @@ bool OpenSaveList(const std::string& title, const std::vector<std::string>& item
     list_items = items;
     list_selected = items.empty() ? 0 : std::clamp(focus, 0, static_cast<int>(items.size()) - 1);
     list_result = -1;
+    list_confirm = -1;
+    list_first_deletable = first_deletable < 0 ? static_cast<int>(items.size()) : first_deletable;
     list_scroll = true;
     list_active = true;
     ImGui::GetIO().MouseDrawCursor = true;

@@ -218,11 +218,46 @@ DIALOG(msg,1) DIALOG(profile,3) DIALOG(commerce,4)
 #define SAVE_LIST_MAX 128
 static struct {
     int list, has_new, choice; /* choice: -1 open, -2 cancelled, else the item */
-    int32_t mode; void *user_data;
+    int32_t mode, disp, user; void *user_data;
     uint32_t count; char names[SAVE_LIST_MAX][32];
 } save_dialog;
 int runtime_savedata_param(int32_t user, const char *dir, void *param);
 void runtime_savedata_describe(int32_t user, const char *dir, char *out, size_t size, int64_t *mtime);
+int runtime_savedata_remove(int32_t user, const char *dir);
+/* Shows save_dialog's items (the new save first when saving); `selected` < 0: by focusPos. */
+static int save_list_show(int selected, uint32_t focus, const char *focus_dir) {
+    static char lines[SAVE_LIST_MAX+1][400];
+    const char *line_ptrs[SAVE_LIST_MAX+1];
+    int n=0, latest=-1, oldest=-1, named=-1;
+    int64_t latest_time=INT64_MIN, oldest_time=INT64_MAX;
+    if (save_dialog.has_new) {
+        snprintf(lines[n],sizeof(lines[n]),"%s","+  Nova grava\xc3\xa7\xc3\xa3o");
+        line_ptrs[n]=lines[n]; ++n;
+    }
+    for (uint32_t i=0;i<save_dialog.count;++i) {
+        int64_t when=0;
+        runtime_savedata_describe(save_dialog.user,save_dialog.names[i],lines[n],sizeof(lines[n]),&when);
+        if (when>latest_time) { latest_time=when; latest=n; }
+        if (when<oldest_time) { oldest_time=when; oldest=n; }
+        if (focus_dir && !strncmp(focus_dir,save_dialog.names[i],32)) named=n;
+        line_ptrs[n]=lines[n]; ++n;
+    }
+    const int first_data=save_dialog.has_new ? 1 : 0;
+    if (selected<0) {
+        switch (focus) {
+        case 1: selected=n-1; break;                                  /* list tail */
+        case 2: selected=first_data; break;                           /* first save */
+        case 3: selected=n-1; break;                                  /* last save */
+        case 4: selected=latest>=0 ? latest : first_data; break;      /* newest */
+        case 5: selected=oldest>=0 ? oldest : first_data; break;      /* oldest */
+        case 6: selected=named>=0 ? named : 0; break;                 /* by name */
+        default: selected=0; break;                                   /* list head */
+        }
+    }
+    const char *title=save_dialog.disp==1 ? "Gravar jogo  /  Save game"
+                      : save_dialog.disp==2 ? "Carregar jogo  /  Load game" : "Apagar  /  Delete";
+    return n && bbgpu_save_list_open(title,line_ptrs,n,selected,first_data);
+}
 static ABI int32_t save_init(void) { return dialog_init(2); }
 static ABI int32_t save_open(const void *p) {
     if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
@@ -242,36 +277,10 @@ static ABI int32_t save_open(const void *p) {
         if (!dirs) count=0;
         if (count>SAVE_LIST_MAX) count=SAVE_LIST_MAX;
         save_dialog.has_new=disp==1 && new_item;
-        save_dialog.count=count;
-        static char lines[SAVE_LIST_MAX+1][400];
-        const char *line_ptrs[SAVE_LIST_MAX+1];
-        int n=0, latest=-1, oldest=-1, named=-1;
-        int64_t latest_time=INT64_MIN, oldest_time=INT64_MAX;
-        if (save_dialog.has_new) { snprintf(lines[n],sizeof(lines[n]),"%s",
-                                            disp==1 ? "+  Nova grava\xc3\xa7\xc3\xa3o" : "+"); line_ptrs[n]=lines[n]; ++n; }
-        for (uint32_t i=0;i<count;++i) {
-            memcpy(save_dialog.names[i],dirs+i*32,32); save_dialog.names[i][31]=0;
-            int64_t when=0;
-            runtime_savedata_describe(user,save_dialog.names[i],lines[n],sizeof(lines[n]),&when);
-            if (when>latest_time) { latest_time=when; latest=n; }
-            if (when<oldest_time) { oldest_time=when; oldest=n; }
-            if (focus_dir && !strncmp(focus_dir,save_dialog.names[i],32)) named=n;
-            line_ptrs[n]=lines[n]; ++n;
-        }
-        const int first_data=save_dialog.has_new ? 1 : 0;
-        int selected=0;
-        switch (focus) {
-        case 1: selected=n-1; break;                                  /* list tail */
-        case 2: selected=first_data; break;                           /* first save */
-        case 3: selected=n-1; break;                                  /* last save */
-        case 4: selected=latest>=0 ? latest : first_data; break;      /* newest */
-        case 5: selected=oldest>=0 ? oldest : first_data; break;      /* oldest */
-        case 6: selected=named>=0 ? named : 0; break;                 /* by name */
-        default: selected=0; break;                                   /* list head */
-        }
-        const char *title=disp==1 ? "Gravar jogo  /  Save game" : disp==2 ? "Carregar jogo  /  Load game"
-                          : "Apagar  /  Delete";
-        if (n && bbgpu_save_list_open(title,line_ptrs,n,selected)) {
+        save_dialog.count=count; save_dialog.disp=disp; save_dialog.user=user;
+        for (uint32_t i=0;i<count;++i) { memcpy(save_dialog.names[i],dirs+i*32,32); save_dialog.names[i][31]=0; }
+        const int n=(int)count+(save_dialog.has_new ? 1 : 0);
+        if (save_list_show(-1,focus,focus_dir)) {
             save_dialog.list=1; save_dialog.choice=-1;
             dialogs[2].status=2; /* running */
             printf("Runtime: SaveDataDialog list (%s): %d item(s)\n",disp==1 ? "save" : disp==2 ? "load" : "delete",n);
@@ -286,6 +295,19 @@ static ABI int32_t save_open(const void *p) {
 static ABI int32_t save_status(void) {
     if (save_dialog.list && dialogs[2].status==2) {
         const int r=bbgpu_save_list_poll();
+        if (r<=-100) { /* delete item -100-r, then show the list again */
+            const int item=-100-r, index=item-(save_dialog.has_new ? 1 : 0);
+            if (index>=0 && (uint32_t)index<save_dialog.count) {
+                runtime_savedata_remove(save_dialog.user,save_dialog.names[index]);
+                memmove(save_dialog.names[index],save_dialog.names[index+1],
+                        (save_dialog.count-index-1)*sizeof(save_dialog.names[0]));
+                --save_dialog.count;
+            }
+            const int left=(int)save_dialog.count+(save_dialog.has_new ? 1 : 0);
+            if (save_list_show(item<left ? item : left-1,0,NULL)) return dialogs[2].status;
+            save_dialog.choice=-2; dialogs[2].status=3; /* nothing left to show */
+            return dialogs[2].status;
+        }
         if (r!=-1) {
             save_dialog.choice=r; dialogs[2].status=3;
             printf("Runtime: SaveDataDialog list %s\n",r==-2 ? "cancelled" : "item chosen");

@@ -468,12 +468,12 @@ extern "C" int bbgpu_overlay_captures_input(void) {
 
 // sotc: the game's save/load slot list (sceSaveDataDialog LIST, runtime_services.c).
 extern "C" int bbgpu_save_list_open(const char* title, const char* const* items, int count,
-                                     int focus) {
+                                     int focus, int first_deletable) {
     std::vector<std::string> list;
     for (int i = 0; i < count; ++i) {
         list.emplace_back(items[i] ? items[i] : "");
     }
-    return BbOverlay::OpenSaveList(title ? title : "", list, focus) ? 1 : 0;
+    return BbOverlay::OpenSaveList(title ? title : "", list, focus, first_deletable) ? 1 : 0;
 }
 extern "C" int bbgpu_save_list_poll(void) {
     return BbOverlay::PollSaveList();

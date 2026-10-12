@@ -440,6 +440,21 @@ void runtime_savedata_describe(int32_t user, const char *dir, char *out, size_t 
     else
         snprintf(out,size,"%.32s    %s",dir,when);
 }
+/* sotc: deletes one save (the slot list's Delete). 0 when it existed. */
+int runtime_savedata_remove(int32_t user, const char *dir) {
+    char name[33]; snprintf(name,sizeof(name),"%.32s",dir);
+    if (!valid_name(name,sizeof(name))) return -1;
+    char base[600], host[700], meta[700];
+    root(user,NULL,base,sizeof(base));
+    snprintf(host,sizeof(host),"%s/%s",base,name);
+    snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,name);
+    struct stat st;
+    if (stat(host,&st)) return -1;
+    remove_tree(host);
+    remove_tree(meta);
+    printf("Runtime: save data '%s' deleted from the slot list\n",name);
+    return 0;
+}
 static const RuntimeExport exports[]={
     {"sceSaveDataInitialize",save_initialize}, {"sceSaveDataInitialize2",save_initialize},
     {"sceSaveDataInitialize3",save_initialize}, {"sceSaveDataTerminate",save_terminate},

@@ -41,9 +41,12 @@ bool CapturesInput();
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text);
 
 /// The game's save/load slot list (sceSaveDataDialog LIST): shown until chosen or cancelled.
-/// Any thread. `focus` is the item selected first. False when the overlay is not running.
-bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus);
-/// -1 while the list is open (or none), -2 cancelled, else the chosen item. Closes it when done.
+/// Any thread. `focus` is the item selected first; items from `first_deletable` on can be
+/// deleted (Del / Triangle, after a confirmation; -1: none). False when the overlay is not running.
+bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus,
+                  int first_deletable = -1);
+/// -1 while the list is open (or none), -2 cancelled, -100 - i: delete item i, else the chosen
+/// item. Closes the list when it returns anything but -1.
 int PollSaveList();
 void CloseSaveList();
 
