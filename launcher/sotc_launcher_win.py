@@ -28,7 +28,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 GAME_ID, GAME_VERSION = 'CUSA08809', '01.01'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
-VERSION = '1.1'
+VERSION = '0.0.8'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -106,7 +106,65 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
                 'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True,
-                'perf_record_thread': True}
+                'perf_record_thread': True, 'gpu_submit': 'auto', 'library_dirs': [], 'keys': {},
+                'auto_setup': True}
+# Keyboard bindings (src/runtime_pad.c): PS4 input, its default SDL key name, label.
+KEY_INPUTS = [
+    ('move_up', 'W', ('Andar para frente', 'Move forward')), ('move_down', 'S', ('Andar para trás', 'Move back')),
+    ('move_left', 'A', ('Andar para a esquerda', 'Move left')), ('move_right', 'D', ('Andar para a direita', 'Move right')),
+    ('look_up', 'Up', ('Câmera para cima', 'Camera up')), ('look_down', 'Down', ('Câmera para baixo', 'Camera down')),
+    ('look_left', 'Left', ('Câmera para a esquerda', 'Camera left')), ('look_right', 'Right', ('Câmera para a direita', 'Camera right')),
+    ('cross', 'Space', ('✕', '✕')), ('circle', 'Left Shift', ('○', '○')), ('square', 'E', ('□', '□')),
+    ('triangle', 'Q', ('△', '△')), ('l1', '1', ('L1', 'L1')), ('r1', '3', ('R1', 'R1')), ('l2', 'R', ('L2', 'L2')),
+    ('r2', 'F', ('R2', 'R2')), ('l3', 'Z', ('L3', 'L3')), ('r3', 'C', ('R3', 'R3')),
+    ('options', 'Return', ('Options', 'Options')), ('touchpad', 'Tab', ('Touchpad (esquerda)', 'Touchpad (left)')),
+    ('touchpad_right', 'Backspace', ('Touchpad (direita)', 'Touchpad (right)')),
+    ('up', 'I', ('Direcional ↑', 'D-pad ↑')), ('down', 'K', ('Direcional ↓', 'D-pad ↓')),
+    ('left', 'J', ('Direcional ←', 'D-pad ←')), ('right', 'L', ('Direcional →', 'D-pad →')),
+]
+# Tk key symbols whose SDL scancode name differs (letters, digits, F-keys and arrows match).
+TK_TO_SDL = {
+    'space': 'Space', 'Return': 'Return', 'Tab': 'Tab', 'BackSpace': 'Backspace', 'Escape': 'Escape',
+    'Shift_L': 'Left Shift', 'Shift_R': 'Right Shift', 'Control_L': 'Left Ctrl', 'Control_R': 'Right Ctrl',
+    'Alt_L': 'Left Alt', 'Alt_R': 'Right Alt', 'Caps_Lock': 'CapsLock', 'Prior': 'PageUp', 'Next': 'PageDown',
+    'Home': 'Home', 'End': 'End', 'Insert': 'Insert', 'Delete': 'Delete', 'comma': ',', 'period': '.',
+    'slash': '/', 'semicolon': ';', 'apostrophe': "'", 'bracketleft': '[', 'bracketright': ']',
+    'minus': '-', 'equal': '=', 'grave': '`', 'backslash': '\\', 'KP_Enter': 'Keypad Enter',
+    'KP_Add': 'Keypad +', 'KP_Subtract': 'Keypad -', 'KP_Multiply': 'Keypad *', 'KP_Divide': 'Keypad /',
+    'KP_Decimal': 'Keypad .',
+}
+GPU_SUBMIT = [('auto', ('Automático (ligado em NVIDIA)', 'Automatic (on with NVIDIA)')),
+              ('on', ('Ligado em qualquer placa (AMD/Intel: experimental)', 'On with any card (AMD/Intel: experimental)')),
+              ('off', ('Desligado', 'Off'))]
+
+
+def sdl_key_name(keysym):
+    """SDL scancode name of a Tk key symbol, or None for keys the game cannot use."""
+    if keysym in TK_TO_SDL:
+        return TK_TO_SDL[keysym]
+    if len(keysym) == 1 and keysym.isalnum():
+        return keysym.upper()
+    if keysym in ('Up', 'Down', 'Left', 'Right') or (keysym[:1] == 'F' and keysym[1:].isdigit()):
+        return keysym
+    if keysym.startswith('KP_') and keysym[3:].isdigit():
+        return 'Keypad ' + keysym[3:]
+    return None
+
+
+def write_key_bindings(keys):
+    """The launcher's key bindings as key.<input>= lines of sotc.ini (BB_CONFIG), replacing its
+    earlier ones; other lines stay."""
+    ini = PORT_DIR / 'sotc.ini'
+    try:
+        lines = ini.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        lines = []
+    lines = [line for line in lines if not line.startswith('key.') and line != '# key bindings (launcher)']
+    custom = dict(keys or {})  # an empty value unbinds the input
+    if custom:
+        lines.append('# key bindings (launcher)')
+        lines += [f'key.{name}={value}' for name, value in sorted(custom.items())]
+    ini.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 # Engine effects verified to change the image when set on the command line (A/B, 08/10/2026).
 EFFECTS = [('fx_vignette', ('Vinheta (cantos escurecidos)', 'Vignette (darkened corners)'),
             'r_vignetteOverrideEnable=1 r_vignetteEnable=0'),
@@ -209,6 +267,11 @@ def game_environment(s):
     cvars += str(s.get('engine_cvars', '')).split()
     env['SOTC_CVARS'] = ' '.join(cvars)
     env['SOTC_RECORD_THREAD'] = '1' if s.get('perf_record_thread', True) else '0'
+    # Periodic submits and readbacks ahead: by default only with NVIDIA (vk_rasterizer.cpp).
+    if s.get('gpu_submit') == 'on':
+        env['SOTC_FLUSH_US'], env['SOTC_RB_AHEAD'] = '500', '1'
+    elif s.get('gpu_submit') == 'off':
+        env['SOTC_FLUSH_EVERY'], env['SOTC_RB_AHEAD'] = '0', '0'
     env['SOTC_NEO'] = '1' if s.get('neo') else '0'
     env['SOTC_OUTPUT_RES'] = s.get('output_res') or '1920x1080'
     env['BB_FSR1'] = '1' if s.get('upscaler', 'fsr1') == 'fsr1' else '0'
@@ -273,6 +336,13 @@ class Launcher:
         self.style()
         self.build()
         self.show('play')
+        self.refresh_library()
+        # First start (or something missing): look for the game, the sound modules and saves.
+        if self.app.get('auto_setup', True) and (not game_info(self.var('game_dir').get()) or
+                                                 not self.sound_ready() or
+                                                 (not self.has_saves() and not self.app.get('save_scan_done'))):
+            self.app['save_scan_done'] = True
+            root.after(400, self.start_discovery)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         threading.Thread(target=self.detect_gpu, daemon=True).start()
@@ -281,18 +351,34 @@ class Launcher:
         return int(size * self.dpi)
 
     def set_icon(self):
+        """The game's own icon (sce_sys/icon0.png of the user's dump) when there is one, else the
+        port's: the package carries no game art."""
+        game = self.vars['game_dir'].get() if 'game_dir' in self.vars else self.app['game_dir']
+        try:
+            from PIL import Image, ImageTk
+            with Image.open(Path(game) / 'sce_sys' / 'icon0.png') as source:
+                self.icon = ImageTk.PhotoImage(source.convert('RGBA').resize((64, 64), Image.LANCZOS))
+            self.root.iconphoto(True, self.icon)
+            return
+        except (ImportError, OSError):
+            pass
         try:
             self.root.iconbitmap(default=str(PORT_DIR / 'launcher' / 'sotc.ico'))
-            return
         except self.tk.TclError:
             pass
+
+    def game_icon_file(self):
+        """icon0.png of the dump as an .ico in the data folder (for the desktop shortcut)."""
         try:
-            self.icon = self.tk.PhotoImage(file=str(Path(self.app['game_dir']) / 'sce_sys' / 'icon0.png'))
-            if self.icon.width() > 128:
-                self.icon = self.icon.subsample(self.icon.width() // 64)
-            self.root.iconphoto(True, self.icon)
-        except (self.tk.TclError, OSError):
-            pass
+            from PIL import Image
+            target = user_dir(self.app) / 'game.ico'
+            with Image.open(Path(self.app['game_dir']) / 'sce_sys' / 'icon0.png') as source:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.convert('RGBA').save(target, sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128),
+                                                           (256, 256)])
+            return target
+        except (ImportError, OSError):
+            return None
 
     # ---- look --------------------------------------------------------------------------------
     def check_images(self):
@@ -581,7 +667,38 @@ class Launcher:
         f = self.scrolled_page('game', _('Jogo e saves', 'Game & saves'),
                                _('O seu dump do jogo, os módulos de som do seu console e a pasta dos saves.',
                                  'Your game dump, your console\'s sound modules and the saves folder.'))
-        self.section(f, _('Jogo', 'Game'), top=4)
+        self.section(f, _('Biblioteca de jogos', 'Game library'), top=4)
+        self.note(f, _('Como no shadPS4: adicione as pastas onde ficam os seus jogos e escolha o Shadow of the '
+                       'Colossus na lista (duplo clique).',
+                       'As in shadPS4: add the folders that hold your games and pick Shadow of the Colossus in the '
+                       'list (double click).'), top=0)
+        tree_holder = ttk.Frame(f)
+        tree_holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='we', pady=(6, 0))
+        style = self.ttk.Style()
+        style.configure('Library.Treeview', rowheight=self.px(40), background=CARD, fieldbackground=CARD,
+                        foreground=TEXT, borderwidth=0)
+        style.configure('Library.Treeview.Heading', background=PANEL, foreground=MUTED)
+        self.library = ttk.Treeview(tree_holder, columns=('id', 'version', 'path'), height=4,
+                                    style='Library.Treeview')
+        for column, title, width in (('#0', _('Jogo', 'Game'), 300), ('id', 'ID', 100),
+                                     ('version', _('Versão', 'Version'), 70), ('path', _('Pasta', 'Folder'), 380)):
+            self.library.heading(column, text=title, anchor='w')
+            self.library.column(column, width=self.px(width), anchor='w', stretch=column == 'path')
+        self.library.pack(side='left', fill='x', expand=True)
+        self.library.bind('<Double-1>', lambda _e: self.use_selected_game())
+        self.library_icons = {}
+        buttons = ttk.Frame(f)
+        buttons.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(6, 0))
+        ttk.Button(buttons, text=_('Usar este jogo', 'Use this game'), command=self.use_selected_game).pack(side='left')
+        ttk.Button(buttons, text=_('Adicionar pasta de jogos…', 'Add a games folder…'),
+                   command=self.add_library_dir).pack(side='left', padx=(6, 0))
+        ttk.Button(buttons, text=_('Remover pasta', 'Remove folder'),
+                   command=self.remove_library_dir).pack(side='left', padx=(6, 0))
+        ttk.Button(buttons, text=_('Procurar no PC', 'Search this PC'),
+                   command=lambda: self.start_discovery(manual=True)).pack(side='left', padx=(6, 0))
+        self.library_label = ttk.Label(f, text='', style='Muted.TLabel')
+        self.library_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
+        self.section(f, _('Jogo', 'Game'))
         self.folder(f, 'game_dir', _('Pasta do jogo', 'Game folder'), _('Pasta com eboot.bin', 'Folder with eboot.bin'),
                     _('O dump CUSA08809 (versão europeia 1.01), com eboot.bin, sce_module e sce_sys.',
                       'The CUSA08809 dump (EU version 1.01) with eboot.bin, sce_module and sce_sys.'),
@@ -589,9 +706,11 @@ class Launcher:
         self.section(f, _('Som', 'Sound'))
         self.folder(f, 'sys_modules', _('Módulos de som', 'Sound modules'),
                     _('Pasta com libSceNgs2.sprx e libSceUlt.sprx', 'Folder with libSceNgs2.sprx and libSceUlt.sprx'),
-                    _('libSceNgs2.sprx e libSceUlt.sprx do SEU console, decriptados (a pasta user/sys_modules do '
-                      'shadPS4). São firmware da Sony e nunca vêm com o port. Sem eles o jogo roda sem som.',
-                      'libSceNgs2.sprx and libSceUlt.sprx from YOUR console, decrypted (shadPS4\'s user/sys_modules). '
+                    _('libSceNgs2.sprx e libSceUlt.sprx do SEU console, decriptados. O lançador procura sozinho num '
+                      'shadPS4 instalado no PC (user/sys_modules) e copia para a pasta de dados do port. São firmware '
+                      'da Sony e nunca vêm com o port. Sem eles o jogo roda sem som.',
+                      'libSceNgs2.sprx and libSceUlt.sprx from YOUR console, decrypted. The launcher looks for them in '
+                      'a shadPS4 installed on this PC (user/sys_modules) and copies them to the port\'s data folder. '
                       'They are Sony firmware and never come with the port. Without them the game is silent.'),
                     on_change=self.refresh_status)
         self.section(f, _('Saves', 'Saves'))
@@ -648,6 +767,13 @@ class Launcher:
                      'Ponte do cânion no demo: ~24 → ~28 FPS. Desligue se notar travamentos.',
                      'Records and submits the GPU commands on another thread (cp_record_thread of '
                      'Pink-shadPS4). Canyon bridge in the demo: ~24 → ~28 FPS. Turn it off if the game hangs.'))
+        self.row(f, _('Envio de trabalho à GPU', 'GPU work submission'), self.choice(f, 'gpu_submit', GPU_SUBMIT),
+                 _('Manda trabalho à GPU a cada 0,5 ms e lê resultados por um atalho (técnicas do Pink-shadPS4). '
+                   'Medido em NVIDIA (+10–15%); em AMD/Intel use "Ligado" para testar e volte para "Automático" '
+                   'se a tela ficar preta.',
+                   'Sends work to the GPU every 0.5 ms and reads results through a shortcut (Pink-shadPS4 '
+                   'techniques). Measured on NVIDIA (+10–15%); on AMD/Intel pick "On" to try it and go back to '
+                   '"Automatic" if the screen turns black.'))
         self.section(f, _('Efeitos', 'Effects'))
         for key, title, _off in EFFECTS:
             self.check(f, key, _(*title))
@@ -675,18 +801,73 @@ class Launcher:
         self.row(f, _('Sensibilidade', 'Sensitivity'), self.choice(f, 'mouse_sens', MOUSE_SENS, 20))
         self.check(f, 'mouse_invert', _('Inverter o eixo vertical', 'Invert the vertical axis'))
         self.section(f, _('Teclado (funciona junto com o controle)', 'Keyboard (works next to a gamepad)'))
-        for key, action in CONTROLS:
-            key = _(*key) if isinstance(key, tuple) else key
-            action = _(*action) if isinstance(action, tuple) else action
+        self.note(f, _('Clique na tecla de uma ação e aperte a nova tecla (Esc cancela). Vale na próxima vez que '
+                       'o jogo abrir.',
+                       'Click the key of an action and press the new key (Esc cancels). Applies the next time the '
+                       'game starts.'), top=0)
+        self.key_buttons = {}
+        for name, default, label in KEY_INPUTS:
             r = self.next_row(f)
-            ttk.Label(f, text=key, foreground=GOLD).grid(row=r, column=0, sticky='w', padx=(0, 24), pady=2)
-            ttk.Label(f, text=action).grid(row=r, column=1, sticky='w', pady=2)
-        self.note(f, _('Para remapear, ponha linhas no sotc.ini da pasta do port, por exemplo key.cross=Space,J '
-                       'ou pad.circle=b. Entradas: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad '
-                       'touchpad_right up down left right move_up/down/left/right look_up/down/left/right.',
-                       'To remap, add lines to sotc.ini in the port folder, e.g. key.cross=Space,J or pad.circle=b. '
-                       'Inputs: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right up '
-                       'down left right move_up/down/left/right look_up/down/left/right.'))
+            ttk.Label(f, text=_(*label)).grid(row=r, column=0, sticky='w', padx=(0, 24), pady=1)
+            button = ttk.Button(f, width=18, command=lambda n=name: self.capture_key(n))
+            button.grid(row=r, column=1, sticky='w', pady=1)
+            self.key_buttons[name] = button
+        holder = ttk.Frame(f)
+        holder.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8, 0))
+        ttk.Button(holder, text=_('Restaurar as teclas padrão', 'Restore the default keys'),
+                   command=self.reset_keys).pack(side='left')
+        self.show_keys()
+        self.note(f, _('O controle também pode ser remapeado no sotc.ini, por exemplo pad.circle=b '
+                       '(nomes de botão do SDL).',
+                       'The gamepad can be remapped in sotc.ini too, e.g. pad.circle=b (SDL button names).'))
+
+    def show_keys(self):
+        keys = self.app.setdefault('keys', {})
+        for name, default, _label in KEY_INPUTS:
+            value = (keys[name] or '—') if name in keys else default
+            self.key_buttons[name].configure(text=value + (' *' if name in keys else ''))
+
+    def reset_keys(self):
+        self.app['keys'] = {}
+        self.show_keys()
+
+    def capture_key(self, name):
+        """A small window that waits for the new key of one action."""
+        tk, ttk = self.tk, self.ttk
+        window = tk.Toplevel(self.root)
+        window.title(_('Nova tecla', 'New key'))
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.resizable(False, False)
+        label = next(_(*l) for n, _d, l in KEY_INPUTS if n == name)
+        ttk.Label(window, text=_('Aperte a tecla para: {}', 'Press the key for: {}').format(label),
+                  font=('Segoe UI', 12)).pack(padx=30, pady=(24, 6))
+        hint = ttk.Label(window, text=_('Esc cancela', 'Esc cancels'), style='Muted.TLabel')
+        hint.pack(padx=30, pady=(0, 22))
+
+        def pressed(event):
+            if event.keysym == 'Escape':
+                window.destroy()
+                return
+            key = sdl_key_name(event.keysym)
+            if not key:
+                hint.configure(text=_('Tecla não suportada: {}', 'Unsupported key: {}').format(event.keysym))
+                return
+            keys = self.app.setdefault('keys', {})
+            default = next(d for n, d, _l in KEY_INPUTS if n == name)
+            if key == default:
+                keys.pop(name, None)
+            else:
+                keys[name] = key
+            # The key leaves any other action that had it (one action per key keeps it clear).
+            for other, other_default, _l in KEY_INPUTS:
+                if other != name and (keys[other] if other in keys else other_default) == key:
+                    keys[other] = ''
+            self.show_keys()
+            window.destroy()
+        window.bind('<KeyPress>', pressed)
+        window.grab_set()
+        window.focus_force()
 
     def build_advanced(self):
         ttk = self.ttk
@@ -825,6 +1006,146 @@ class Launcher:
         self.refresh_status()
         self.messagebox.showinfo('Shadow of the Colossus', _('Save importado para {}.', 'Save imported to {}.').format(target))
 
+    # ---- library and automatic setup ---------------------------------------------------------
+    def library_icon(self, path):
+        if not path:
+            return None
+        if path not in self.library_icons:
+            image = None
+            try:
+                from PIL import Image, ImageTk
+                with Image.open(path) as source:
+                    size = self.px(36)
+                    image = ImageTk.PhotoImage(source.convert('RGBA').resize((size, size), Image.LANCZOS))
+            except (ImportError, OSError):
+                pass
+            self.library_icons[path] = image
+        return self.library_icons[path]
+
+    def refresh_library(self):
+        from sotc_discovery import library_games
+        folders = list(self.app.get('library_dirs') or [])
+        current = self.var('game_dir').get()
+        extra = [str(Path(current).parent)] if game_info(current) else []
+        tree = self.library
+        tree.delete(*tree.get_children())
+        for game in library_games(folders + extra):
+            tree.insert('', 'end', iid=game['path'], text='  ' + game['title'],
+                        image=self.library_icon(game['icon']) or '',
+                        values=(game['id'], game['version'], game['path']))
+            if current and os.path.normcase(game['path']) == os.path.normcase(current):
+                tree.selection_set(game['path'])
+        self.library_label.configure(text=_('Pastas da biblioteca: {}', 'Library folders: {}').format(
+            '; '.join(folders) or _('nenhuma ainda', 'none yet')))
+
+    def use_selected_game(self):
+        selection = self.library.selection()
+        if selection:
+            self.var('game_dir').set(selection[0])
+
+    def add_library_dir(self):
+        chosen = self.filedialog.askdirectory(title=_('Pasta com os seus jogos de PS4', 'Folder with your PS4 games'),
+                                              initialdir=str(PORT_DIR.parent))
+        if chosen:
+            folders = self.app.setdefault('library_dirs', [])
+            if str(Path(chosen)) not in folders:
+                folders.append(str(Path(chosen)))
+            self.refresh_library()
+
+    def remove_library_dir(self):
+        folders = self.app.get('library_dirs') or []
+        selection = self.library.selection()
+        chosen = next((f for f in folders if selection and Path(selection[0]).is_relative_to(f)),
+                      folders[-1] if folders else None)
+        if chosen and self.messagebox.askyesno('Shadow of the Colossus', _(
+                'Tirar {} da biblioteca? (nada é apagado do disco)',
+                'Remove {} from the library? (nothing is deleted from the disk)').format(chosen)):
+            folders.remove(chosen)
+            self.refresh_library()
+
+    def sound_ready(self):
+        folder = self.var('sys_modules').get()
+        return bool(folder) and all((Path(folder) / m).is_file() for m in SYS_MODULES)
+
+    def saves_folder(self):
+        return user_dir({'user_dir': self.var('user_dir').get()}) / 'savedata' / '1' / GAME_ID
+
+    def has_saves(self):
+        saves = self.saves_folder()
+        return saves.is_dir() and any(saves.iterdir())
+
+    def start_discovery(self, manual=False):
+        """Looks for the game, the user's sound modules and shadPS4 saves in the background."""
+        if getattr(self, 'discovering', False):
+            return
+        self.discovering = True
+        self.library_label.configure(text=_('Procurando o jogo, os módulos de som e os saves neste PC…',
+                                            'Looking for the game, the sound modules and saves on this PC…'))
+        roots = [str(PORT_DIR.parent), *(self.app.get('library_dirs') or [])]
+
+        def work():
+            try:
+                from sotc_discovery import scan
+                found = scan(seconds=40, extra_roots=roots)
+            except Exception:  # a scan problem never stops the launcher
+                found = {'games': [], 'sys_modules': [], 'saves': []}
+            self.ui_calls.put(lambda: self.apply_discovery(found, manual))
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_discovery(self, found, manual):
+        self.discovering = False
+        done = []
+        folders = self.app.setdefault('library_dirs', [])
+        for game in found['games']:
+            parent = str(Path(game['path']).parent)
+            if parent not in folders:
+                folders.append(parent)
+        if found['games'] and not game_info(self.var('game_dir').get()):
+            best = min(found['games'],
+                       key=lambda g: eboot_version(Path(g['path']) / 'eboot.bin') != GAME_VERSION)
+            self.var('game_dir').set(best['path'])
+            done.append(_('jogo em {}', 'game in {}').format(best['path']))
+        if not self.sound_ready() and found['sys_modules']:
+            # A copy next to the port: the game keeps sound even if that shadPS4 folder goes away.
+            target = user_dir({'user_dir': self.var('user_dir').get()}) / 'sys_modules'
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                for module in SYS_MODULES:
+                    shutil.copy2(Path(found['sys_modules'][0]) / module, target / module)
+                self.var('sys_modules').set(str(target))
+                done.append(_('som (de {})', 'sound (from {})').format(found['sys_modules'][0]))
+            except OSError:
+                pass
+        if not self.has_saves():
+            own = user_dir({'user_dir': self.var('user_dir').get()}).resolve()
+            outside = [p for p in found['saves'] if not Path(p).resolve().is_relative_to(own)]
+            if outside and self.messagebox.askyesno('Shadow of the Colossus', _(
+                    'Encontrei um save do jogo em\n{}\nImportar para o port?',
+                    'Found a save of the game in\n{}\nImport it into the port?').format(outside[0])):
+                self.copy_save(Path(outside[0]))
+                done.append(_('save importado', 'save imported'))
+        self.collect()
+        self.refresh_library()
+        self.refresh_status()
+        if done:
+            text = _('Configurado automaticamente: {}', 'Set up automatically: {}').format('; '.join(done))
+        elif manual:
+            text = _('Nada novo encontrado.', 'Nothing new found.')
+        else:
+            text = self.library_label.cget('text')
+        self.library_label.configure(text=text)
+        if done:
+            self.append(text + '\n')
+
+    def copy_save(self, source):
+        target = self.saves_folder()
+        if target.exists() and any(target.iterdir()):
+            backup = target.with_name(target.name + '.bak')
+            shutil.rmtree(backup, ignore_errors=True)
+            target.rename(backup)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, target, dirs_exist_ok=True)
+
     # ---- game process ------------------------------------------------------------------------
     def play(self):
         if self.process:
@@ -836,6 +1157,11 @@ class Launcher:
             self.show('game')
             return
         self.set_log('')
+        try:
+            write_key_bindings(self.app.get('keys'))
+        except OSError as error:
+            self.append(_('Não foi possível gravar as teclas no sotc.ini: {}',
+                          'Could not write the keys to sotc.ini: {}').format(error) + '\n')
         try:
             self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -918,8 +1244,10 @@ class Launcher:
             'Shader cache cleared. The next start stutters for a few minutes while it is rebuilt.'))
 
     def shortcut(self):
+        self.collect()
+        game_icon = self.game_icon_file()
         if FROZEN:
-            target, arguments, icon = sys.executable, '', f'{sys.executable},0'
+            target, arguments, icon = sys.executable, '', game_icon or f'{sys.executable},0'
         else:
             pythonw = Path(sys.executable).with_name('pythonw.exe')
             target = str(pythonw if pythonw.exists() else sys.executable)
@@ -969,6 +1297,10 @@ def play_without_window(settings):
     attach_stdio()
     log_dir = user_dir(settings)
     log_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        write_key_bindings(settings.get('keys'))
+    except OSError:
+        pass
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

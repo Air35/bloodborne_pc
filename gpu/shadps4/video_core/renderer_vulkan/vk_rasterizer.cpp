@@ -695,6 +695,11 @@ void Rasterizer::FlushPeriodic() {
         if (const char* v = std::getenv("SOTC_FLUSH_EVERY")) {
             return static_cast<u32>(std::strtoul(v, nullptr, 10));
         }
+        // An explicit SOTC_FLUSH_US turns the periodic submit on for any GPU (the launcher's
+        // option for AMD and Intel cards, not tested there).
+        if (const char* v = std::getenv("SOTC_FLUSH_US"); v && std::strtoull(v, nullptr, 10) != 0) {
+            return 256u;
+        }
         // SotC: +20% fps in the open world (14-15 -> 18). Other games keep the upstream behavior.
         // Only measured on NVIDIA; Pink-shadPS4 advises turning it off on AMD (black screen).
         constexpr u32 VendorNvidia = 0x10DE;
