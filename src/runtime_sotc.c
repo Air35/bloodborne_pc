@@ -47,7 +47,11 @@ int runtime_sotc_neo(void) {
     if (neo<0) { const char *v=getenv("SOTC_NEO"); neo=v && *v=='1'; }
     return neo;
 }
-static ABI int32_t is_neo_mode(void) { return runtime_sotc_neo(); }
+static ABI int32_t is_neo_mode(void) {
+    static int reported;
+    if (!reported++) printf("Runtime: sceKernelIsNeoMode -> %d (SOTC_NEO)\n",runtime_sotc_neo());
+    return runtime_sotc_neo();
+}
 static ABI int32_t kernel_sleep(uint32_t seconds) {
 #ifdef _WIN32
     Sleep(seconds*1000u);
