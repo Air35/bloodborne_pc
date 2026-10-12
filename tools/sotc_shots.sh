@@ -5,7 +5,7 @@ set -uo pipefail
 cd -- "$(dirname -- "$0")/.."
 export MSYS2_ROOT=${MSYS2_ROOT:-/i/msys64}
 export PATH="$MSYS2_ROOT/clang64/bin:$MSYS2_ROOT/usr/bin:$PATH"
-game=${SOTC_GAME_DIR:-"I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809"}
+game=${SOTC_GAME_DIR:-"$(dirname "$0")/../../CUSA08809"}
 total=$1; shift
 rm -rf out/dump; mkdir -p out/dump
 export BB_FRAME_DUMP_TRIGGER=out/dump.trigger BB_DUMP_DIR=out/dump

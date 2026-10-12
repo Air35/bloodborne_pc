@@ -20,11 +20,15 @@ Este pacote **não contém o jogo nem firmware da Sony**. Você precisa ter os s
 ## Como jogar
 
 1. Abra `SotC.exe`, o lançador.
-2. Em **Jogo e saves**, escolha:
-   - a pasta do jogo;
-   - a pasta com os dois `.sprx`, para ter som;
-   - se quiser, importe um save do shadPS4 pelo botão **Importar save do shadPS4**.
-3. Clique em **JOGAR**.
+2. Na primeira vez ele **procura sozinho** nos discos do PC:
+   - a pasta do jogo (CUSA08809);
+   - os dois `.sprx` de som de um shadPS4 instalado (pasta `user/sys_modules`), que ele copia
+     para a pasta de dados do port;
+   - um save do jogo no shadPS4, que ele oferece importar.
+3. Confira em **Jogo e saves**. A **biblioteca de jogos** funciona como no shadPS4: adicione as
+   pastas onde ficam os seus jogos e escolha o jogo na lista (duplo clique). **Procurar no PC**
+   repete a busca automática.
+4. Clique em **JOGAR**.
 
 A tela **Jogar** confere tudo antes: a versão do jogo, os módulos de som, os saves e a placa de vídeo.
 Na primeira vez a imagem do jogo é preparada, o que leva alguns segundos. Isso só se repete
@@ -79,8 +83,9 @@ junto com o controle:
 | I J K L | direcional |
 | Tab / Backspace | touchpad (esquerda / direita) |
 
-Para remapear, ponha linhas no `sotc.ini`, por exemplo `key.cross=Space,J` ou
-`pad.circle=b`. As entradas são:
+As teclas podem ser trocadas em **Controles** no lançador: clique na ação e aperte a nova tecla.
+O controle e o mouse também podem ser remapeados no `sotc.ini`, por exemplo `pad.circle=b`.
+As entradas são:
 
 - botões: `cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad touchpad_right`;
 - direcional: `up down left right`;
@@ -90,8 +95,23 @@ Para remapear, ponha linhas no `sotc.ini`, por exemplo `key.cross=Space,J` ou
 ## Estado
 
 Funcionam: logos, abertura, menus com texto, carregar save, exploração a cavalo,
-som (com os módulos do usuário). O jogo roda travado em 30 FPS, como no PS4; durante as
-cargas cai para 22–25.
+som (com os módulos do usuário).
+
+Desempenho medido no demo da tela de título, modo 60 FPS, i9-13900K + RTX 2060 SUPER:
+média de ~67 FPS; o trecho mais pesado (a ponte do cânion) fica em 29–34 FPS. No modo
+normal o jogo roda travado em 30 FPS, como no PS4.
+
+## Perguntas comuns
+
+- **DirectX 11/12?** Não. O núcleo de vídeo (shadPS4) traduz a GPU do PS4 para Vulkan; os
+  shaders do jogo viram SPIR-V. Toda placa de vídeo com DirectX 12 recente também tem Vulkan
+  1.3: atualize o driver. Um modo DirectX exigiria reescrever o núcleo de vídeo inteiro.
+- **Placas AMD e Intel?** As otimizações valem para qualquer placa, menos duas que só ligam
+  sozinhas na NVIDIA (o envio periódico de trabalho à GPU e as leituras antecipadas).
+  Em **Imagem e FPS > Envio de trabalho à GPU**, escolha **Ligado** para testá-las na AMD ou
+  Intel; se a tela ficar preta, volte para **Automático**.
+- **Por que o som precisa de arquivos meus?** `libSceNgs2.sprx` e `libSceUlt.sprx` são firmware
+  da Sony e não podem ser distribuídos. Eles saem do seu PS4 (ou do shadPS4 que você já usa).
 
 ## Créditos
 

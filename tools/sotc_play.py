@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-GAME = os.environ.get('SOTC_GAME_DIR', r'I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809')
+GAME = os.environ.get('SOTC_GAME_DIR', str(Path(__file__).resolve().parents[2] / 'CUSA08809'))
 
 
 def main():

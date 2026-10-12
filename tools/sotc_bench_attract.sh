@@ -3,7 +3,7 @@
 # route every time), 60 FPS mode, no input. Prints FPS per 5 s, the average and the minimum
 # from 60 s on, and saves a shot every 30 s (out/dump/sheet.png). Extra arguments: --env X=Y.
 cd "$(dirname "$0")/.."
-G=${SOTC_GAME_DIR:-"I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809"}
+G=${SOTC_GAME_DIR:-"$(dirname "$0")/../../CUSA08809"}
 PY=${PY:-/c/PyBuild312/python.exe}
 SECONDS_TOTAL=${BENCH_SECONDS:-360}
 $PY scripts/sotc_modes.py "$G" --out out --modes fps60,af16 --cvars "${BENCH_CVARS:-}" >/dev/null

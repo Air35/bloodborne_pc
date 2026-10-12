@@ -2,7 +2,7 @@
 # sotc: repeatable benchmark in 60 FPS mode: +nointro starts outside the Shrine of Worship,
 # Wander walks forward for 25 s; prints the average FPS of 20..45 s. Extra arguments: --env X=Y.
 cd "$(dirname "$0")/.."
-G=${SOTC_GAME_DIR:-"I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809"}
+G=${SOTC_GAME_DIR:-"$(dirname "$0")/../../CUSA08809"}
 PY=${PY:-/c/PyBuild312/python.exe}
 $PY scripts/sotc_modes.py "$G" --out out --modes fps60,af16 --cvars "nointro" >/dev/null
 cp out/patches.bin out/bench.patches; cp out/cmdline.bin out/bench.cmdline

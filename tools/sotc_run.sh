@@ -5,7 +5,7 @@ set -uo pipefail
 cd -- "$(dirname -- "$0")/.."
 export MSYS2_ROOT=${MSYS2_ROOT:-/i/msys64}
 export PATH="$MSYS2_ROOT/clang64/bin:$MSYS2_ROOT/usr/bin:$PATH"
-game=${SOTC_GAME_DIR:-"I:/EMULADORES/Playstation 4/JOGOS/Shadow Of The Colossus/CUSA08809"}
+game=${SOTC_GAME_DIR:-"$(dirname "$0")/../../CUSA08809"}
 log=${2:-out/run.txt}
 if ! ninja -C out/gpu bb-probe > out/probe-build.log 2>&1; then
     grep -E 'error|Error' out/probe-build.log | head -20; exit 1
