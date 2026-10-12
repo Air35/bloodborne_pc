@@ -239,7 +239,21 @@ def game_info(folder):
 
 
 def user_dir(s):
-    return Path(s.get('user_dir') or PORT_DIR / 'user')
+    """The data folder (saves in savedata/1/CUSA08809 below it). A folder picked one level too
+    deep (savedata itself, or a save folder) is taken back up to the data folder."""
+    folder = Path(s.get('user_dir') or PORT_DIR / 'user')
+    parts = [p.lower() for p in folder.parts]
+    if 'savedata' in parts:
+        folder = Path(*folder.parts[:len(parts) - 1 - parts[::-1].index('savedata')])
+    return folder
+
+
+def short_path(path):
+    """A path for display: relative to the port folder when inside it, else as is."""
+    try:
+        return str(Path(path).resolve().relative_to(PORT_DIR.resolve()))
+    except (ValueError, OSError):
+        return str(path)
 
 
 def game_environment(s):
@@ -1143,6 +1157,8 @@ class Launcher:
         tk, ttk = self.tk, self.ttk
         self.var('game_dir').set(result['game'])
         self.var('dlc_dir').set(result['dlc'])
+        if self.var('user_dir').get():  # a data folder picked one level too deep, corrected
+            self.var('user_dir').set(str(user_dir({'user_dir': self.var('user_dir').get()})))
         if result['sound']:
             self.var('sys_modules').set(result['sound'])
         folders = self.app.setdefault('library_dirs', [])
@@ -1156,12 +1172,13 @@ class Launcher:
         lines = [
             ('✓', _('Jogo: {} (versão {})', 'Game: {} (version {})').format(*info) if info else result['game']),
             ('✓' if result['update'] else '•',
-             _('Atualização: {}', 'Update: {}').format(result['update']) if result['update']
+             _('Atualização: {} (ao lado do jogo)', 'Update: {} (next to the game)').format(Path(result['update']).name)
+             if result['update']
              else _('Atualização: nenhuma pasta -UPDATE ou -patch', 'Update: no -UPDATE or -patch folder')),
             ('✓' if result['dlc_count'] else '•',
              _('DLC: {} encontrada(s)', 'DLC: {} found').format(result['dlc_count']) if result['dlc_count']
              else _('DLC: nenhuma encontrada na pasta do jogo', 'DLC: none found in the game folder')),
-            ('✓', _('Saves: {}', 'Saves: {}').format(saves) + (
+            ('✓', _('Saves: {}', 'Saves: {}').format(short_path(saves)) + (
                 _('  (copiado do shadPS4)', '  (copied from shadPS4)') if result['save'] else '')),
             ('✓' if result['sound'] else '⚠',
              _('Som: pronto', 'Sound: ready') if result['sound'] else
