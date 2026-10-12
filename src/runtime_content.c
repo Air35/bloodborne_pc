@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #define INVALID_ID ((int32_t)0x805a1000)
 #define NOT_LOADED ((int32_t)0x805a1001)
 #define PARAMETER ((int32_t)0x80d90002)
@@ -48,6 +51,8 @@ static void require_loaded(void) {
     require_provider();
     if (!refs) { fputs("STOP: AppContent called before module load\n",stderr); exit(21); }
 }
+static void scan_addons(void);
+static unsigned addon_count;
 static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
     require_loaded();
     if (!init || !boot) return PARAMETER;
@@ -55,7 +60,8 @@ static ABI int32_t content_init(const unsigned char *init,unsigned char *boot) {
     /* Only the reserved-zero init profile is implemented. */
     for (unsigned i=0;i<32;++i) if (init[i]) return PARAMETER;
     memset(boot,0,40); initialized=1;
-    puts("Runtime: AppContent initialized; offline base-game profile, no mounted add-ons");
+    scan_addons();
+    printf("Runtime: AppContent initialized; offline base-game profile, %u add-on(s) installed\n",addon_count);
     return 0;
 }
 static void require_initialized(void) {
@@ -69,12 +75,81 @@ static ABI int32_t param_int(uint32_t id,int32_t *out) {
     printf("Runtime: AppContent parameter %u = %d\n",id,*out);
     return 0;
 }
+/* sotc: installed add-on content (DLC) from SOTC_DLC_DIR, as shadPS4 does: the folder (or its
+ * <TITLE_ID> subfolder) holds one folder per add-on with sce_sys/param.sfo, CATEGORY "ac..." and a
+ * CONTENT_ID "UPXXXX-CUSAXXXXX_XX-<entitlement label>". The game only lists them (entitlements);
+ * nothing is mounted. */
+#define MAX_ADDONS 64
+typedef struct { char label[17]; char padding[3]; uint32_t status; } AddonInfo; /* 24 bytes */
+static AddonInfo addons[MAX_ADDONS];
+static unsigned addons_scanned;
+/* The string value of key in a param.sfo image, or NULL. */
+static const char *sfo_string(const unsigned char *data, size_t size, const char *key) {
+    if (size<20 || memcmp(data,"\0PSF",4)) return NULL;
+    uint32_t keys, values, count;
+    memcpy(&keys,data+8,4); memcpy(&values,data+12,4); memcpy(&count,data+16,4);
+    for (uint32_t i=0; i<count && 20+i*16+16<=size; ++i) {
+        const unsigned char *e=data+20+i*16;
+        uint16_t key_off, fmt; uint32_t len, off;
+        memcpy(&key_off,e,2); memcpy(&fmt,e+2,2); memcpy(&len,e+4,4); memcpy(&off,e+12,4);
+        if (keys+key_off>=size || values+off+len>size || fmt==0x404) continue;
+        if (!strncmp((const char *)data+keys+key_off,key,size-keys-key_off) && len) {
+            const char *value=(const char *)data+values+off;
+            return memchr(value,0,len) ? value : NULL;
+        }
+    }
+    return NULL;
+}
+static void scan_addons(void) {
+    if (addons_scanned) return;
+    addons_scanned=1;
+#ifndef _WIN32
+    return;
+#else
+    const char *root=getenv("SOTC_DLC_DIR");
+    if (!root || !*root) return;
+    static char base[1024], pattern[1100];
+    snprintf(base,sizeof base,"%s\\CUSA08809",root);
+    if (GetFileAttributesA(base)==INVALID_FILE_ATTRIBUTES) snprintf(base,sizeof base,"%s",root);
+    snprintf(pattern,sizeof pattern,"%s\\*",base);
+    static WIN32_FIND_DATAA entry;
+    HANDLE find=FindFirstFileA(pattern,&entry);
+    if (find==INVALID_HANDLE_VALUE) { printf("Runtime: DLC folder %s not found\n",base); return; }
+    do {
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || entry.cFileName[0]=='.') continue;
+        static char path[1400];
+        snprintf(path,sizeof path,"%s\\%s\\sce_sys\\param.sfo",base,entry.cFileName);
+        FILE *f=fopen(path,"rb");
+        if (!f) continue;
+        static unsigned char data[65536]; /* not on the guest thread's small stack */
+        const size_t size=fread(data,1,sizeof data,f);
+        fclose(f);
+        const char *category=sfo_string(data,size,"CATEGORY");
+        const char *content=sfo_string(data,size,"CONTENT_ID");
+        if (!category || strncmp(category,"ac",2) || !content || strlen(content)<=20) {
+            printf("Runtime: DLC %s skipped (not add-on content)\n",entry.cFileName);
+            continue;
+        }
+        if (addon_count==MAX_ADDONS) break;
+        AddonInfo *info=&addons[addon_count++];
+        memset(info,0,sizeof *info);
+        snprintf(info->label,sizeof info->label,"%s",content+20);
+        info->status=4; /* installed */
+        printf("Runtime: DLC %s: entitlement %s\n",entry.cFileName,info->label);
+    } while (FindNextFileA(find,&entry));
+    FindClose(find);
+#endif
+}
 static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint32_t *hits) {
     require_initialized();
     if (service) { fputs("STOP: nonzero AppContent service label unsupported\n",stderr); exit(21); }
     if ((!capacity || !list) && !hits) return PARAMETER;
-    /* No add-ons are mounted by this provider. Never touch unused list slots. */
-    if (hits) *hits=0;
+    scan_addons();
+    if (!capacity || !list) { *hits=addon_count; ++lists; return 0; }
+    const unsigned n=addon_count<capacity ? addon_count : capacity;
+    /* Never touch list slots past the add-ons. */
+    if (n) memcpy(list,addons,n*sizeof(AddonInfo));
+    if (hits) *hits=n;
     ++lists; return 0;
 }
 uintptr_t runtime_content_resolve(const char *name) {

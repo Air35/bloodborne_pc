@@ -24,7 +24,8 @@ Este pacote **não contém o jogo nem firmware da Sony**. Você precisa ter os s
    - a pasta do jogo (CUSA08809);
    - os dois `.sprx` de som de um shadPS4 instalado (pasta `user/sys_modules`), que ele copia
      para a pasta de dados do port;
-   - um save do jogo no shadPS4, que ele oferece importar.
+   - um save do jogo no shadPS4, que ele oferece importar;
+   - as DLCs do jogo (pasta `addcont` do shadPS4 ou uma pasta com uma subpasta por DLC).
 3. Confira em **Jogo e saves**. A **biblioteca de jogos** funciona como no shadPS4: adicione as
    pastas onde ficam os seus jogos e escolha o jogo na lista (duplo clique). **Procurar no PC**
    repete a busca automática.

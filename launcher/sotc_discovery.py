@@ -41,6 +41,16 @@ def game_record(folder):
     }
 
 
+def is_game_dlc(folder):
+    """True for an add-on content folder of the game (param.sfo: CATEGORY ac, CONTENT_ID of it)."""
+    try:
+        from prepare import sfo
+        values = sfo((Path(folder) / 'sce_sys' / 'param.sfo').read_bytes())
+    except (OSError, ValueError, ImportError):
+        return False
+    return str(values.get('CATEGORY', '')).startswith('ac') and GAME_ID in str(values.get('CONTENT_ID', ''))
+
+
 def library_games(folders, depth=3):
     """Games in the given library folders and below (shadPS4's "game folders"), each once."""
     games, seen = [], set()
@@ -88,7 +98,7 @@ def local_drives():
 def scan(seconds=25.0, depth=5, extra_roots=()):
     """Walks the drives (the likely places first) for the game, sound modules and saves.
     Returns {'games': [records of GAME_ID], 'sys_modules': [folders], 'saves': [folders]}."""
-    found = {'games': [], 'sys_modules': [], 'saves': []}
+    found = {'games': [], 'sys_modules': [], 'saves': [], 'dlc': []}
     seen = set()
     deadline = time.monotonic() + seconds
     home = Path.home()
@@ -116,6 +126,13 @@ def scan(seconds=25.0, depth=5, extra_roots=()):
             return
         if all(m.lower() in names for m in SYS_MODULES):
             found['sys_modules'].append(path)
+        if 'sce_sys' in names and is_game_dlc(path):
+            parent = os.path.dirname(path)
+            if os.path.basename(parent).upper() == GAME_ID:  # shadPS4's addcont/CUSA08809/<dlc>
+                parent = os.path.dirname(parent)
+            if parent not in found['dlc']:
+                found['dlc'].append(parent)
+            return
         base = os.path.basename(path).lower()
         if base == 'savedata':
             for sub in (Path(path) / GAME_ID, *Path(path).glob('*/' + GAME_ID)):

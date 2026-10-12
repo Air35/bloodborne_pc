@@ -1,4 +1,4 @@
-# Shadow of the Colossus — PC (port nativo) · v0.0.8
+# Shadow of the Colossus — PC (port nativo) · v0.0.9
 
 Port nativo do **Shadow of the Colossus** de PS4 (Bluepoint, 2018; CUSA08809, versão EU 1.01)
 para **Windows 10/11**. O código x86-64 do próprio jogo roda direto na CPU do PC e a GPU do PS4
@@ -18,7 +18,9 @@ de que o jogo precisa, no estilo do [bloodborne_pc](https://github.com/Supermedo
    - a pasta do jogo (o dump CUSA08809, com `eboot.bin`, `sce_module` e `sce_sys`);
    - os módulos de som (`libSceNgs2.sprx` e `libSceUlt.sprx`) de um shadPS4 que você já
      tenha, na pasta `user/sys_modules`, e copia para a pasta de dados do port;
-   - um save do jogo no shadPS4, que ele oferece importar.
+   - um save do jogo no shadPS4, que ele oferece importar;
+   - as DLCs do jogo, se houver: a pasta `addcont` do shadPS4, ou uma pasta com uma subpasta por DLC.
+     Também dá para escolher em **Jogo e saves > Pasta de DLC**.
 3. Confira a página **Jogo e saves**. A **biblioteca de jogos** funciona como a do shadPS4:
    adicione as pastas dos seus jogos e escolha o jogo na lista.
 4. Clique em **JOGAR**.

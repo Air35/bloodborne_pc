@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.9 — 2026-10-12
+- **Pasta de DLC** no lançador (Jogo e saves), como no shadPS4. Também é encontrada na busca
+  automática: a pasta `addcont` do shadPS4 ou uma pasta com uma subpasta por DLC.
+- O runtime lista ao jogo as DLCs instaladas (`sceAppContentGetAddcontInfoList`), lendo o
+  `CONTENT_ID` do `param.sfo` de cada uma (`SOTC_DLC_DIR`).
+
 ## 0.0.8 — 2026-10-12
 
 Primeira versão pública.

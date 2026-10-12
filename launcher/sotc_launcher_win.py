@@ -28,7 +28,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 GAME_ID, GAME_VERSION = 'CUSA08809', '01.01'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
-VERSION = '0.0.8'
+VERSION = '0.0.9'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -107,7 +107,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
                 'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True,
                 'perf_record_thread': True, 'gpu_submit': 'auto', 'library_dirs': [], 'keys': {},
-                'auto_setup': True}
+                'auto_setup': True, 'dlc_dir': ''}
 # Keyboard bindings (src/runtime_pad.c): PS4 input, its default SDL key name, label.
 KEY_INPUTS = [
     ('move_up', 'W', ('Andar para frente', 'Move forward')), ('move_down', 'S', ('Andar para trás', 'Move back')),
@@ -248,6 +248,8 @@ def game_environment(s):
     env['SOTC_USER_DIR'] = str(user_dir(s))
     if s['sys_modules']:
         env['SOTC_SYS_MODULES'] = s['sys_modules']
+    if s.get('dlc_dir'):
+        env['SOTC_DLC_DIR'] = s['dlc_dir']
     env['SOTC_MODES'] = ','.join(m for m in ('af16', 'fps60') if s.get(m))
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
     env['BB_PRESENT_MODE'] = s['present_mode']
@@ -713,6 +715,13 @@ class Launcher:
                       'a shadPS4 installed on this PC (user/sys_modules) and copies them to the port\'s data folder. '
                       'They are Sony firmware and never come with the port. Without them the game is silent.'),
                     on_change=self.refresh_status)
+        self.section(f, _('DLC', 'DLC'))
+        self.folder(f, 'dlc_dir', _('Pasta de DLC', 'DLC folder'), _('Pasta com as DLCs do jogo', "Folder with the game's DLC"),
+                    _('Como no shadPS4: uma pasta com uma subpasta por DLC (cada uma com sce_sys/param.sfo), ou a '
+                      'pasta addcont do shadPS4 (que tem a subpasta CUSA08809). Vazio = sem DLC.',
+                      "As in shadPS4: a folder with one subfolder per DLC (each with sce_sys/param.sfo), or "
+                      "shadPS4's addcont folder (which holds the CUSA08809 subfolder). Empty = no DLC."),
+                    on_change=self.refresh_status)
         self.section(f, _('Saves', 'Saves'))
         self.folder(f, 'user_dir', _('Pasta de dados', 'Data folder'), _('Pasta dos saves', 'Saves folder'),
                     _('Saves, cache de shaders e capturas. Vazio = a pasta user ao lado do port.',
@@ -1088,7 +1097,7 @@ class Launcher:
                 from sotc_discovery import scan
                 found = scan(seconds=40, extra_roots=roots)
             except Exception:  # a scan problem never stops the launcher
-                found = {'games': [], 'sys_modules': [], 'saves': []}
+                found = {'games': [], 'sys_modules': [], 'saves': [], 'dlc': []}
             self.ui_calls.put(lambda: self.apply_discovery(found, manual))
         threading.Thread(target=work, daemon=True).start()
 
@@ -1116,6 +1125,9 @@ class Launcher:
                 done.append(_('som (de {})', 'sound (from {})').format(found['sys_modules'][0]))
             except OSError:
                 pass
+        if not self.var('dlc_dir').get() and found.get('dlc'):
+            self.var('dlc_dir').set(found['dlc'][0])
+            done.append(_('DLC em {}', 'DLC in {}').format(found['dlc'][0]))
         if not self.has_saves():
             own = user_dir({'user_dir': self.var('user_dir').get()}).resolve()
             outside = [p for p in found['saves'] if not Path(p).resolve().is_relative_to(own)]

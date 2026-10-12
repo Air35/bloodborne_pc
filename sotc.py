@@ -10,6 +10,8 @@ Settings (environment variables, or sotc.ini beside this script as NAME=value li
                       libSceUlt.sprx (shadPS4's user/sys_modules). Without it the game is silent.
                       These files are Sony firmware: they are never distributed with the port.
     SOTC_USER_DIR     saves, shader/pipeline caches; default ./user
+    SOTC_DLC_DIR      optional: the game's DLC (one folder per add-on with sce_sys/param.sfo,
+                      or shadPS4's addcont folder holding CUSA08809)
     SOTC_MODES        optional, comma-separated: af16 (16x anisotropic filtering),
                       fps60 (removes the 30 FPS cap; experimental, vblank at 120 Hz)
     SOTC_CVARS        engine settings, NAME=VALUE separated by spaces (e.g. r_motionBlurEnable=0)
