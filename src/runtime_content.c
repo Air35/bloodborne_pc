@@ -100,6 +100,11 @@ static const char *sfo_string(const unsigned char *data, size_t size, const char
     }
     return NULL;
 }
+/* True when the entitlement of content ID is listed already (a package and its installed folder). */
+static int addon_known(const char *content) {
+    for (unsigned i=0;i<addon_count;++i) if (!strncmp(addons[i].label,content+20,16)) return 1;
+    return 0;
+}
 static void scan_addons(void) {
     if (addons_scanned) return;
     addons_scanned=1;
@@ -116,8 +121,32 @@ static void scan_addons(void) {
     HANDLE find=FindFirstFileA(pattern,&entry);
     if (find==INVALID_HANDLE_VALUE) { printf("Runtime: DLC folder %s not found\n",base); return; }
     do {
-        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || entry.cFileName[0]=='.') continue;
+        if (entry.cFileName[0]=='.') continue;
         static char path[1400];
+        /* An add-on package not installed: its header says it is additional content (type
+         * 0x1b) and carries the content ID. Entitlement-only DLC needs nothing else. */
+        const size_t name_len=strlen(entry.cFileName);
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && name_len>4 &&
+            !_stricmp(entry.cFileName+name_len-4,".pkg")) {
+            snprintf(path,sizeof path,"%s\\%s",base,entry.cFileName);
+            FILE *pkg=fopen(path,"rb");
+            static unsigned char header[0x80];
+            const size_t got=pkg ? fread(header,1,sizeof header,pkg) : 0;
+            if (pkg) fclose(pkg);
+            static char content[37];
+            memcpy(content,header+0x40,36); content[36]=0;
+            const uint32_t type=(uint32_t)header[0x74]<<24|header[0x75]<<16|header[0x76]<<8|header[0x77];
+            if (got<sizeof header || memcmp(header,"\x7f" "CNT",4) || type!=0x1b ||
+                !strstr(content,"CUSA08809") || strlen(content)<=20 || addon_count==MAX_ADDONS ||
+                addon_known(content)) continue;
+            AddonInfo *info=&addons[addon_count++];
+            memset(info,0,sizeof *info);
+            snprintf(info->label,sizeof info->label,"%s",content+20);
+            info->status=4;
+            printf("Runtime: DLC %s: entitlement %s\n",entry.cFileName,info->label);
+            continue;
+        }
+        if (!(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         snprintf(path,sizeof path,"%s\\%s\\sce_sys\\param.sfo",base,entry.cFileName);
         FILE *f=fopen(path,"rb");
         if (!f) continue;
@@ -131,6 +160,7 @@ static void scan_addons(void) {
             continue;
         }
         if (addon_count==MAX_ADDONS) break;
+        if (addon_known(content)) continue;
         AddonInfo *info=&addons[addon_count++];
         memset(info,0,sizeof *info);
         snprintf(info->label,sizeof info->label,"%s",content+20);

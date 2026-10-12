@@ -1106,9 +1106,9 @@ class Launcher:
                 'Não achei o jogo (eboot.bin do CUSA08809) em\n{}\n\nEscolha a pasta do seu dump.',
                 'The game (eboot.bin of CUSA08809) is not in\n{}\n\nChoose the folder of your dump.').format(chosen))
             return
-        self.configure_from_game(game)
+        self.configure_from_game(game, chosen)
 
-    def configure_from_game(self, game):
+    def configure_from_game(self, game, chosen=None):
         """Game chosen: DLC from the game folder, saves, sound — in the background."""
         self.setup_button.configure(state='disabled')
         self.setup_hint.unbind('<Button-1>')
@@ -1117,7 +1117,7 @@ class Launcher:
 
         def work():
             from sotc_discovery import find_dlc_root, find_update, dlc_count, scan, SYS_MODULES as modules
-            result = {'game': game, 'dlc': find_dlc_root(game), 'update': find_update(game), 'sound': None,
+            result = {'game': game, 'dlc': find_dlc_root(game, chosen), 'update': find_update(game), 'sound': None,
                       'save': None}
             result['dlc_count'] = dlc_count(result['dlc'])
             sound_ready = self.app.get('sys_modules') and all(

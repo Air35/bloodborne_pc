@@ -15,6 +15,9 @@
   automática: a pasta `addcont` do shadPS4 ou uma pasta com uma subpasta por DLC.
 - O runtime lista ao jogo as DLCs instaladas (`sceAppContentGetAddcontInfoList`), lendo o
   `CONTENT_ID` do `param.sfo` de cada uma (`SOTC_DLC_DIR`).
+- **DLC em .pkg sem instalar:** os pacotes de DLC (tipo `0x1b`) são lidos direto do cabeçalho,
+  sem extrair. Isso basta para as DLCs do jogo, que só desbloqueiam itens (arco antigo, capa,
+  espada, cavalos). A busca olha na pasta escolhida, na pasta do jogo e nas pastas vizinhas.
 
 ## 0.0.8 — 2026-10-12
 

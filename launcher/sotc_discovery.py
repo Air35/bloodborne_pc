@@ -68,35 +68,63 @@ def _walk_dirs(root, depth):
             pass
 
 
-def find_dlc_root(game_dir):
-    """The folder to give the runtime as SOTC_DLC_DIR for the DLC found inside the game folder
-    or next to it (its parent folder, two levels down), or '' without any."""
-    game_dir = Path(game_dir)
+def is_dlc_pkg(path):
+    """True for an add-on package of the game not installed (header: content type 0x1b, a
+    content ID of the game). The runtime lists these without extracting them."""
+    try:
+        with open(path, 'rb') as f:
+            header = f.read(0x80)
+    except OSError:
+        return False
+    return (len(header) == 0x80 and header[:4] == b'\x7fCNT' and header[0x74:0x78] == b'\0\0\0\x1b'
+            and GAME_ID.encode() in header[0x40:0x64])
+
+
+def _dlc_entries(folder):
+    """The DLC in one folder: add-on folders (sce_sys/param.sfo) and add-on packages."""
     found = []
-    for root, depth in ((game_dir, 3), (game_dir.parent, 2)):
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return found
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            if (Path(entry.path) / 'sce_sys' / 'param.sfo').is_file() and is_game_dlc(entry.path):
+                found.append(entry.path)
+        elif entry.name.lower().endswith('.pkg') and is_dlc_pkg(entry.path):
+            found.append(entry.path)
+    return found
+
+
+def find_dlc_root(game_dir, chosen=None):
+    """The folder to give the runtime as SOTC_DLC_DIR: where the most DLC (installed folders or
+    .pkg files) is, looking inside the game folder, in the main folder that holds it and in the
+    folders next to that one (a "DLC pack" folder beside the game). '' without any."""
+    game_dir = Path(game_dir)
+    counts = {}
+    roots = [(game_dir, 2), (game_dir.parent, 3), (game_dir.parent.parent, 2)]
+    if chosen:  # the folder the user picked holds the game and, likely, the DLC too
+        roots.insert(0, (Path(chosen), 4))
+    for root, depth in roots:
         for path in _walk_dirs(root, depth):
-            if (Path(path) / 'sce_sys' / 'param.sfo').is_file() and path not in found and is_game_dlc(path):
-                found.append(path)
-    if not found:
+            if os.path.normcase(path) == os.path.normcase(str(game_dir)):
+                continue  # the game's own folders are big and hold no DLC
+            entries = _dlc_entries(path)
+            if entries:
+                counts[path] = len(entries)
+    if not counts:
         return ''
-    parents = {}
-    for path in found:
-        parent = Path(path).parent
-        parents[parent] = parents.get(parent, 0) + 1
-    best = max(parents, key=parents.get)
+    best = Path(max(counts, key=counts.get))
     # shadPS4 layout: <addcont>/CUSA08809/<dlc>; the runtime looks in the CUSA08809 subfolder.
     return str(best.parent if best.name.upper() == GAME_ID else best)
 
 
 def dlc_count(root):
-    """How many DLC folders the runtime will list for SOTC_DLC_DIR root."""
+    """How many DLC the runtime will list for SOTC_DLC_DIR root."""
     if not root or not Path(root).is_dir():
         return 0
     base = Path(root) / GAME_ID if (Path(root) / GAME_ID).is_dir() else Path(root)
-    try:
-        return sum(1 for entry in base.iterdir() if entry.is_dir() and is_game_dlc(entry))
-    except OSError:
-        return 0
+    return len(_dlc_entries(base))
 
 
 UPDATE_SUFFIXES = ('-UPDATE', '-patch')
