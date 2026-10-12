@@ -76,12 +76,27 @@ void runtime_file_unmount(const char *guest) {
     pthread_mutex_unlock(&lock);
 }
 static char user_root[512]="user";
+/* sotc: the game update, as shadPS4 uses it: files of <app0>-UPDATE or <app0>-patch (or
+ * SOTC_UPDATE_DIR) take the place of the base game's under /app0 and /hostapp. */
+static char update_root[512];
+const char *runtime_file_update_dir(void) { return update_root; }
 const char *runtime_file_user_dir(void) { return user_root; }
 void runtime_file_configure(const char *app0,const char *user) {
     char path[600];
     snprintf(user_root,sizeof(user_root),"%s",user);
     runtime_file_mount("/app0",app0);
     runtime_file_mount("/hostapp",app0);
+    const char *update=getenv("SOTC_UPDATE_DIR");
+    if (update && *update) snprintf(update_root,sizeof(update_root),"%s",update);
+    else {
+        static const char *const suffixes[]={"-UPDATE","-patch"};
+        for (int i=0;i<2 && !update_root[0];++i) {
+            snprintf(path,sizeof(path),"%s%s",app0,suffixes[i]);
+            HostStat st;
+            if (!host_stat(path,&st) && S_ISDIR(st.st_mode)) snprintf(update_root,sizeof(update_root),"%s",path);
+        }
+    }
+    if (update_root[0]) printf("Runtime: game update overlaid from %s\n",update_root);
     const char *writable[]={"temp0","download0","data"};
     mkdir(user,0755);
     for (int i=0;i<3;++i) {
@@ -108,7 +123,14 @@ static int translate(const char *guest,char *out,size_t size) {
     int result=0;
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
+    const int game_path=m && (!strcmp(m->guest,"/app0") || !strcmp(m->guest,"/hostapp"));
     pthread_mutex_unlock(&lock);
+    if (!result && game_path && update_root[0] && buffer[best]) {
+        char updated[1100];
+        HostStat st;
+        if ((size_t)snprintf(updated,sizeof(updated),"%s%s",update_root,buffer+best)<sizeof(updated) &&
+            !host_stat(updated,&st) && (size_t)snprintf(out,size,"%s",updated)>=size) result=ENAMETOOLONG;
+    }
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     return result;
 }
@@ -221,7 +243,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
         host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
         if (host<0) {
             e=errno;
-            if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found\n",guest); }
+            if (e==ENOENT) { ++missing; printf("Runtime: open(%s) -> not found %s\n",guest,getenv("SOTC_FILE_DEBUG") ? path : ""); }
             return -e;
         }
         if (host_fstat(host,&s)) memset(&s,0,sizeof(s));

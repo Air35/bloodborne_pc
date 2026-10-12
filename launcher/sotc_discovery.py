@@ -99,14 +99,30 @@ def dlc_count(root):
         return 0
 
 
+UPDATE_SUFFIXES = ('-UPDATE', '-patch')
+
+
 def find_game_in(folder):
-    """The GAME_ID game folder: folder itself or one below it (depth 3), else None."""
+    """The GAME_ID base game folder: folder itself or one below it (depth 3), as shadPS4 finds it
+    from the main folder; update folders (<game>-UPDATE, <game>-patch) only when nothing else."""
+    games = []
     for path in _walk_dirs(folder, 3):
         if (Path(path) / 'eboot.bin').is_file():
             record = game_record(path)
             if record and record['id'] == GAME_ID:
-                return path
-    return None
+                games.append(path)
+    games.sort(key=lambda p: Path(p).name.lower().endswith(tuple(s.lower() for s in UPDATE_SUFFIXES)))
+    return games[0] if games else None
+
+
+def find_update(game_dir):
+    """The update folder next to the base game (<game>-UPDATE or <game>-patch, as shadPS4)."""
+    game_dir = Path(game_dir)
+    for suffix in UPDATE_SUFFIXES:
+        folder = game_dir.with_name(game_dir.name + suffix)
+        if folder.is_dir():
+            return str(folder)
+    return ''
 
 
 def library_games(folders, depth=3):

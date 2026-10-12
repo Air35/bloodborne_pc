@@ -1044,8 +1044,10 @@ class Launcher:
         self.setup_button = ttk.Button(inner, text=_('Escolher a pasta do jogo…', 'Choose the game folder…'),
                                        style='Play.TButton', command=self.choose_game_for_setup)
         self.setup_button.pack(ipadx=18)
-        tk.Label(inner, text=_('A pasta do seu dump (CUSA08809) ou a pasta onde ela está.',
-                               'The folder of your dump (CUSA08809) or the folder that holds it.'),
+        tk.Label(inner, text=_('A pasta principal do jogo, como no shadPS4: as subpastas do jogo (CUSA08809), da '
+                               'atualização (-UPDATE/-patch) e das DLCs são encontradas sozinhas.',
+                               "The game's main folder, as in shadPS4: the game (CUSA08809), update (-UPDATE/-patch) "
+                               'and DLC subfolders are found on their own.'),
                  bg=BG, fg=MUTED, font=('Segoe UI', 10)).pack(pady=(10, 0))
         self.setup_hint = tk.Label(inner, text='', bg=BG, fg=MUTED, font=('Segoe UI', 10), cursor='hand2')
         self.setup_hint.pack(pady=(18, 0))
@@ -1099,8 +1101,9 @@ class Launcher:
         user = user_dir({'user_dir': self.var('user_dir').get()})
 
         def work():
-            from sotc_discovery import find_dlc_root, dlc_count, scan, SYS_MODULES as modules
-            result = {'game': game, 'dlc': find_dlc_root(game), 'sound': None, 'save': None}
+            from sotc_discovery import find_dlc_root, find_update, dlc_count, scan, SYS_MODULES as modules
+            result = {'game': game, 'dlc': find_dlc_root(game), 'update': find_update(game), 'sound': None,
+                      'save': None}
             result['dlc_count'] = dlc_count(result['dlc'])
             sound_ready = self.app.get('sys_modules') and all(
                 (Path(self.app['sys_modules']) / m).is_file() for m in modules)
@@ -1152,6 +1155,9 @@ class Launcher:
         saves = self.saves_folder()
         lines = [
             ('✓', _('Jogo: {} (versão {})', 'Game: {} (version {})').format(*info) if info else result['game']),
+            ('✓' if result['update'] else '•',
+             _('Atualização: {}', 'Update: {}').format(result['update']) if result['update']
+             else _('Atualização: nenhuma pasta -UPDATE ou -patch', 'Update: no -UPDATE or -patch folder')),
             ('✓' if result['dlc_count'] else '•',
              _('DLC: {} encontrada(s)', 'DLC: {} found').format(result['dlc_count']) if result['dlc_count']
              else _('DLC: nenhuma encontrada na pasta do jogo', 'DLC: none found in the game folder')),

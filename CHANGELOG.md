@@ -5,6 +5,11 @@
   que só pede a pasta do jogo (ou já oferece a que encontrou no PC). Depois ele configura sozinho
   as DLCs (dentro da pasta do jogo e ao lado dela), os saves (copia um save do shadPS4 se o port
   ainda não tiver) e o som, e mostra o resultado. **Configurar de novo** repete o processo.
+- **Pasta principal como no shadPS4:** você aponta a pasta principal do jogo e ele acha as
+  subpastas do jogo base (CUSA08809), da atualização e das DLCs.
+- **Atualização:** a pasta `CUSA08809-UPDATE` ou `CUSA08809-patch` ao lado do jogo é usada como no
+  shadPS4: os arquivos dela têm prioridade sobre os do jogo base (`SOTC_UPDATE_DIR`). Se ela tiver
+  `eboot.bin`, é ele que roda.
 - Tela principal mais limpa: o registro do jogo virou um link discreto; a verificação mostra as DLCs.
 - **Pasta de DLC** no lançador (Jogo e saves), como no shadPS4. Também é encontrada na busca
   automática: a pasta `addcont` do shadPS4 ou uma pasta com uma subpasta por DLC.
