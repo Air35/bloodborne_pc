@@ -1062,8 +1062,9 @@ class Launcher:
                                'atualização (-UPDATE/-patch) e das DLCs são encontradas sozinhas.',
                                "The game's main folder, as in shadPS4: the game (CUSA08809), update (-UPDATE/-patch) "
                                'and DLC subfolders are found on their own.'),
-                 bg=BG, fg=MUTED, font=('Segoe UI', 10)).pack(pady=(10, 0))
-        self.setup_hint = tk.Label(inner, text='', bg=BG, fg=MUTED, font=('Segoe UI', 10), cursor='hand2')
+                 bg=BG, fg=MUTED, font=('Segoe UI', 10), wraplength=self.px(560), justify='center').pack(pady=(10, 0))
+        self.setup_hint = tk.Label(inner, text='', bg=BG, fg=MUTED, font=('Segoe UI', 10), cursor='hand2',
+                                   wraplength=self.px(640), justify='center')
         self.setup_hint.pack(pady=(18, 0))
         self.setup_results = tk.Frame(inner, bg=BG)
         self.setup_results.pack(pady=(18, 0), fill='x')
