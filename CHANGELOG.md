@@ -18,6 +18,9 @@
 - **DLC em .pkg sem instalar:** os pacotes de DLC (tipo `0x1b`) são lidos direto do cabeçalho,
   sem extrair. Isso basta para as DLCs do jogo, que só desbloqueiam itens (arco antigo, capa,
   espada, cavalos). A busca olha na pasta escolhida, na pasta do jogo e nas pastas vizinhas.
+- **Modo PS4 Pro:** o registro do jogo mostra se ele foi aberto como PS4 Pro
+  (`sceKernelIsNeoMode -> 1`). A opção só libera o Modo Grafismo do PS4 Pro: é preciso escolher
+  **Cinematográfico** ou **Desempenho** no jogo, em Opções > Apresentação.
 
 ## 0.0.8 — 2026-10-12
 
