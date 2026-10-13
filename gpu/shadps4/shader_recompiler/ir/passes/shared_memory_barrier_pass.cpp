@@ -185,6 +185,21 @@ static bool MultiWaveLdsBarriersEnabled() {
     return enabled;
 }
 
+// Workgroups smaller than a wave are one partial GCN wave: their lanes write LDS and read the
+// values of the other lanes with no s_barrier at all. On the host the compiler may move those
+// reads before the writes, so they read stale LDS: SotC's particle count prefix sum (cs
+// 0xbb7eb2dd, 16 threads) gave 0 instances to every GPU particle draw (no waterfall spray, foam
+// or mist). They get workgroup barriers like a full wave. SotC only; SOTC_LDS_SMALL=0/1 overrides.
+static bool SmallGroupLdsBarriersEnabled() {
+    static const bool enabled = [] {
+        if (const char* v = std::getenv("SOTC_LDS_SMALL")) {
+            return std::atoi(v) != 0;
+        }
+        return Common::ElfInfo::Instance().GameSerial() == "CUSA08809";
+    }();
+    return enabled;
+}
+
 void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_info,
                              const Profile& profile) {
     if (program.info.hw_stage != HwStage::Compute) {
@@ -199,7 +214,9 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     const bool multi_wave = threadgroup_size > GcnSubgroupSize &&
                             threadgroup_size % GcnSubgroupSize == 0 &&
                             MultiWaveLdsBarriersEnabled();
-    if (shared_memory_size == 0 || (threadgroup_size != GcnSubgroupSize && !multi_wave) ||
+    const bool partial_wave = threadgroup_size < GcnSubgroupSize && SmallGroupLdsBarriersEnabled();
+    if (shared_memory_size == 0 ||
+        (threadgroup_size != GcnSubgroupSize && !multi_wave && !partial_wave) ||
         !profile.needs_lds_barriers) {
         return;
     }
