@@ -1,17 +1,41 @@
-# Shadow of the Colossus — PC (port nativo) · v0.0.13
+# Shadow of the Colossus — PC (port nativo / native port) · v0.0.13
+
+**[Português](#português)** · **[English](#english)** · [Releases](../../releases) · [Changelog](CHANGELOG.md)
+
+> **Nenhum arquivo do jogo nem da Sony está incluído / No game or Sony files are included.**
+> Você precisa do seu próprio dump do jogo e, para ter som, de dois módulos do seu próprio
+> console. / You need your own game dump and, for sound, two modules from your own console.
+> Este projeto não tem ligação com a Sony Interactive Entertainment nem com a Bluepoint Games. /
+> This project is not affiliated with Sony Interactive Entertainment or Bluepoint Games.
+
+---
+
+## Português
 
 Port nativo do **Shadow of the Colossus** de PS4 (Bluepoint, 2018; CUSA08809, versão EU 1.01)
 para **Windows 10/11**. O código x86-64 do próprio jogo roda direto na CPU do PC e a GPU do PS4
 é traduzida para Vulkan. Não é um emulador completo: é um carregador com as funções de sistema
 de que o jogo precisa, no estilo do [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc).
 
-> **Nenhum arquivo do jogo nem da Sony está incluído.** Você precisa do **seu próprio dump** do
-> jogo e, para ter som, de dois módulos do **seu próprio console**. Este projeto não tem
-> ligação com a Sony Interactive Entertainment nem com a Bluepoint Games.
+### Novidades
 
-*English summary at the end.*
+| Versão | Melhorias e correções |
+|---|---|
+| **0.0.13** | **Sem quedas:** corrigida a queda na abertura/menu da 0.0.12 (o jogo pedia mais texturas do que cabe no pool). Testado ~40 min pelo mapa, com dois carregamentos de save. **Reflexos do lago** em quase toda a superfície, com ondulação (uma trava de laços dos shaders cortava os raios do reflexo). |
+| **0.0.12** | **Texturas nítidas de volta, sem o jogo fechar:** a corrupção de memória que derrubava o jogo depois de carregar um save foi corrigida, e o streaming de texturas voltou (pedras e paredes bem mais nítidas). **Água:** respingos, anéis e espuma ao nadar; o lago reflete o céu e o brilho do sol; reflexos de ambiente com o *cubemap* certo de cada *probe* (correção do Pink-shadPS4). |
+| **0.0.11** | Corrigida a grama com textura de "lixo colorido" da 0.0.10. |
+| **0.0.10** | **Gravação funcionando** (antes o jogo nunca gravava). **Lista de saves na tela** para carregar, gravar e **excluir** saves. **Sombras pretas corrigidas** (grama e pedras em sombra ficavam pretas). Streaming de texturas, ícone novo e registro do jogo em `user/last_run.log`. |
 
-## Download e uso
+Detalhes de cada versão no [CHANGELOG](CHANGELOG.md).
+
+### Problemas conhecidos
+
+- Onde a água deveria refletir o **céu**, ela ainda fica escura e lisa (em investigação).
+- Placas **AMD**: há relatos de personagem e cavalo esverdeados/rosados em alguns ângulos
+  ([#5](../../issues/5)). Mande o seu `user/last_run.log` se acontecer.
+- Com 8 GB de memória de vídeo, o uso fica perto do limite em áreas grandes.
+
+### Download e uso
 
 1. Baixe o `SotC-PC.zip` da página [Releases](../../releases) e descompacte numa pasta.
 2. Abra o **`SotC.exe`**. Na primeira vez o lançador procura sozinho, nos discos do PC:
@@ -28,7 +52,7 @@ de que o jogo precisa, no estilo do [bloodborne_pc](https://github.com/Supermedo
 Requisitos: Windows 10/11 64-bit, placa de vídeo com **Vulkan 1.3** (NVIDIA, AMD ou Intel
 com driver recente). Não precisa instalar Python.
 
-### Os arquivos que você precisa ter
+#### Os arquivos que você precisa ter
 
 | O quê | De onde | Para quê |
 |---|---|---|
@@ -38,7 +62,7 @@ com driver recente). Não precisa instalar Python.
 Os modos de patch (60 FPS, filtro 16x) só valem para a versão EU 1.01; nas outras o jogo roda
 normalmente, a 30 FPS.
 
-## O lançador
+### O lançador
 
 - **Jogar:** confere a versão do jogo, o som, os saves e a placa de vídeo antes de abrir;
   opções rápidas de saída, upscaler, 60 FPS, filtro 16x e tela cheia.
@@ -49,82 +73,129 @@ normalmente, a 30 FPS.
 - **Controles:** controle (DualShock 4, DualSense, Xbox) automático; câmera no mouse;
   **troca de teclas** clicando na ação e apertando a tecla nova.
 - **Avançado:** cvars do motor Bluepoint, diagnóstico, atalho na área de trabalho (com o ícone
-  do seu jogo).
+  do seu jogo). O registro de cada sessão fica em `user/last_run.log`.
 
-## O que foi feito
+### O que foi feito
 
 | Área | Resultado |
 |---|---|
 | Boot | O jogo inicia com o carregador do bbport: imports por NID, fibras, patches de CPU (SSE4a), imagem abaixo de 2 GiB (o jogo guarda ponteiros em 31 bits). |
-| Vídeo | Núcleo de vídeo do fork shadPS4 SotC dentro do port: logos, abertura, menus, campo aberto sem polígonos pretos. |
+| Vídeo | Núcleo de vídeo do fork shadPS4 SotC dentro do port: logos, abertura, menus, campo aberto sem polígonos pretos, sombras com iluminação correta. |
+| Texturas | Streaming de texturas (o jogo carrega os mips mais finos), sem corrupção de memória. |
+| Água | Reflexos em espaço de tela, reflexos de ambiente por *probe*, respingos e anéis ao nadar. |
+| Saves | Gravação, carregamento e exclusão pela lista de saves na tela. |
 | Som | Áudio real com os módulos Ngs2/Ult do próprio usuário. |
 | Controles | Teclado e controle juntos, câmera no mouse, troca de teclas no lançador. |
 | Modos | 60 FPS (patch de illusion), filtro anisotrópico 16x, modo PS4 Pro, saída até 4K. |
 | Desempenho | No demo da tela de título, em modo 60 FPS: média de **37–45 → ~67 FPS**, trecho mais pesado (ponte do cânion) **~17 → 29–34 FPS**. |
 
-As otimizações de desempenho, em resumo (detalhes no [CHANGELOG](CHANGELOG.md)):
-
-- **Menos esperas pela GPU.** Faixas de memória lidas de volta são agrupadas. Leituras "limpas"
-  nas tabelas de recursos dos shaders. Um preenchimento de tabelas feito pela GPU passou a ser
-  feito na CPU. Proteção do heap do jogo contra escritas da GPU (do Pink-shadPS4).
-- **Comandos Vulkan gravados e enviados numa thread própria** (`cp_record_thread` do
-  Pink-shadPS4), com trabalho mandado à GPU a cada 0,5 ms.
-- **Draws indiretos com argumentos na CPU viram draws diretos**, milhares por quadro.
-- **Caches de descrição de imagens, de buscas de texturas e de informações de shader**, e
-  verificação de sincronia de buffers sem trava.
-- **10× menos falhas de página:** o jogo copia blocos grandes de memória a cada quadro.
-- **Cvars de culling do Pink-shadPS4.** Mesma imagem, bem menos trabalho da GPU que a CPU
-  precisa esperar.
-
-## Perguntas comuns
+### Perguntas comuns
 
 - **DirectX 11/12?** Não. O núcleo de vídeo traduz a GPU do PS4 para Vulkan (shaders em SPIR-V).
   Toda placa com DirectX 12 moderno também tem Vulkan 1.3: basta o driver atualizado.
 - **AMD e Intel?** Quase todas as otimizações valem para qualquer placa. Duas só ligam
-  sozinhas na NVIDIA, por recomendação do Pink-shadPS4: o envio periódico à GPU e as leituras
-  antecipadas. Em **Imagem e FPS > Envio de trabalho à GPU**, escolha **Ligado** para usá-las
-  numa AMD ou Intel. Ainda não foi testado nessas placas; se a tela ficar preta, volte para
-  **Automático**.
+  sozinhas na NVIDIA: o envio periódico à GPU e as leituras antecipadas. Em **Imagem e FPS >
+  Envio de trabalho à GPU**, escolha **Ligado** para usá-las numa AMD ou Intel. Se a tela ficar
+  preta, volte para **Automático**.
 - **Por que não vem o som pronto?** Os dois `.sprx` são firmware da Sony; distribuí-los não é
   permitido. O lançador acha e copia os seus automaticamente.
+- **O jogo fechou sozinho.** Abra uma *issue* com o arquivo `user/last_run.log`.
 
-## Compilar a partir do código
+---
 
-Windows com [MSYS2](https://www.msys2.org/) no ambiente CLANG64. Os pacotes estão em
-[packaging/windows/README.md](packaging/windows/README.md). Para congelar o `SotC.exe`, é
-preciso um Python do Windows com PyInstaller e Pillow (variável `WINPYTHON`).
+## English
+
+A native Windows port of the PS4 **Shadow of the Colossus** (Bluepoint, 2018; CUSA08809, EU 1.01)
+for **Windows 10/11**. The game's own x86-64 code runs directly on the PC's CPU and the PS4 GPU
+is translated to Vulkan. It is not a full emulator: it is a loader with the system functions the
+game needs, in the style of [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc).
+
+### What's new
+
+| Version | Improvements and fixes |
+|---|---|
+| **0.0.13** | **No more crashes:** fixed the 0.0.12 crash in the intro/menu (the game asked for more textures than its pool holds). Tested ~40 min across the map with two save loads. **Lake reflections** over almost the whole surface, with ripples (a shader loop guard cut the reflection rays short). |
+| **0.0.12** | **Sharp textures back, without crashes:** fixed the memory corruption that closed the game after loading a save, and texture streaming is back (much sharper rocks and walls). **Water:** splashes, rings and foam while swimming; the lake reflects the sky and the sun's glint; environment reflections use each probe's correct cubemap (fix from Pink-shadPS4). |
+| **0.0.11** | Fixed the "colored garbage" grass texture of 0.0.10. |
+| **0.0.10** | **Saving works** (the game never saved before). **On-screen save list** to load, save and **delete** saves. **Black shadows fixed** (grass and rocks in shadow were black). Texture streaming, new icon and a session log in `user/last_run.log`. |
+
+Full details in the [CHANGELOG](CHANGELOG.md) (in Portuguese).
+
+### Known issues
+
+- Where the water should reflect the **sky**, it is still dark and flat (under investigation).
+- **AMD** GPUs: reports of a green/pink tint on Wander and Agro at some angles
+  ([#5](../../issues/5)). Please attach your `user/last_run.log`.
+- With 8 GB of video memory, usage gets close to the limit in large areas.
+
+### Download and use
+
+1. Download `SotC-PC.zip` from [Releases](../../releases) and unzip it into a folder.
+2. Run **`SotC.exe`**. On first start the launcher searches the PC's drives for:
+   - the game folder (the CUSA08809 dump with `eboot.bin`, `sce_module` and `sce_sys`);
+   - the sound modules (`libSceNgs2.sprx` and `libSceUlt.sprx`) of an installed shadPS4
+     (`user/sys_modules`), which it copies to the port's data folder;
+   - a shadPS4 save of the game, which it offers to import;
+   - the game's DLCs, if any (shadPS4's `addcont` folder, or a folder with one subfolder per DLC).
+3. Check the **Game and saves** page. The **game library** works like shadPS4's.
+4. Click **PLAY**.
+
+Requirements: Windows 10/11 64-bit and a **Vulkan 1.3** GPU (NVIDIA, AMD or Intel with a recent
+driver). No Python install needed.
+
+| What | Where from | What for |
+|---|---|---|
+| CUSA08809 game dump (EU 1.01 preferred) | your PS4, through GoldHEN | the game |
+| decrypted `libSceNgs2.sprx`, `libSceUlt.sprx` | your PS4 (`/system/common/lib/`, GoldHEN FTP), or shadPS4's `user/sys_modules` | sound (silent without them) |
+
+The patch modes (60 FPS, 16x filtering) only apply to EU 1.01; other versions run at 30 FPS.
+
+### Launcher features
+
+Game library and automatic search, shadPS4 save import, 720p–4K output (the game renders at
+1080p, upscaled with FSR 1 + RCAS), PS4 Pro mode, 60 FPS and 16x AF modes, controller support
+(DualShock 4, DualSense, Xbox) with mouse camera, key remapping, Bluepoint engine cvars, desktop
+shortcut and a session log in `user/last_run.log`.
+
+In 60 FPS mode the title-screen attract demo averages ~67 FPS on an RTX 2060 SUPER, with
+29–34 FPS in its heaviest section. Vulkan only (no DirectX). AMD and Intel can enable the
+NVIDIA-only submission options under **Image and FPS > GPU work submission**.
+
+**Why no sound files?** The two `.sprx` files are Sony firmware and may not be redistributed;
+the launcher finds and copies yours automatically. **The game closed by itself?** Open an issue
+with `user/last_run.log`.
+
+---
+
+## Compilar / Building
+
+Windows com / with [MSYS2](https://www.msys2.org/) (CLANG64). Pacotes / packages:
+[packaging/windows/README.md](packaging/windows/README.md). Para congelar o `SotC.exe` / to
+freeze `SotC.exe`: um Python do Windows com PyInstaller e Pillow / a Windows Python with
+PyInstaller and Pillow (`WINPYTHON`).
 
 ```
-bash build.sh                              # out/bb-probe.exe e a biblioteca de GPU
+bash build.sh                              # out/bb-probe.exe
 bash packaging/windows/package_sotc.sh     # dist/SotC-PC.zip
 ```
 
-O empacotamento recusa qualquer `.sprx`/`.prx`: firmware da Sony nunca entra no pacote.
-Ferramentas de teste e medição ficam em `tools/` (`sotc_bench_attract.sh` mede o FPS no demo
-da tela de título). Variáveis de diagnóstico estão no [README do pacote](docs/sotc/README-SotC.md).
+O empacotamento recusa qualquer `.sprx`/`.prx` / packaging refuses any `.sprx`/`.prx`: Sony
+firmware never goes into the package. Ferramentas de teste / test tools: `tools/`. Variáveis de
+diagnóstico / diagnostic variables: [docs/sotc/README-SotC.md](docs/sotc/README-SotC.md).
 
-## Créditos e licença
+## Créditos / Credits
 
-- [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (Supermedo, deadinside28 e
-  forks): carregador, runtime nativo e lançador, base deste port. O README original está em
-  [docs/bbport](docs/bbport/README.md).
-- [shadPS4](https://github.com/shadps4-emu/shadPS4) e o fork shadPS4 SotC: núcleo de vídeo Vulkan.
-- [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): cvars de culling,
-  proteção do heap BPE, envio periódico, leituras antecipadas, marcador de espera e o gravador de
-  comandos em thread própria.
-- Patch de 60 FPS: illusion (GoldHEN cheats).
+- [bloodborne_pc](https://github.com/Supermedo/bloodborne_pc) (Supermedo, deadinside28 and
+  forks): carregador, runtime nativo e lançador / loader, native runtime and launcher. README
+  original: [docs/bbport](docs/bbport/README.md).
+- [shadPS4](https://github.com/shadps4-emu/shadPS4) e o fork / and the shadPS4 SotC fork:
+  núcleo de vídeo Vulkan / Vulkan video core.
+- [Pink-shadPS4](https://github.com/luizgustavs/Pink-shadPS4) (luizgustavs): cvars de culling /
+  culling cvars, BPE heap guard, envio periódico / periodic submission, gravador de comandos em
+  thread própria / command recording thread, correções de shader / shader fixes (fetch-shader
+  constants, `V_ALIGNBIT`, `V_CVT_PK_U8_F32`), tabelas de texturas indexadas / dynamic T# tables
+  (`dynamic_tsharp_array_size`) e a abordagem das estatísticas de LOD / and the LOD statistics
+  approach.
+- Patch de 60 FPS / 60 FPS patch: illusion (GoldHEN cheats).
 
-Licença: **GPL-2.0-or-later** (veja [LICENSE](LICENSE)), como os projetos de origem.
-
-## English summary
-
-A native Windows port of the PS4 *Shadow of the Colossus* (CUSA08809, EU 1.01) built on the
-bloodborne_pc loader and the shadPS4 Vulkan video core. **No game or Sony files are included.**
-Bring your own decrypted game dump and, for sound, your own console's `libSceNgs2.sprx` and
-`libSceUlt.sprx`. Download the release zip, run `SotC.exe`; the launcher finds the game, the
-sound modules (from an installed shadPS4) and shadPS4 saves on its own. It also offers a
-shadPS4-like game library, key remapping, 60 FPS / 16x AF / PS4 Pro modes and 720p–4K output.
-In 60 FPS mode the title-screen attract demo averages ~67 FPS on an RTX 2060 SUPER, with
-29–34 FPS in its heaviest section.
-Vulkan 1.3 only (no DirectX). AMD and Intel can enable the NVIDIA-only submission options in
-the launcher (untested).
+Licença / License: **GPL-2.0-or-later** ([LICENSE](LICENSE)).
