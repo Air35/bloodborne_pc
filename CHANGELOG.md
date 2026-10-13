@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.13 — 2026-10-13
+- **Correção de queda da 0.0.12:** o jogo podia fechar na abertura ou no menu (falha em `0x1a371`,
+  1 em 3 testes). Causa: o port marcava cada textura vista como "ainda em uso" por ~3 segundos, e o
+  jogo tentava carregar mais texturas do que cabe no seu pool. Agora só contam as texturas usadas
+  desde o último pedido (como no Pink-shadPS4). Testado: 0 quedas em 5 rodadas da abertura e uma
+  sessão de quase 40 minutos andando pelo mapa, com dois carregamentos de save.
+- **Reflexos da água bem maiores:** o lago agora reflete paredões, templos e vegetação em quase
+  toda a superfície, com ondulação. Um limite de segurança de laços nos shaders cortava os raios
+  do reflexo em espaço de tela; agora o limite é por laço.
+- Em investigação: onde a água deveria refletir o céu, ela ainda fica escura e lisa.
+
 ## 0.0.12 — 2026-10-13
 - **Texturas nítidas de volta, sem o jogo fechar:** a corrupção de memória que fazia o jogo fechar
   logo depois de carregar um save (falha em `0x1a371`) e deixava texturas com "lixo colorido" vinha
