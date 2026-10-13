@@ -430,6 +430,54 @@ void Rasterizer::DispatchDirect() {
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
     SotcStats::current_program.store(cs.pgm_hash, std::memory_order_relaxed);
     SotcStats::cmd_kinds[4].fetch_add(1, std::memory_order_relaxed);
+    // sotc: SOTC_CS_TRACE=<hash>: the buffers of the first 6 dispatches of that compute shader,
+    // with the first dwords guest memory holds there (diagnostic for the GPU particle counts).
+    static const u64 cs_trace = [] {
+        const char* v = std::getenv("SOTC_CS_TRACE");
+        return v ? std::strtoull(v, nullptr, 0) : u64{0};
+    }();
+    // SOTC_CS_WATCH=<n>: also report the GPU writes to that shader's buffer n (buffer_cache.cpp).
+    static const int cs_watch = [] {
+        const char* v = std::getenv("SOTC_CS_WATCH");
+        return v ? std::atoi(v) : -1;
+    }();
+    if (cs_trace && cs.pgm_hash == cs_trace && cs_watch >= 0 &&
+        SotcStats::watch_addr.load(std::memory_order_relaxed) == 0) {
+        int n = 0;
+        for (const auto& desc : cs.buffers) {
+            if (!desc.IsSpecial() && n++ == cs_watch) {
+                const VAddr a = desc.GetSharp(cs).base_address;
+                SotcStats::watch_addr.store(a, std::memory_order_relaxed);
+                std::fprintf(stderr, "SOTC cs watch armed at %#llx\n",
+                             static_cast<unsigned long long>(a));
+            }
+        }
+    }
+    if (cs_trace && cs.pgm_hash == cs_trace) {
+        static int shown = 0;
+        if (shown++ < 6) {
+            std::fprintf(stderr, "SOTC cs %#llx dispatch %ux%ux%u\n",
+                         static_cast<unsigned long long>(cs.pgm_hash), cs_program.dim_x,
+                         cs_program.dim_y, cs_program.dim_z);
+            for (const auto& desc : cs.buffers) {
+                if (desc.IsSpecial()) {
+                    continue;
+                }
+                const auto sharp = desc.GetSharp(cs);
+                u32 first[8]{};
+                memory->TryReadBacking(sharp.base_address, first, sizeof(first));
+                std::fprintf(stderr,
+                             "SOTC cs   buf %#llx+%#llx written %d gpu %d mem %u %u %u %u %u %u %u "
+                             "%u\n",
+                             static_cast<unsigned long long>(sharp.base_address),
+                             static_cast<unsigned long long>(sharp.GetSize()),
+                             int(desc.is_written),
+                             int(buffer_cache.IsRegionGpuModified(sharp.base_address, 32)),
+                             first[0], first[1], first[2], first[3], first[4], first[5], first[6],
+                             first[7]);
+            }
+        }
+    }
     // SOTC_CMD_STATS=2: the dispatched shaders, every 10 s (command processor thread only).
     static const bool shader_stats = [] {
         const char* v = std::getenv("SOTC_CMD_STATS");
@@ -813,6 +861,38 @@ void Rasterizer::FlushPeriodic() {
 // user/log/dump_N/ (raw mip 0, all layers and slices). The data is what the GPU really computed,
 // unlike a RenderDoc replay of a frame that uses the sparse guest-memory buffer.
 void Rasterizer::MaybeDumpImages(u64 pgm_hash) {
+    // sotc: SOTC_CS_DUMP="hash,hash": after those compute shaders, read the buffer armed by
+    // SOTC_CS_WATCH back from the GPU and print its first 24 dwords (first 60 times; slow).
+    static const std::vector<u64> dump_after = [] {
+        std::vector<u64> list;
+        if (const char* env = std::getenv("SOTC_CS_DUMP")) {
+            for (const char* p = env; *p;) {
+                char* end = nullptr;
+                const u64 v = std::strtoull(p, &end, 0);
+                if (end == p) {
+                    break;
+                }
+                list.push_back(v);
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    if (!dump_after.empty() &&
+        std::find(dump_after.begin(), dump_after.end(), pgm_hash) != dump_after.end()) {
+        static int shown = 0;
+        const VAddr watch = SotcStats::watch_addr.load(std::memory_order_relaxed);
+        if (watch && shown++ < 60) {
+            buffer_cache.ReadMemory(watch, 24 * sizeof(u32));
+            u32 v[24]{};
+            memory->TryReadBacking(watch, v, sizeof(v));
+            std::fprintf(stderr, "SOTC dump after %#llx:", static_cast<unsigned long long>(pgm_hash));
+            for (const u32 x : v) {
+                std::fprintf(stderr, " %u", x);
+            }
+            std::fprintf(stderr, "\n");
+        }
+    }
     static const std::vector<u64> targets = [] {
         std::vector<u64> list;
         const char* env = std::getenv("SOTC_DUMP");

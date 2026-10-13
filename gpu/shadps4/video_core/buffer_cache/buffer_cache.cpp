@@ -598,13 +598,26 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
 void BufferCache::AddGpuModified(VAddr addr, u64 size) {
     MarkInflightReadbacksDirty(addr, size);
     // sotc: SOTC_GPUMOD_WATCH=<address>: who marks it as GPU-written (first 40 times).
-    static const VAddr watch = [] {
+    static const VAddr env_watch = [] {
         const char* v = std::getenv("SOTC_GPUMOD_WATCH");
         return v ? static_cast<VAddr>(std::strtoull(v, nullptr, 0)) : VAddr{0};
     }();
+    // SOTC_CS_WATCH (vk_rasterizer.cpp) arms it at run time.
+    const VAddr watch = env_watch ? env_watch : SotcStats::watch_addr.load(std::memory_order_relaxed);
     if (watch && addr < watch + 0x10000 && watch < addr + size) {
+        // The first 40 writes, then the first write of every other program (up to 64 more).
         static int shown = 0;
-        if (shown++ < 40) {
+        static u64 programs[64]{};
+        static int num_programs = 0;
+        const u64 program = SotcStats::current_program.load();
+        bool new_program = std::find(programs, programs + num_programs, program) ==
+                           programs + num_programs;
+        if (new_program && num_programs < 64) {
+            programs[num_programs++] = program;
+        } else {
+            new_program = false;
+        }
+        if (shown++ < 40 || new_program) {
             std::fprintf(stderr, "SOTC gpu-modified %#llx+%#llx by %p <- %p, program %#llx\n",
                          static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size),
                          __builtin_return_address(0), __builtin_return_address(1),
