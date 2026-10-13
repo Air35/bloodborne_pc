@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <iterator>
 #include "common/types.h"
 
 namespace SotcLod {
@@ -42,7 +43,12 @@ inline void Collect(u64 (&entries)[256]) {
         const char* v = std::getenv("SOTC_LOD_LEVEL");
         return v ? std::strtoull(v, nullptr, 0) & 0xf : 2;
     }();
-    static u32 idle[256] = {[0 ... 255] = 0xffffffffu};
+    static u32 idle[256] = {}; // reports since the bank's last use (never used: all ones)
+    static const bool idle_ready = [] {
+        std::fill(std::begin(idle), std::end(idle), 0xffffffffu);
+        return true;
+    }();
+    (void)idle_ready;
     static u32 last_count[256]{};
     for (u32 i = 0; i < 256; ++i) {
         const u32 n = uses[i].exchange(0, std::memory_order_relaxed);
