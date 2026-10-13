@@ -465,6 +465,9 @@ bool Instance::CreateDevice() {
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
+                // Descriptor arrays of dynamic_tsharp_array_size (shader_recompiler/info.cpp)
+                .shaderSampledImageArrayDynamicIndexing =
+                    features.shaderSampledImageArrayDynamicIndexing,
                 .shaderClipDistance = features.shaderClipDistance,
                 .shaderFloat64 = features.shaderFloat64,
                 .shaderInt64 = features.shaderInt64,

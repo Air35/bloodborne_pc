@@ -2112,6 +2112,10 @@ Value IREmitter::ImageAtomicCmpSwap(const Value& handle, const Value& coords, co
     return Inst(Opcode::ImageAtomicCmpSwap32, Flags{info}, handle, coords, value, cmp_value);
 }
 
+Value IREmitter::ImageArrayHandle(const U32& handle, const U32& element) {
+    return Inst(Opcode::ImageArrayHandle, handle, element);
+}
+
 Value IREmitter::ImageHandle(const Value& tsharp_low, const Value& tsharp_high) {
     return Inst(Opcode::ImageHandle, tsharp_low, tsharp_high);
 }
