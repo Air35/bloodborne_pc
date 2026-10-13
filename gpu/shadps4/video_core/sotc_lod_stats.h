@@ -11,7 +11,8 @@
 // bank asks for the same mip. Asking for mip 0 everywhere fills the game's streaming pool and
 // the game then breaks guest memory (heap and descriptor corruption within 1-4 minutes of the
 // attract demo, also with mip 1); mip 2 (512x512 for the 2048 textures, 4x the old 256x256)
-// ran the whole demo. SOTC_LOD_LEVEL picks another mip for tests.
+// ran the whole demo, but loading a save in the waterfall area then broke it too (3 of 4 runs,
+// 2026-10-13); mip 3 (256x256) ran 4 of 4. SOTC_LOD_LEVEL picks another mip for tests.
 #pragma once
 
 #include <algorithm>
@@ -38,10 +39,10 @@ inline void Collect(u64 (&entries)[256]) {
         const char* v = std::getenv("SOTC_LOD_LINGER");
         return v ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : Linger;
     }();
-    // SOTC_LOD_LEVEL=<mip>: the finest mip reported for a sampled bank (default 2, see above).
+    // SOTC_LOD_LEVEL=<mip>: the finest mip reported for a sampled bank (default 3, see above).
     static const u64 level = [] {
         const char* v = std::getenv("SOTC_LOD_LEVEL");
-        return v ? std::strtoull(v, nullptr, 0) & 0xf : 2;
+        return v ? std::strtoull(v, nullptr, 0) & 0xf : 3;
     }();
     static u32 idle[256] = {}; // reports since the bank's last use (never used: all ones)
     static const bool idle_ready = [] {
