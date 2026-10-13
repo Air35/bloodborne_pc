@@ -4,6 +4,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <set>
+#include <tuple>
 #include <unordered_map>
 #include <algorithm>
 #include <filesystem>
@@ -970,6 +973,15 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     if (!pipeline->IsCompute()) {
         return false;
     }
+    // sotc: SOTC_META_CLEAR=0 runs every dispatch the heuristic below would skip (test: a
+    // buffer reused from an old image's metadata range makes a real dispatch look like a clear).
+    static const bool meta_clear = [] {
+        const char* v = std::getenv("SOTC_META_CLEAR");
+        return !v || v[0] != '0';
+    }();
+    if (!meta_clear) {
+        return false;
+    }
 
     // Most of the time when a metadata is updated with a shader it gets cleared. It means
     // we can skip the whole dispatch and update the tracked state instead. Also, it is not
@@ -1250,8 +1262,71 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        if (image_desc.array_size != 0) {
+            // dynamic_tsharp_array_size (from Pink-shadPS4): one binding per table element, then a
+            // null one for out-of-range indices. The shader was typed after `tsharp`, the first
+            // valid element, so elements of another view type or number class stay null.
+            const u32 num_bindings = image_desc.NumBindings(stage);
+            const auto view_type = tsharp.GetViewType(image_desc.is_array);
+            const bool is_integer = AmdGpu::IsInteger(tsharp.GetNumberFmt());
+            for (u32 i = 0; i < num_bindings; ++i) {
+                const auto element = i < image_desc.array_size
+                                         ? image_desc.GetElementSharp(stage, i)
+                                         : AmdGpu::Image::Null(image_desc.is_depth);
+                const auto element_dfmt = element.GetDataFmt();
+                const auto element_nfmt = element.GetNumberFmt();
+                const bool bindable =
+                    element && element_dfmt != AmdGpu::DataFormat::FormatInvalid &&
+                    magic_enum::enum_contains(element_dfmt) &&
+                    magic_enum::enum_contains(element_nfmt) &&
+                    memory->IsValidGpuMapping(element.Address(), 0) &&
+                    element.GetViewType(image_desc.is_array) == view_type &&
+                    AmdGpu::IsInteger(element_nfmt) == is_integer &&
+                    element.GetNumberConversion() == tsharp.GetNumberConversion();
+                if (!bindable) {
+                    image_bindings.emplace_back(std::piecewise_construct, std::tuple{},
+                                                std::tuple{});
+                    continue;
+                }
+                if (element.lod_hw_cnt_en) {
+                    SotcLod::Mark(element.counter_bank_id);
+                }
+                auto& [image_id, desc] = image_bindings.emplace_back(
+                    std::piecewise_construct, std::tuple{}, std::tuple{element, image_desc});
+                image_id = texture_cache.FindImage(desc);
+                auto* image = &texture_cache.GetImage(image_id);
+                if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
+                    image_id = depth_image_id;
+                    image = &texture_cache.GetImage(image_id);
+                }
+                image->binding.is_bound = 1u;
+            }
+            image_descriptor_array_sizes.push_back(num_bindings);
+            continue;
+        }
         if (tsharp.lod_hw_cnt_en) {
             SotcLod::Mark(tsharp.counter_bank_id); // GET_LOD_STATS (sotc_lod_stats.h)
+        }
+        // sotc: SOTC_TSHARP_TRACE=1: mip fields of the large streamed textures (first 120
+        // distinct address/field combinations): which mips the game says are resident.
+        static const bool tsharp_trace = std::getenv("SOTC_TSHARP_TRACE") != nullptr;
+        if (tsharp_trace && tsharp.width + 1 >= 1024 && tsharp.last_level > 0) {
+            static std::mutex m;
+            static std::set<std::tuple<u64, u32, u32, u32, u32>> seen;
+            std::scoped_lock lk{m};
+            const auto key = std::make_tuple(u64{tsharp.Address()}, u32(tsharp.base_level),
+                                             u32(tsharp.last_level), u32(tsharp.min_lod),
+                                             u32(tsharp.min_lod_warn));
+            if (seen.size() < 120 && seen.insert(key).second) {
+                std::fprintf(stderr,
+                             "SOTC tsharp %#llx %ux%u fmt %u base %u last %u min_lod %u (%.2f) "
+                             "warn %u hwcnt %u bank %u\n",
+                             static_cast<unsigned long long>(tsharp.Address()), tsharp.width + 1,
+                             tsharp.height + 1, u32(tsharp.GetDataFmt()), u32(tsharp.base_level),
+                             u32(tsharp.last_level), u32(tsharp.min_lod), tsharp.min_lod / 256.f,
+                             u32(tsharp.min_lod_warn), u32(tsharp.lod_hw_cnt_en),
+                             u32(tsharp.counter_bank_id));
+            }
         }
         if (texture_cache.IsMeta(tsharp.Address())) {
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
@@ -1697,7 +1772,18 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     buffer_cache.OnMappingChanged();
-    buffer_cache.InvalidateMemory(addr, size);
+    // sotc: SOTC_UNMAP_READBACK=0 drops the GPU-written state of an unmapped range instead of
+    // downloading it (a 512 KB window around it) into memory that is being given back (test for
+    // the guest memory corruption with texture streaming).
+    static const bool unmap_readback = [] {
+        const char* v = std::getenv("SOTC_UNMAP_READBACK");
+        return !v || v[0] != '0';
+    }();
+    if (unmap_readback) {
+        buffer_cache.InvalidateMemory(addr, size);
+    } else {
+        buffer_cache.DropGpuModified(addr, size);
+    }
     // Give the arena memory back; it runs on the GPU thread, ordered before later draws.
     // Releasing arena memory on unmap still races with in-flight GPU work during loads
     // (device lost, silent crashes loading a save), so it is opt-in for now.

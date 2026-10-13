@@ -123,6 +123,15 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     });
 }
 
+void BufferCache::DropGpuModified(VAddr device_addr, u64 size) {
+    liverpool->SendCommand<true>([this, device_addr, size] {
+        gpu_modified_ranges.Subtract(device_addr, size);
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        MarkInflightReadbacksDirty(device_addr, size);
+        memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+    });
+}
+
 void BufferCache::MarkWriteAhead(VAddr addr) {
     static const u64 ahead = [] {
         const char* v = std::getenv("SOTC_WRITE_AHEAD_PAGES");
