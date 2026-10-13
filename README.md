@@ -1,4 +1,4 @@
-# Shadow of the Colossus — PC (port nativo) · v0.0.11
+# Shadow of the Colossus — PC (port nativo) · v0.0.12
 
 Port nativo do **Shadow of the Colossus** de PS4 (Bluepoint, 2018; CUSA08809, versão EU 1.01)
 para **Windows 10/11**. O código x86-64 do próprio jogo roda direto na CPU do PC e a GPU do PS4

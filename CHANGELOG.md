@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.12 — 2026-10-13
+- **Texturas nítidas de volta, sem o jogo fechar:** a corrupção de memória que fazia o jogo fechar
+  logo depois de carregar um save (falha em `0x1a371`) e deixava texturas com "lixo colorido" vinha
+  do emulador copiando dados da GPU para a memória que o jogo estava liberando. Isso foi corrigido,
+  e o streaming de texturas voltou ligado no nível 2 (texturas de 2048 até 512×512): pedras e
+  paredes bem mais nítidas. Testado por mais de 25 minutos perto da cascata, sem queda.
+- **Água:** respingos, anéis e espuma em volta do Wander ao nadar; o lago reflete o céu e o
+  brilho do sol. Os reflexos de ambiente (passada de IBL local) agora usam o *cubemap* certo de
+  cada *probe* — correção trazida do Pink-shadPS4 (`dynamic_tsharp_array_size`).
+- Em investigação: a água perto da câmera ainda fica sem ondulação.
+- Opções para teste: `SOTC_LOD_STATS=0` (streaming desligado), `SOTC_LOD_LEVEL`,
+  `SOTC_UNMAP_READBACK=1`, `SOTC_TSHARP_ARRAY=0`.
+
 ## 0.0.11 — 2026-10-13
 - **Correção da 0.0.10 — grama com textura de "lixo colorido":** no nível 3 do streaming o
   jogo liberava mips que a GPU ainda usava (visto na grama perto da cascata). O streaming de
