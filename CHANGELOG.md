@@ -8,10 +8,22 @@
 - **Excluir save:** na lista, Delete (teclado) ou Triângulo/Y (controle), com confirmação.
 - **Texturas de alta resolução (streaming):** o port passou a responder ao comando de
   estatísticas de textura da GPU (`GET_LOD_STATS`) que o jogo usa para decidir o que carregar.
-  Texturas mais nítidas de perto (até 512×512, antes 256×256), cascatas com as cortinas de água,
-  superfície da água com ondulação.
-- **Atenção:** com o streaming, **reinicie o jogo antes de carregar outro save**; trocar de save
-  na mesma sessão pode fechar o jogo (problema em investigação).
+  No nível 2 as texturas de 2048 chegavam a 512×512 e as cascatas ganhavam as cortinas de água.
+- **Jogo fechando sozinho depois de carregar um save:** o streaming no nível 2 corrompia a
+  memória do jogo (3 quedas em 4 testes perto da cascata). O padrão agora é o nível 3, que rodou
+  4 de 4 testes sem queda; nele as texturas de 2048 ficam em 256×256, como antes do streaming
+  (as cortinas das cascatas ainda não foram conferidas neste nível). `SOTC_LOD_LEVEL=2` volta ao
+  nível mais nítido, com o risco de queda.
+- **Sombras pretas corrigidas:** grama, pedras e paredes em sombra ficavam pretas. Três correções
+  do recompilador de shaders trazidas do Pink-shadPS4 (constantes 1.0 do fetch shader que eram
+  ignoradas, `V_ALIGNBIT`/`V_ALIGNBYTE` com deslocamento 0, `V_CVT_PK_U8_F32`).
+- **Partículas da GPU:** barreiras de memória compartilhada em grupos menores que uma wave; um
+  sistema de partículas que nunca aparecia voltou. O borrifo e a espuma das cascatas ainda não
+  aparecem (em investigação).
+- O lançador grava o registro do jogo em `user/last_run.log`, com o código de saída.
+- Ferramentas de diagnóstico: F12 captura um quadro quando o jogo roda sob o RenderDoc.
+- Ícone novo (rosto de um colosso).
+- **Atenção:** se trocar de save na mesma sessão fechar o jogo, reinicie antes de carregar outro.
 - Revisão completa do projeto em `docs/sotc/REVISAO-DO-PROJETO.md`.
 
 ## 0.0.9 — 2026-10-12
