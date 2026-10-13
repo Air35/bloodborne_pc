@@ -21,6 +21,7 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/sotc_lod_stats.h"
+#include "video_core/sotc_stats.h"
 
 // sotc: writes guest memory through the backing view (runtime_memory.c).
 extern "C" int runtime_memory_write_backing(unsigned long long address, const void* data,
@@ -933,6 +934,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 const auto skip = *cond_exec->Address() == false;
                 if (skip) {
+                    SotcStats::Drop(4, reinterpret_cast<uintptr_t>(cond_exec->Address()),
+                                    cond_exec->exec_count.Value());
                     dcb = NextPacket(dcb,
                                      header->type3.NumWords() + 1 + cond_exec->exec_count.Value());
                     continue;

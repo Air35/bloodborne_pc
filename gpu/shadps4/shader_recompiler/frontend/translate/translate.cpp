@@ -1215,6 +1215,9 @@ void Translator::EmitFetch(const GcnInst& inst) {
             ir.SetVectorReg(dst_reg++, IR::F32{ir.CompositeExtract(swizzled, i)});
         }
     }
+    for (const u8 vgpr : fetch_data.one_vgprs) {
+        ir.SetVectorReg(IR::VectorReg(vgpr), ir.Imm32(1.f));
+    }
 }
 
 void Translator::LogMissingOpcode(const GcnInst& inst) {

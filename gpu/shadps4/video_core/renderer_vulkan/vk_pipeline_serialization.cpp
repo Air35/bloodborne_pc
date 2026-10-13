@@ -15,7 +15,7 @@ namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 // Above both lines before the upstream merge: generation changed, so old caches are dropped.
 static constexpr u32 ShaderBinaryVersion = 21u;
-static constexpr u32 ShaderMetaVersion = 12u;
+static constexpr u32 ShaderMetaVersion = 13u;
 static constexpr u32 PipelineKeyVersion = 3u;
 } // namespace Serialization
 
@@ -444,6 +444,7 @@ void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
     fetch.Write(vertex_offset_sgpr);
     fetch.Write(instance_offset_sgpr);
     fetch.Write(attributes);
+    fetch.Write(one_vgprs);
 }
 
 bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
@@ -453,6 +454,7 @@ bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
     fetch.Read(vertex_offset_sgpr);
     fetch.Read(instance_offset_sgpr);
     fetch.Read(attributes);
+    fetch.Read(one_vgprs);
 
     return true;
 }

@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 
 namespace SotcStats {
 inline std::atomic<uint64_t> readbacks{0};    ///< BufferCache::DownloadMemory calls
@@ -39,4 +41,21 @@ struct ScopedTimer {
                         std::memory_order_relaxed);
     }
 };
+
+/// SOTC_DROP_TRACE=1: logs the first 80 draws/dispatches of each kind that are dropped.
+inline void Drop(int kind, unsigned long long a, unsigned long long b) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("SOTC_DROP_TRACE");
+        return v && v[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::atomic<int> shown[8]{};
+    static const char* names[8] = {"draw-nopipeline", "draw-nobind", "dispatch-nopipeline",
+                                   "dispatch-nobind", "condexec-skip", "dispatch-hle", "?", "?"};
+    if (shown[kind & 7].fetch_add(1) < 80) {
+        std::fprintf(stderr, "SOTC drop %s %#llx %#llx\n", names[kind & 7], a, b);
+    }
+}
 } // namespace SotcStats

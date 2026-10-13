@@ -587,6 +587,23 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             return memo.image_id;
         }
     }
+    // sotc: SOTC_IMG_WATCH=<address>: every lookup (texture, storage, render target) that
+    // overlaps it, first 200 (diagnostic for the empty AO input behind the black shadows).
+    static const VAddr img_watch = [] {
+        const char* v = std::getenv("SOTC_IMG_WATCH");
+        return v ? static_cast<VAddr>(std::strtoull(v, nullptr, 0)) : VAddr{0};
+    }();
+    if (img_watch && info.guest_address <= img_watch &&
+        img_watch < info.guest_address + info.guest_size) {
+        static int shown = 0;
+        if (shown++ < 200) {
+            std::fprintf(stderr, "SOTC img-watch type %u %#llx+%#x %ux%u fmt %d tile %d\n",
+                         static_cast<u32>(desc.type),
+                         static_cast<unsigned long long>(info.guest_address), info.guest_size,
+                         info.size.width, info.size.height, static_cast<int>(info.pixel_format),
+                         static_cast<int>(info.tile_mode));
+        }
+    }
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });

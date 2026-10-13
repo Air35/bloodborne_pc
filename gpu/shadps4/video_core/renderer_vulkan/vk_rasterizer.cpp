@@ -204,11 +204,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     SotcStats::current_program.store(1, std::memory_order_relaxed);
     SotcStats::cmd_kinds[0].fetch_add(1, std::memory_order_relaxed);
     if (!pipeline) {
+        SotcStats::Drop(0, regs.color_buffers[0].Address(), regs.stage_enable.raw);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        SotcStats::Drop(1, regs.color_buffers[0].Address(), 0);
         return;
     }
     const auto state = BeginRendering(pipeline);
@@ -278,11 +280,13 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     };
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline(params);
     if (!pipeline) {
+        SotcStats::Drop(0, liverpool->regs.color_buffers[0].Address(), 1);
         return;
     }
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
+        SotcStats::Drop(1, liverpool->regs.color_buffers[0].Address(), 1);
         return;
     }
     const auto state = BeginRendering(pipeline);
@@ -400,6 +404,7 @@ void Rasterizer::DispatchDirect() {
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
+        SotcStats::Drop(2, cs_program.Address<uintptr_t>(), 0);
         return;
     }
 
@@ -431,10 +436,12 @@ void Rasterizer::DispatchDirect() {
         }
     }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
+        SotcStats::Drop(5, cs_program.Address<uintptr_t>(), 0);
         return;
     }
 
     if (!BindResources(pipeline)) {
+        SotcStats::Drop(3, cs_program.Address<uintptr_t>(), 0);
         return;
     }
 
@@ -464,10 +471,12 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
+        SotcStats::Drop(2, cs_program.Address<uintptr_t>(), 0);
         return;
     }
 
     if (!BindResources(pipeline)) {
+        SotcStats::Drop(3, cs_program.Address<uintptr_t>(), 1);
         return;
     }
 
@@ -518,6 +527,28 @@ void Rasterizer::OnFence() {
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
+        static const bool drop_trace = std::getenv("SOTC_DROP_TRACE") != nullptr;
+        if (drop_trace) {
+            static int shown = 0;
+            if (shown++ < 12) {
+                const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+                for (const auto& desc : info.buffers) {
+                    if (desc.IsSpecial()) {
+                        continue;
+                    }
+                    const auto sharp = desc.GetSharp(info);
+                    std::fprintf(stderr,
+                                 "SOTC drop-detail cs %#llx buf %#llx+%#llx written %d fmt %d "
+                                 "meta %d xor %d images %zu\n",
+                                 static_cast<unsigned long long>(info.pgm_hash),
+                                 static_cast<unsigned long long>(sharp.base_address),
+                                 static_cast<unsigned long long>(sharp.GetSize()),
+                                 int(desc.is_written), int(desc.is_formatted),
+                                 int(texture_cache.IsMeta(sharp.base_address).has_value()),
+                                 int(info.has_bitwise_xor), info.images.size());
+                }
+            }
+        }
         return false;
     }
 
