@@ -1772,12 +1772,13 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     buffer_cache.OnMappingChanged();
-    // sotc: SOTC_UNMAP_READBACK=0 drops the GPU-written state of an unmapped range instead of
-    // downloading it (a 512 KB window around it) into memory that is being given back (test for
-    // the guest memory corruption with texture streaming).
+    // sotc: an unmapped range forgets its GPU-written state instead of downloading it (a 512 KB
+    // window around it) into memory that is being given back: with texture streaming that
+    // readback broke the game's heap within a minute of loading a save (allocator fault at guest
+    // 0x1a371, garbage textures). SOTC_UNMAP_READBACK=1 restores the readback.
     static const bool unmap_readback = [] {
         const char* v = std::getenv("SOTC_UNMAP_READBACK");
-        return !v || v[0] != '0';
+        return v && v[0] == '1';
     }();
     if (unmap_readback) {
         buffer_cache.InvalidateMemory(addr, size);

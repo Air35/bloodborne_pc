@@ -899,12 +899,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // from (sotc_lod_stats.h). Packet (from the game's Gnm getLodStats, 0x86a880):
                 // size - 32, address >> 6, address bits 38-39 | 0xbfc00. The game reads 256 u64
                 // bank entries at +0x40 and again at +0x840 (it alternates between the two).
-                // Off by default (2026-10-13): mip 2 breaks guest memory after a save loads and
-                // mip 3 makes the game evict mips the GPU still samples (garbage grass near the
-                // waterfall). SOTC_LOD_STATS=1 turns it on (SOTC_LOD_LEVEL picks the mip).
+                // On again (2026-10-13): the guest memory corruption with streaming came from the
+                // GPU readback on unmap (Rasterizer::UnmapMemory), not from these statistics.
+                // SOTC_LOD_STATS=0 leaves the buffer untouched (SOTC_LOD_LEVEL picks the mip).
                 static const bool lod_stats = [] {
                     const char* v = std::getenv("SOTC_LOD_STATS");
-                    return v && v[0] == '1';
+                    return !v || v[0] != '0';
                 }();
                 const u32* d = reinterpret_cast<const u32*>(header) + 1;
                 if (lod_stats && count >= 3) {
