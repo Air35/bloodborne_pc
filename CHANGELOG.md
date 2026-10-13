@@ -1,5 +1,19 @@
 # Changelog
 
+## Próxima versão (em teste)
+- **Gravação corrigida:** o jogo nunca conseguia gravar ("sem espaço livre"); agora grava.
+- **Lista de saves na tela:** "Carregar jogo" e "Gravação manual" mostram os saves (região,
+  tempo jogado, data) para escolher, com "+ Nova gravação" ao gravar. Setas/direcional para
+  escolher, Enter/X para confirmar, Esc/O para voltar, duplo clique com o mouse.
+- **Excluir save:** na lista, Delete (teclado) ou Triângulo/Y (controle), com confirmação.
+- **Texturas de alta resolução (streaming):** o port passou a responder ao comando de
+  estatísticas de textura da GPU (`GET_LOD_STATS`) que o jogo usa para decidir o que carregar.
+  Texturas mais nítidas de perto (até 512×512, antes 256×256), cascatas com as cortinas de água,
+  superfície da água com ondulação.
+- **Atenção:** com o streaming, **reinicie o jogo antes de carregar outro save**; trocar de save
+  na mesma sessão pode fechar o jogo (problema em investigação).
+- Revisão completa do projeto em `docs/sotc/REVISAO-DO-PROJETO.md`.
+
 ## 0.0.9 — 2026-10-12
 - **Configuração inicial automática:** na primeira vez o `SotC.exe` abre numa tela de boas-vindas
   que só pede a pasta do jogo (ou já oferece a que encontrou no PC). Depois ele configura sozinho
