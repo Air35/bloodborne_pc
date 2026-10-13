@@ -710,6 +710,40 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
+                // sotc: an end-of-pipe label means "the GPU finished everything before it". It
+                // was written as soon as the command processor read it, while the work was still
+                // queued for the host GPU: the game then reused or freed memory the GPU was still
+                // reading or about to write (heap and descriptor corruption once the texture
+                // streaming moves memory around). The label and its interrupt now wait for the
+                // host GPU to finish the work recorded so far (the scheduler's priority thread).
+                // SOTC_EOP_DEFER=1 only: it halves the frame rate (the game waits for the GPU at
+                // every label) and did not stop the streaming corruption (2026-10-12 tests).
+                static const bool defer_eop = [] {
+                    const char* v = std::getenv("SOTC_EOP_DEFER");
+                    return v && v[0] == '1';
+                }();
+                if (defer_eop && rasterizer) {
+                    const PM4CmdEventWriteEop eop = *event_eop;
+                    const VAddr label = reinterpret_cast<VAddr>(eop.Address<void>());
+                    // A GPU copy of the label's page must not be reused with the old value.
+                    if (eop.data_sel.Value() != DataSelect::None) {
+                        rasterizer->InvalidateMemory(label, 8, true);
+                    }
+                    rasterizer->GetScheduler().DeferPriorityOperation([eop] {
+                        eop.SignalFence(
+                            [](void* address, u64 data, u32 num_bytes) {
+                                ASSERT(Core::Memory::Instance()->TryWriteBacking(address, &data,
+                                                                                 num_bytes, 2));
+                            },
+                            [] {
+                                Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop);
+                            });
+                    });
+                    // Submit that work now: the game may wait for the label before it sends
+                    // anything else, and nothing else would submit it.
+                    rasterizer->Flush();
+                    break;
+                }
                 event_eop->SignalFence(
                     [this](void* address, u64 data, u32 num_bytes) {
                         WriteFenceValue(address, data, num_bytes);

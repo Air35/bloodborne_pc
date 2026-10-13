@@ -120,9 +120,12 @@ Base: o projeto *bbport* (port nativo de Bloodborne, GPL-2.0), adaptado ao SotC.
 1. **Corrupção de memória com o streaming de texturas.** Pedir resolução máxima (mip 0/1) para
    tudo faz o jogo corromper a própria memória em 1–4 minutos; com o limite atual (mip 2,
    512×512) o demo roda inteiro, mas **carregar outro save sem reiniciar o jogo pode fechá-lo**.
-   Recomendação: reiniciar o jogo antes de trocar de save. Causa de fundo provável: os rótulos
-   de fim de trabalho da GPU (EOP) são escritos quando o comando é processado, não quando a GPU
-   termina, e o caminho de "pool cheio" do jogo (cópias pela GPU) fica fora de ordem.
+   Recomendação: reiniciar o jogo antes de trocar de save. Testado e **descartado** como causa
+   (12/10): rótulos EOP escritos cedo (`SOTC_EOP_DEFER=1` escreve quando a GPU termina: o FPS cai
+   pela metade e a falha continua), a cópia HLE marcando a faixa inteira como escrita pela GPU
+   (corrigida para marcar só os pedaços; a falha continua) e recusas de memória do runtime (não
+   há). O sintoma é sempre memória reaproveitada pelo jogo ainda lida/escrita com dados velhos
+   (nós do heap, descritores e shaders com lixo) por volta de 250–270 s do demo com mip 0/1.
 2. **Sombras pretas**: áreas na sombra sem luz ambiente (não piorou com as mudanças recentes).
 3. **Água**: lago opaco/liso em alguns lugares; balanço das ondas não confirmado.
 4. **Fechamento no demo da tela de título** após vários minutos (mesma família do item 1).

@@ -86,8 +86,21 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
         // Obtain buffers for the total source and destination ranges.
         const auto [src_buf, src_buf_offset] = buffer_cache.ObtainBuffer(
             src_buf_sharp.base_address + src_offset_min, src_offset_max - src_offset_min, false);
+        // sotc: the merged range is obtained for reading only and just the copied pieces are
+        // marked GPU-written. Marking the whole range made readbacks bring back the gaps between
+        // the copies from the GPU's stale copy, over what the CPU wrote there since (the game
+        // moves streamed textures with this shader; its allocator keeps free-list nodes in the
+        // gaps: heap corruption). SOTC_COPY_HLE_WHOLE=1 marks the whole range (as before).
+        static const bool mark_whole = std::getenv("SOTC_COPY_HLE_WHOLE") != nullptr;
         const auto [dst_buf, dst_buf_offset] = buffer_cache.ObtainBuffer(
-            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min, true);
+            dst_buf_sharp.base_address + dst_offset_min, dst_offset_max - dst_offset_min,
+            mark_whole);
+        if (!mark_whole) {
+            for (u32 i = batch_start; i < batch_end; ++i) {
+                buffer_cache.ObtainBuffer(dst_buf_sharp.base_address + copies[i].dstOffset,
+                                          static_cast<u32>(copies[i].size), true);
+            }
+        }
 
         // Apply found buffer base.
         const auto vk_copies = std::span{copies}.subspan(batch_start, batch_end - batch_start);
