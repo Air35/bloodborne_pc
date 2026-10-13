@@ -212,10 +212,18 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     std::scoped_lock lock{mutex};
+    // sotc: SOTC_IMG_GPU_OVERLAP=1 also reuploads images inside a range a shader wrote as a
+    // buffer, not only an image at its exact base (test for the empty 960x540 A2B10G10R10
+    // lighting input behind the black shadows; it did not change the image, 2026-10-12).
+    static const bool overlap = [] {
+        const char* v = std::getenv("SOTC_IMG_GPU_OVERLAP");
+        return v && v[0] == '1';
+    }();
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address.
-        // TODO: Maybe also consider subresources
-        if (image.info.guest_address != address) {
+        if (image.info.guest_address != address &&
+            !(overlap && image.info.guest_address >= address &&
+              image.info.guest_address + image.info.guest_size <= address + max_size)) {
             return;
         }
         // Ensure image is reuploaded when accessed again.

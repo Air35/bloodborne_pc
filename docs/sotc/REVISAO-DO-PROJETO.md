@@ -127,6 +127,10 @@ Base: o projeto *bbport* (port nativo de Bloodborne, GPL-2.0), adaptado ao SotC.
    há). O sintoma é sempre memória reaproveitada pelo jogo ainda lida/escrita com dados velhos
    (nós do heap, descritores e shaders com lixo) por volta de 250–270 s do demo com mip 0/1.
 2. **Sombras pretas**: áreas na sombra sem luz ambiente (não piorou com as mudanças recentes).
+   Pista (captura RenderDoc do templo da abertura, ~178 s): uma entrada de meia resolução dos
+   passes de iluminação (960×540, A2B10G10R10, lida por ~16 desenhos de luz) **nunca é escrita
+   no quadro e fica em zero** — provável oclusão de ambiente/luz indireta faltando. Ainda não se
+   sabe qual passe deveria escrevê-la (nenhuma escrita como imagem nem como buffer encontrada).
 3. **Água**: lago opaco/liso em alguns lugares; balanço das ondas não confirmado.
 4. **Fechamento no demo da tela de título** após vários minutos (mesma família do item 1).
 5. Os saves antigos copiados do shadPS4 aparecem com a etiqueta "Profile" (a etiqueta se
