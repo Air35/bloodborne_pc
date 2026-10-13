@@ -1,6 +1,6 @@
 # Changelog
 
-## Próxima versão (em teste)
+## 0.0.10 — 2026-10-13
 - **Gravação corrigida:** o jogo nunca conseguia gravar ("sem espaço livre"); agora grava.
 - **Lista de saves na tela:** "Carregar jogo" e "Gravação manual" mostram os saves (região,
   tempo jogado, data) para escolher, com "+ Nova gravação" ao gravar. Setas/direcional para
