@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.11 — 2026-10-13
+- **Correção da 0.0.10 — grama com textura de "lixo colorido":** no nível 3 do streaming o
+  jogo liberava mips que a GPU ainda usava (visto na grama perto da cascata). O streaming de
+  texturas agora vem **desligado**, como na 0.0.9: grama normal, cortinas das cascatas visíveis e
+  sem as quedas ao carregar um save. Para testar o streaming: `SOTC_LOD_STATS=1` (com
+  `SOTC_LOD_LEVEL=2` fica mais nítido, mas pode fechar o jogo).
+- Em investigação: a água parada (lago como espelho, sem ondas) e o borrifo das cascatas.
+
 ## 0.0.10 — 2026-10-13
 - **Gravação corrigida:** o jogo nunca conseguia gravar ("sem espaço livre"); agora grava.
 - **Lista de saves na tela:** "Carregar jogo" e "Gravação manual" mostram os saves (região,
