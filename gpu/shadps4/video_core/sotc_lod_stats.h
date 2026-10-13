@@ -25,8 +25,10 @@
 namespace SotcLod {
 
 inline std::atomic<u32> uses[256]{};
-/// Reports a bank stays sampled after its last use (about 3 s at 60 reports per second).
-constexpr u32 Linger = 180;
+/// Reports a bank stays sampled after its last use. 0, like Pink-shadPS4: only the banks used
+/// since the last report. 180 (about 3 s) made the game ask for more than its streaming pool holds
+/// (allocator fault at guest 0x1a371 in 1 of 3 runs of the attract demo; 0 of 5 without).
+constexpr u32 Linger = 0;
 
 inline void Mark(u32 bank) {
     uses[bank & 0xff].fetch_add(1, std::memory_order_relaxed);
@@ -40,8 +42,9 @@ inline void Collect(u64 (&entries)[256]) {
         const char* v = std::getenv("SOTC_LOD_LINGER");
         return v ? static_cast<u32>(std::strtoul(v, nullptr, 0)) : Linger;
     }();
-    // SOTC_LOD_LEVEL=<mip>: the finest mip reported for a sampled bank (default 2, see above).
-    // Mip 3 made the game evict mips the GPU still sampled (garbage grass).
+    // SOTC_LOD_LEVEL=<mip>: the finest mip reported for a sampled bank. Default 2: mip 0 (Pink-
+    // shadPS4) filled an 8 GB card and stalled the GPU after a save loaded; mip 3 made the game
+    // evict mips the GPU still sampled (garbage grass).
     static const u64 level = [] {
         const char* v = std::getenv("SOTC_LOD_LEVEL");
         return v ? std::strtoull(v, nullptr, 0) & 0xf : 2;
