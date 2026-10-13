@@ -1401,9 +1401,29 @@ class Launcher:
             self.root.after(5000, self.root.destroy)
 
     def read_output(self, process):
+        # The output also goes to user/last_run.log, so a crash can be looked at afterwards.
+        try:
+            log_dir = user_dir(self.app)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+        except OSError:
+            log = None
         for raw in iter(process.stdout.readline, b''):
-            self.output.put(raw.decode('utf-8', errors='replace'))
-        self.output.put((process.wait(),))
+            text = raw.decode('utf-8', errors='replace')
+            self.output.put(text)
+            if log:
+                try:
+                    log.write(text)
+                except (OSError, ValueError):
+                    pass
+        code = process.wait()
+        if log:
+            try:
+                log.write(f'[exit code {code} = {code & 0xffffffff:#x}]\n')
+                log.close()
+            except (OSError, ValueError):
+                pass
+        self.output.put((code,))
 
     def drain_output(self):
         while not self.ui_calls.empty():

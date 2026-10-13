@@ -8,6 +8,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
+#include "video_core/renderdoc.h"
 
 namespace Frontend {
 
@@ -186,6 +187,9 @@ bool WindowSDL::PollEvents() {
                     capture(false);
                 }
             }
+        }
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F12 && !event.key.repeat) {
+            VideoCore::TriggerCapture(); // only does something when running under RenderDoc
         }
         switch (event.type) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

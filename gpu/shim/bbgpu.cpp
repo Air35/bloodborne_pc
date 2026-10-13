@@ -415,23 +415,36 @@ void LoadRenderDoc() {
 }
 void StartCapture() {
     static const char* trigger = std::getenv("SOTC_RDOC_TRIGGER");
-    if (!trigger) return;
+    if (!trigger && rdoc_state == 0) return;
     LoadRenderDoc();
     if (!rdoc_api) return;
-    if (rdoc_state == 0 && std::remove(trigger) == 0) rdoc_state = 1;
+    if (trigger && rdoc_state == 0 && std::remove(trigger) == 0) rdoc_state = 1;
     if (rdoc_state == 1) {
         rdoc_api->StartFrameCapture(nullptr, nullptr);
         rdoc_state = 2;
     }
 }
 void EndCapture() {
-    if (rdoc_api && rdoc_state == 2) {
+    // SOTC_RDOC_SUBMITS=N: the capture spans N submissions (a whole frame is split in several).
+    static int left = 0;
+    if (rdoc_api && rdoc_state == 2 && left == 0) {
+        const char* v = std::getenv("SOTC_RDOC_SUBMITS");
+        left = v ? std::max(1, std::atoi(v)) : 1;
+    }
+    if (rdoc_api && rdoc_state == 2 && --left == 0) {
         const bool ok = rdoc_api->EndFrameCapture(nullptr, nullptr) == 1;
         std::fprintf(stderr, "sotc: RenderDoc capture %s\n", ok ? "saved" : "FAILED");
         rdoc_state = 0;
     }
 }
-void TriggerCapture() { rdoc_state = rdoc_state ? rdoc_state : 1; }
+// F12 under RenderDoc (window.cpp): capture the next submissions (SOTC_RDOC_SUBMITS).
+void TriggerCapture() {
+    LoadRenderDoc();
+    if (rdoc_api && rdoc_state == 0) {
+        rdoc_state = 1;
+        std::fprintf(stderr, "sotc: RenderDoc capture armed (F12)\n");
+    }
+}
 void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return rdoc_api != nullptr; }
 #else

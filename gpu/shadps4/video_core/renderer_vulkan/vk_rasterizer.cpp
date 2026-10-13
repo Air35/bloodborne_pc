@@ -337,6 +337,25 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    // sotc: SOTC_INDIRECT_TRACE=1: the indirect draws that keep their GPU arguments (first 80):
+    // where the arguments are and what guest memory holds there (missing GPU particles).
+    static const bool indirect_trace = std::getenv("SOTC_INDIRECT_TRACE") != nullptr;
+    if (indirect_trace) {
+        static int shown = 0;
+        if (shown++ < 80) {
+            u32 first[4]{};
+            const bool read = memory->TryReadBacking(arg_address + offset, first, sizeof(first));
+            std::fprintf(stderr,
+                         "SOTC indirect gpu %d read %d args %#llx+%#x stride %u max %u "
+                         "count@%#llx mem %u %u %u %u vs %#llx\n",
+                         int(buffer_cache.IsRegionGpuModified(arg_address + offset, stride)),
+                         int(read), static_cast<unsigned long long>(arg_address), offset, stride,
+                         max_count, static_cast<unsigned long long>(count_address), first[0],
+                         first[1], first[2], first[3],
+                         static_cast<unsigned long long>(
+                             liverpool->regs.vs_program.Address<uintptr_t>()));
+        }
+    }
     const auto [buffer, base] =
         buffer_cache.ObtainBuffer(arg_address + offset, stride * max_count, false);
     needs_barrier |= runtime.IsBufferAccessed(buffer, base, stride * max_count);
