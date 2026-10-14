@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include "common/assert.h"
 #include "shader_recompiler/frontend/translate/translate.h"
@@ -102,14 +103,29 @@ void Translator::EmitScalarAlu(const GcnInst& inst) {
             return S_NOT_B64(inst);
         case Opcode::S_WQM_B64: {
             // s_wqm_b64 exec, exec needs nothing: pixel lanes already run as whole quads. Other
-            // forms copy the mask: SotC's lake/river water does s_wqm_b64 vcc, exec and later
+            // forms write the source mask grown to whole quads (a quad with any bit set gets all
+            // four): SotC's lake/river water does s_wqm_b64 vcc, exec and later
             // s_and_saveexec_b64 vcc; leaving VCC unset made that branch take garbage and skip the
-            // water normal map (flat, motionless open-world water).
-            if (inst.dst[0].field == OperandField::ExecLo &&
-                inst.src[0].field == OperandField::ExecLo) {
+            // water normal map (flat, motionless open-world water). A plain copy is not enough:
+            // alpha-tested foliage grows its test mask to quads so the neighbours used for the
+            // texture LOD stay alive; without the growth distant trees sampled garbage mips.
+            // SOTC_WQM_COPY=0 restores the old no-op (A/B comparisons).
+            static const bool wqm_copy = [] {
+                const char* v = std::getenv("SOTC_WQM_COPY");
+                return v ? std::atoi(v) != 0 : true;
+            }();
+            if (!wqm_copy || (inst.dst[0].field == OperandField::ExecLo &&
+                              inst.src[0].field == OperandField::ExecLo)) {
                 break;
             }
-            const IR::U64 mask{GetSrc64(inst.src[0])};
+            // Masks are per-lane booleans for the recompiler (InverseBallot elimination), so the
+            // growth is done per lane: a lane is set when any lane of its quad has its bit.
+            const IR::U1 bit{ir.InverseBallot(GetSrc64(inst.src[0]))};
+            const IR::U32 v{ir.Select(bit, ir.Imm32(1u), ir.Imm32(0u))};
+            const IR::U32 quad{ir.BitwiseOr(
+                ir.BitwiseOr(ir.QuadBroadcast(v, ir.Imm32(0u)), ir.QuadBroadcast(v, ir.Imm32(1u))),
+                ir.BitwiseOr(ir.QuadBroadcast(v, ir.Imm32(2u)), ir.QuadBroadcast(v, ir.Imm32(3u))))};
+            const IR::U64 mask{ir.Ballot(ir.INotEqual(quad, ir.Imm32(0u)))};
             SetDst64(inst.dst[0], mask);
             ir.SetScc(ir.InverseBallot(mask));
             return;

@@ -49,7 +49,19 @@ ramo que aplica o mapa de fluxo nunca rodava. O shader escrevia sempre a mesma n
 cima (`0x16ffb801` no G-buffer).
 
 Correção em `shader_recompiler/frontend/translate/scalar_alu.cpp`: quando o destino não é o
-EXEC, `S_WQM_B64` copia a máscara (e define o SCC). O Pink tem o mesmo problema.
+EXEC, `S_WQM_B64` grava a máscara expandida para quads inteiros (um quad 2×2 com qualquer bit
+ligado fica com os quatro) e define o SCC. O Pink tem o mesmo problema.
+
+- A primeira versão só copiava a máscara. A água ficou certa, mas as copas das árvores distantes
+  ganharam "lixo colorido". A folhagem usa `s_wqm_b64` no teste de transparência para manter
+  vivos os vizinhos do quad, de que a GPU precisa para calcular o nível de detalhe da textura.
+  Sem a expansão, ela lia mips com lixo.
+- A expansão é feita por thread (cada pixel junta os 4 bits do seu quad com `QuadBroadcast` e
+  depois `Ballot`), não com deslocamentos na máscara de 64 bits. O passo de eliminação de
+  `InverseBallot` trata máscaras como um booleano por thread e aborta com uma constante como
+  `0x1111111111111111`.
+- Só 9 pixel shaders do jogo usam essa forma (`s_wqm_b64 vcc, exec` ou `vcc, vcc`).
+  `SOTC_WQM_COPY=0` volta ao comportamento antigo, para comparação.
 
 ## Método (scripts em `tools/rdoc`; rodar com `qrenderdoc.exe --python <script>` e as variáveis `RD_*`)
 

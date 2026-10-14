@@ -5,7 +5,9 @@
   sem movimento. O shader dessa água guarda a máscara de threads ativas com `s_wqm_b64 vcc, exec`
   e depois decide por ela se aplica o mapa de fluxo (as ondas). O recompilador tratava
   `S_WQM_B64` como "não faça nada", o VCC ficava com lixo e o shader sempre escrevia uma normal
-  reta para cima. Agora a instrução copia a máscara quando o destino não é o EXEC. Detalhes em
+  reta para cima. Agora a instrução faz o que o hardware faz: expande a máscara para quads
+  inteiros de 2×2 pixels. Uma simples cópia corrigia a água, mas deixava "lixo colorido" nas copas
+  das árvores distantes, que usam a expansão no teste de transparência. Detalhes em
   `docs/sotc/AGUA.md`.
 - **Acesso direto à memória (DMA) ligado por padrão,** como na configuração do Pink-shadPS4 para
   o SotC. Leituras de tabelas com índice calculado no shader (os registros de *probe* usados pelo
