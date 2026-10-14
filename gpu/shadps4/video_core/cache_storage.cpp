@@ -110,7 +110,11 @@ void DataBase::Open() {
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
         }
     } else {
-        cache_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
+        // sotc: shaders compiled with and without direct memory access differ, and the cache keys
+        // do not tell them apart: the launcher's DMA switch gets its own cache folder.
+        cache_path = GetUserPath(PathType::CacheDir) /
+                     (std::string{game_info.GameSerial()} +
+                      (EmulatorSettings.IsDirectMemoryAccessEnabled() ? "" : "_nodma"));
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }

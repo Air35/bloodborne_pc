@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.57 — 2026-10-14
+- **Placas AMD: correção das cores verdes/rosas** na névoa, no Wander e no Agro (issues #6, #7, #9,
+  possivelmente #10). A AMD informa grupos de 64 threads, mas só deixa fixar esse tamanho nos
+  shaders de compute; o port exigia 64 em todos os estágios e deixava de converter os shaders de
+  compute. Agora as placas AMD usam o mesmo caminho de 32 threads da NVIDIA (compute fixado em 32,
+  barreiras de memória compartilhada, sem a otimização de ramos uniformes que deixava os
+  personagens pretos na sombra). Diagnóstico de raulbezerro-dev na issue #7. Na NVIDIA nada muda.
+  **Ainda não testado numa placa AMD:** conte na issue se melhorou.
+- **Opção nova no lançador:** "Reflexos completos da água (acesso direto à memória)", ligada por
+  padrão. Desligada, ganha ~10% de FPS (demo da tela de título: 54 → 59), mas a água distante
+  fica mais lisa. Cada modo tem a sua própria pasta de cache de shaders.
+- O cache de shaders é refeito na primeira abertura.
+
 ## 0.56 — 2026-10-13
 - **Água do mundo aberto com ondas:** lagos e rios abaixo das cascatas ficavam lisos como espelho,
   sem movimento. O shader dessa água guarda a máscara de threads ativas com `s_wqm_b64 vcc, exec`

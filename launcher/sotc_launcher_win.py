@@ -28,7 +28,7 @@ CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'sotc-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 GAME_ID, GAME_VERSION = 'CUSA08809', '01.01'
 SYS_MODULES = ('libSceUlt.sprx', 'libSceNgs2.sprx')
-VERSION = '0.56'
+VERSION = '0.57'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -106,7 +106,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / GAME_ID), '
                 'output_res': '1920x1080', 'upscaler': 'fsr1', 'sharpness': '250', 'mouse': True,
                 'mouse_sens': '1.0', 'mouse_invert': False, 'neo': False, 'fx_vignette': True,
                 'fx_fog': True, 'fx_ssao': True, 'engine_cvars': '', 'perf_culling': True,
-                'perf_record_thread': True, 'gpu_submit': 'auto', 'library_dirs': [], 'keys': {},
+                'perf_record_thread': True, 'perf_dma': True, 'gpu_submit': 'auto', 'library_dirs': [], 'keys': {},
                 'auto_setup': True, 'dlc_dir': ''}
 # Keyboard bindings (src/runtime_pad.c): PS4 input, its default SDL key name, label.
 KEY_INPUTS = [
@@ -283,6 +283,8 @@ def game_environment(s):
     cvars += str(s.get('engine_cvars', '')).split()
     env['SOTC_CVARS'] = ' '.join(cvars)
     env['SOTC_RECORD_THREAD'] = '1' if s.get('perf_record_thread', True) else '0'
+    if not s.get('perf_dma', True):
+        env['BB_DIRECT_MEMORY_ACCESS'] = '0'
     # Periodic submits and readbacks ahead: by default only with NVIDIA (vk_rasterizer.cpp).
     if s.get('gpu_submit') == 'on':
         env['SOTC_FLUSH_US'], env['SOTC_RB_AHEAD'] = '500', '1'
@@ -790,6 +792,14 @@ class Launcher:
                      'Ponte do cânion no demo: ~24 → ~28 FPS. Desligue se notar travamentos.',
                      'Records and submits the GPU commands on another thread (cp_record_thread of '
                      'Pink-shadPS4). Canyon bridge in the demo: ~24 → ~28 FPS. Turn it off if the game hangs.'))
+        self.check(f, 'perf_dma', _('Reflexos completos da água (acesso direto à memória)',
+                                     'Full water reflections (direct memory access)'),
+                   _('Deixa os shaders lerem tabelas da memória do jogo direto (como o Pink-shadPS4): o lago ondula '
+                     'e reflete até longe. Desligado ganha ~10% de FPS, mas a água longe fica mais lisa. '
+                     'Ao trocar, os shaders são compilados de novo na primeira vez.',
+                     'Lets shaders read tables straight from game memory (as Pink-shadPS4 does): the lake ripples '
+                     'and reflects far away. Off gains ~10% FPS, but distant water is flatter. After a change '
+                     'the shaders are compiled again the first time.'))
         self.row(f, _('Envio de trabalho à GPU', 'GPU work submission'), self.choice(f, 'gpu_submit', GPU_SUBMIT),
                  _('Manda trabalho à GPU a cada 0,5 ms e lê resultados por um atalho (técnicas do Pink-shadPS4). '
                    'Medido em NVIDIA (+10–15%); em AMD/Intel use "Ligado" para testar e volte para "Automático" '
