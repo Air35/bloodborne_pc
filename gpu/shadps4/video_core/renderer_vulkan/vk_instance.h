@@ -229,9 +229,30 @@ public:
         return vk12_features.shaderSharedInt64Atomics;
     }
 
-    /// Returns true if the subgroup size can be set to match guest subgroup size
+    /// Returns true if the subgroup size can be set to match guest subgroup size in every stage.
+    /// sotc: AMD reports 64-wide subgroups but can require a size only for compute
+    /// (requiredSubgroupSizeStages = compute); requiring 64 in the graphics stages was invalid and
+    /// the compute shaders skipped the wave64 lowering, which gave AMD cards random green/pink
+    /// fog and characters (issue #7, raulbezerro-dev). Those cards use the 32-wide path instead.
     bool IsSubgroupSize64Supported() const {
-        return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64;
+        constexpr auto stages = vk::ShaderStageFlagBits::eVertex |
+                                vk::ShaderStageFlagBits::eFragment |
+                                vk::ShaderStageFlagBits::eCompute;
+        return vk13_features.subgroupSizeControl && vk13_props.maxSubgroupSize >= 64 &&
+               (vk13_props.requiredSubgroupSizeStages & stages) == stages;
+    }
+
+    /// sotc: true when compute shaders must be pinned to 32-wide subgroups: the device could run
+    /// them wider, but the recompiler lowers wave64 code for 32 lanes (the NVIDIA path).
+    bool IsComputeSubgroupSize32Required() const {
+        return !IsSubgroupSize64Supported() && vk13_features.subgroupSizeControl &&
+               vk13_props.minSubgroupSize <= 32 && vk13_props.maxSubgroupSize > 32 &&
+               (vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute);
+    }
+
+    /// sotc: whether a required subgroup size may be given for this stage.
+    bool CanRequireSubgroupSize(vk::ShaderStageFlagBits stage) const {
+        return bool(vk13_props.requiredSubgroupSizeStages & stage);
     }
 
     /// Returns true when VK_KHR_workgroup_memory_explicit_layout is supported.
@@ -332,8 +353,14 @@ public:
         return properties.limits.nonCoherentAtomSize;
     }
 
-    /// Returns the subgroup size of the selected physical device.
+    /// Returns the subgroup size the recompiler targets (64 or 32 when it can be required).
     u32 SubgroupSize() const {
+        if (IsSubgroupSize64Supported()) {
+            return 64;
+        }
+        if (IsComputeSubgroupSize32Required()) {
+            return 32;
+        }
         return vk11_props.subgroupSize;
     }
 

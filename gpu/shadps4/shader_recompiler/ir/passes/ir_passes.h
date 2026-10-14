@@ -24,6 +24,7 @@ void InverseBallotEliminationPass(IR::Program& program);
 std::vector<IR::Block*> FindWave64UniformBlocks(
     const IR::Program& program, const std::unordered_set<const IR::Inst*>* uniform_insts = nullptr);
 bool Wave64UniformBranchesEnabled();
+void SetWave64UniformBranchesDefault(bool enabled);
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile);
 void LowerHardwareIntrinsics(IR::Program& program);

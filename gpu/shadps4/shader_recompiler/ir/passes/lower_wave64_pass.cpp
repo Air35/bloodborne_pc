@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <cstdlib>
 #include <optional>
 #include <queue>
@@ -190,15 +191,24 @@ static std::optional<u32> ReductionIdentity(const IR::Value& value) {
     }
 }
 
+static std::atomic<int> wave64_uniform_default{-1};
+
+void SetWave64UniformBranchesDefault(bool enabled) {
+    wave64_uniform_default = enabled ? 1 : 0;
+}
+
 bool Wave64UniformBranchesEnabled() {
-    // SotC only; SOTC_WAVE64_UNIFORM=0/1 overrides.
-    static const bool enabled = [] {
-        if (const char* v = std::getenv("SOTC_WAVE64_UNIFORM")) {
-            return std::atoi(v) != 0;
-        }
-        return Common::ElfInfo::Instance().GameSerial() == "CUSA08809";
+    // SotC only; SOTC_WAVE64_UNIFORM=0/1 overrides. The renderer turns the default off away from
+    // NVIDIA: on AMD (32-wide path) it left the characters black in the shade (issue #7).
+    static const int forced = [] {
+        const char* v = std::getenv("SOTC_WAVE64_UNIFORM");
+        return v ? (std::atoi(v) != 0 ? 1 : 0) : -1;
     }();
-    return enabled;
+    if (forced >= 0) {
+        return forced != 0;
+    }
+    static const bool sotc = Common::ElfInfo::Instance().GameSerial() == "CUSA08809";
+    return sotc && wave64_uniform_default != 0;
 }
 
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
