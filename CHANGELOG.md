@@ -1,5 +1,18 @@
 # Changelog
 
+## Próxima versão (em desenvolvimento)
+- **Água do mundo aberto com ondas:** lagos e rios abaixo das cascatas ficavam lisos como espelho,
+  sem movimento. O shader dessa água guarda a máscara de threads ativas com `s_wqm_b64 vcc, exec`
+  e depois decide por ela se aplica o mapa de fluxo (as ondas). O recompilador tratava
+  `S_WQM_B64` como "não faça nada", o VCC ficava com lixo e o shader sempre escrevia uma normal
+  reta para cima. Agora a instrução copia a máscara quando o destino não é o EXEC. Detalhes em
+  `docs/sotc/AGUA.md`.
+- **Acesso direto à memória (DMA) ligado por padrão,** como na configuração do Pink-shadPS4 para
+  o SotC. Leituras de tabelas com índice calculado no shader (os registros de *probe* usados pelo
+  reflexo em espaço de tela) liam sempre a posição 0; agora leem o endereço certo. Com isso o
+  lago de cima ondula e reflete até longe. `BB_DIRECT_MEMORY_ACCESS=0` desliga.
+- O cache de shaders é refeito na primeira abertura (o primeiro carregamento engasga).
+
 ## 0.0.13 — 2026-10-13
 - **Correção de queda da 0.0.12:** o jogo podia fechar na abertura ou no menu (falha em `0x1a371`,
   1 em 3 testes). Causa: o port marcava cada textura vista como "ainda em uso" por ~3 segundos, e o
