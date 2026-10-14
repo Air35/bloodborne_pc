@@ -53,7 +53,10 @@ public:
         return value;
     }
     bool IsCopyGpuBuffers() { static const auto value = Flag("BB_COPY_GPU_BUFFERS", false); return value; }
-    bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("BB_DIRECT_MEMORY_ACCESS", false); return value; }
+    // sotc: on, as in Pink-shadPS4's CUSA08809 config. Shader reads from a table at a runtime
+    // index (the SSR/water probe records, 224 bytes each) cannot be flattened; without DMA every
+    // lane read record 0 and distant water lost its ripples and reflections.
+    bool IsDirectMemoryAccessEnabled() { static const auto value = Flag("BB_DIRECT_MEMORY_ACCESS", true); return value; }
     bool IsDumpShaders() { static const auto value = Flag("BB_DUMP_SHADERS", false); return value; }
     bool IsFsrEnabled() { static const auto value = Flag("BB_FSR1", false); return value; }
     bool IsHdrAllowed() { static const auto value = Flag("BB_HDR", false); return value; }
