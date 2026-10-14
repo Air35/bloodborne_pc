@@ -1,4 +1,4 @@
-# Shadow of the Colossus — PC (port nativo / native port) · v0.0.13
+# Shadow of the Colossus — PC (port nativo / native port) · v0.56
 
 **[Português](#português)** · **[English](#english)** · [Releases](../../releases) · [Changelog](CHANGELOG.md)
 
@@ -21,16 +21,17 @@ de que o jogo precisa, no estilo do [bloodborne_pc](https://github.com/Supermedo
 
 | Versão | Melhorias e correções |
 |---|---|
+| **0.56** | **Água do mundo aberto com ondas:** lagos e rios abaixo das cascatas não ficam mais lisos como espelho (uma instrução de shader, `S_WQM_B64`, era ignorada). **Lago de cima ondula e reflete até longe** (acesso direto à memória ligado por padrão, como no Pink-shadPS4). Árvores distantes sem "lixo colorido". |
 | **0.0.13** | **Sem quedas:** corrigida a queda na abertura/menu da 0.0.12 (o jogo pedia mais texturas do que cabe no pool). Testado ~40 min pelo mapa, com dois carregamentos de save. **Reflexos do lago** em quase toda a superfície, com ondulação (uma trava de laços dos shaders cortava os raios do reflexo). |
 | **0.0.12** | **Texturas nítidas de volta, sem o jogo fechar:** a corrupção de memória que derrubava o jogo depois de carregar um save foi corrigida, e o streaming de texturas voltou (pedras e paredes bem mais nítidas). **Água:** respingos, anéis e espuma ao nadar; o lago reflete o céu e o brilho do sol; reflexos de ambiente com o *cubemap* certo de cada *probe* (correção do Pink-shadPS4). |
 | **0.0.11** | Corrigida a grama com textura de "lixo colorido" da 0.0.10. |
-| **0.0.10** | **Gravação funcionando** (antes o jogo nunca gravava). **Lista de saves na tela** para carregar, gravar e **excluir** saves. **Sombras pretas corrigidas** (grama e pedras em sombra ficavam pretas). Streaming de texturas, ícone novo e registro do jogo em `user/last_run.log`. |
 
 Detalhes de cada versão no [CHANGELOG](CHANGELOG.md).
 
 ### Problemas conhecidos
 
-- Onde a água deveria refletir o **céu**, ela ainda fica escura e lisa (em investigação).
+- Na primeira abertura depois de atualizar, os shaders são compilados de novo: o primeiro
+  carregamento demora e engasga.
 - Placas **AMD**: há relatos de personagem e cavalo esverdeados/rosados em alguns ângulos
   ([#5](../../issues/5)). Mande o seu `user/last_run.log` se acontecer.
 - Com 8 GB de memória de vídeo, o uso fica perto do limite em áreas grandes.
@@ -114,16 +115,16 @@ game needs, in the style of [bloodborne_pc](https://github.com/Supermedo/bloodbo
 
 | Version | Improvements and fixes |
 |---|---|
+| **0.56** | **Open-world water with waves:** lakes and rivers below the waterfalls are no longer flat as a mirror (a shader instruction, `S_WQM_B64`, was ignored). **The upper lake ripples and reflects far away** (direct memory access on by default, as in Pink-shadPS4). Distant trees without "colored garbage". |
 | **0.0.13** | **No more crashes:** fixed the 0.0.12 crash in the intro/menu (the game asked for more textures than its pool holds). Tested ~40 min across the map with two save loads. **Lake reflections** over almost the whole surface, with ripples (a shader loop guard cut the reflection rays short). |
 | **0.0.12** | **Sharp textures back, without crashes:** fixed the memory corruption that closed the game after loading a save, and texture streaming is back (much sharper rocks and walls). **Water:** splashes, rings and foam while swimming; the lake reflects the sky and the sun's glint; environment reflections use each probe's correct cubemap (fix from Pink-shadPS4). |
 | **0.0.11** | Fixed the "colored garbage" grass texture of 0.0.10. |
-| **0.0.10** | **Saving works** (the game never saved before). **On-screen save list** to load, save and **delete** saves. **Black shadows fixed** (grass and rocks in shadow were black). Texture streaming, new icon and a session log in `user/last_run.log`. |
 
 Full details in the [CHANGELOG](CHANGELOG.md) (in Portuguese).
 
 ### Known issues
 
-- Where the water should reflect the **sky**, it is still dark and flat (under investigation).
+- The first start after updating rebuilds the shaders: the first load is slow and stutters.
 - **AMD** GPUs: reports of a green/pink tint on Wander and Agro at some angles
   ([#5](../../issues/5)). Please attach your `user/last_run.log`.
 - With 8 GB of video memory, usage gets close to the limit in large areas.
@@ -194,8 +195,8 @@ diagnóstico / diagnostic variables: [docs/sotc/README-SotC.md](docs/sotc/README
   culling cvars, BPE heap guard, envio periódico / periodic submission, gravador de comandos em
   thread própria / command recording thread, correções de shader / shader fixes (fetch-shader
   constants, `V_ALIGNBIT`, `V_CVT_PK_U8_F32`), tabelas de texturas indexadas / dynamic T# tables
-  (`dynamic_tsharp_array_size`) e a abordagem das estatísticas de LOD / and the LOD statistics
-  approach.
+  (`dynamic_tsharp_array_size`), a abordagem das estatísticas de LOD / the LOD statistics
+  approach e o acesso direto à memória para o SotC / and direct memory access for SotC.
 - Patch de 60 FPS / 60 FPS patch: illusion (GoldHEN cheats).
 
 Licença / License: **GPL-2.0-or-later** ([LICENSE](LICENSE)).

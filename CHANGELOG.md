@@ -1,6 +1,6 @@
 # Changelog
 
-## Próxima versão (em desenvolvimento)
+## 0.56 — 2026-10-13
 - **Água do mundo aberto com ondas:** lagos e rios abaixo das cascatas ficavam lisos como espelho,
   sem movimento. O shader dessa água guarda a máscara de threads ativas com `s_wqm_b64 vcc, exec`
   e depois decide por ela se aplica o mapa de fluxo (as ondas). O recompilador tratava
