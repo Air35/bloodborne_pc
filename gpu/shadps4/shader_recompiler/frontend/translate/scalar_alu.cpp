@@ -100,8 +100,20 @@ void Translator::EmitScalarAlu(const GcnInst& inst) {
             return S_MOV_B64(inst);
         case Opcode::S_NOT_B64:
             return S_NOT_B64(inst);
-        case Opcode::S_WQM_B64:
-            break;
+        case Opcode::S_WQM_B64: {
+            // s_wqm_b64 exec, exec needs nothing: pixel lanes already run as whole quads. Other
+            // forms copy the mask: SotC's lake/river water does s_wqm_b64 vcc, exec and later
+            // s_and_saveexec_b64 vcc; leaving VCC unset made that branch take garbage and skip the
+            // water normal map (flat, motionless open-world water).
+            if (inst.dst[0].field == OperandField::ExecLo &&
+                inst.src[0].field == OperandField::ExecLo) {
+                break;
+            }
+            const IR::U64 mask{GetSrc64(inst.src[0])};
+            SetDst64(inst.dst[0], mask);
+            ir.SetScc(ir.InverseBallot(mask));
+            return;
+        }
         case Opcode::S_BREV_B32:
             return S_BREV_B32(inst);
         case Opcode::S_BCNT1_I32_B32:
