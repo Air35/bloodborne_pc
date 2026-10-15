@@ -8,7 +8,8 @@ function (host contracts first) and otherwise binds the native export.
 Exports are matched by (NID, library identity, module identity). Imports of
 libSceLibcInternal are served by libc.prx's same-NID exports: the internal
 library is not shipped with the game and exposes the same functions.
-Output: out/boot-linked.bin (format BBPROBE5) and out/link.json.
+Output: out/boot-linked.bin (format BBPROBE5), out/link.json and out/code-ranges.json (the
+function ranges of every module from its unwind tables, for the ISA rewrite, ADR-0017).
 """
 import collections
 import hashlib
@@ -17,6 +18,7 @@ from pathlib import Path
 import struct
 from prepare import parse_self, span, unpack
 from link_libc import encode_id
+from eh_frame import module_ranges
 
 DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
@@ -127,6 +129,8 @@ def link(game, out, module_names=DEFAULT_MODULES):
 
     exports, by_nid = {}, collections.defaultdict(list)
     table = []
+    # sotc: function ranges of every module for the ISA rewrite (ADR-0017, scripts/isa_rewrite.py)
+    code_ranges = [dict(module_ranges('eboot.bin', main['elf'], main['ph'], 0), size=size)]
     base = (size + 65535) & ~65535
     fs_patched = patch_fs_loads(image, main['ph'], 0)
     tls_module = 2
@@ -193,6 +197,7 @@ def link(game, out, module_names=DEFAULT_MODULES):
                 by_nid[(s['identity'][0], s['identity'][1][0])].append(entry_value)
                 count += 1
         fs_patched += patch_fs_loads(image, m['ph'], base)
+        code_ranges.append(dict(module_ranges(filename, m['elf'], m['ph'], base), size=modsize))
         table.append(dict(file=filename, base=base, size=modsize, init=base + m['tags'].get(12, 0),
                           tls_address=base + tls['vaddr'] if tls else 0, tls_memsz=tls['memsz'] if tls else 0,
                           tls_filesz=tls['filesz'] if tls else 0, tls_module=module_id,
@@ -241,6 +246,8 @@ def link(game, out, module_names=DEFAULT_MODULES):
                   main_tls=dict(zip(('vaddr', 'filesz', 'memsz', 'align'), main_tls_values)),
                   unresolved_imports=unresolved)
     (out / 'link.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    (out / 'code-ranges.json').write_text(
+        json.dumps({'format': 'coderanges1', 'image_size': len(image), 'modules': code_ranges}) + '\n', encoding='utf-8')
     summary = ', '.join(f"{t['file']}@{t['base']:#x}" for t in table)
     print(f'Linked modules: {summary}; {len(bindings)} native bindings, {len(unresolved)} imports left to the host runtime, '
           f'fs->gs patched={fs_patched}')

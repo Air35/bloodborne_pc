@@ -453,6 +453,61 @@ static void test_table_validation(void) {
     CHECK(!parses(bad, 1));
 }
 
+/* tests/data/isa_table_fixture.hex: the table scripts/isa_rewrite.py writes for the synthetic
+ * program of tests/test_isa_rewrite.py. '#' lines are comments; the rest is hex text. */
+static unsigned char* read_hex_file(const char* path, size_t* size) {
+    FILE* f = fopen(path, "r");
+    CHECK(f != NULL);
+    unsigned char* data = malloc(4096);
+    char line[256];
+    *size = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (line[0] == '#')
+            continue;
+        for (const char* p = line; p[0] && p[1] && p[0] != '\n'; p += 2) {
+            unsigned value;
+            CHECK(sscanf(p, "%2x", &value) == 1);
+            data[(*size)++] = (unsigned char)value;
+        }
+    }
+    fclose(f);
+    return data;
+}
+
+static void test_table_written_by_the_generator(void) {
+    size_t size;
+    unsigned char* data = read_hex_file("tests/data/isa_table_fixture.hex", &size);
+    IsaTable* t = isa_table_parse(data, size);
+    free(data);
+    CHECK(t != NULL && t->count == 8 && t->unsupported == 2 && t->flags == 0);
+    CHECK(t->image_size == 0x1000 + 0x110);
+    static const struct {
+        uint64_t offset;
+        uint8_t length, kind, mode;
+    } expected[8] = {
+        {0x1000, 4, ISA_MOVBE_LOAD, ISA_MODE_JMP_RELOCATE},
+        {0x1006, 5, ISA_BLSR, ISA_MODE_JMP},
+        {0x1010, 4, ISA_LZCNT, ISA_MODE_INT3},
+        {0x1030, 5, ISA_MOVBE_LOAD, ISA_MODE_UNSUPPORTED},
+        {0x1040, 4, ISA_EXTRQ, ISA_MODE_JMP_RELOCATE},
+        {0x1050, 6, ISA_INSERTQ, ISA_MODE_JMP},
+        {0x1060, 5, ISA_VCVTPH2PS, ISA_MODE_UNSUPPORTED},
+        {0x1070, 8, ISA_MOVBE_LOAD, ISA_MODE_JMP},
+    };
+    for (uint32_t i = 0; i < 8; ++i)
+        CHECK(t->sites[i].offset == expected[i].offset &&
+              t->sites[i].length == expected[i].length && t->sites[i].kind == expected[i].kind &&
+              t->sites[i].mode == expected[i].mode);
+    CHECK(t->sites[0].relocated_length == 2 && t->sites[0].relocated[0] == 0x89 &&
+          t->sites[0].relocated[1] == 0xc8);
+    CHECK(t->sites[0].mem_slot == ISA_MEM_SRC && t->sites[0].base == 0 && t->sites[0].dst == 1);
+    CHECK((t->sites[5].mem_flags & ISA_FLAG_IMM) && t->sites[5].disp == 0x0810 &&
+          t->sites[5].dst == 0 && t->sites[5].src1 == 1);
+    CHECK((t->sites[7].mem_flags & ISA_MEM_RIP_RELATIVE) && t->sites[7].disp == 0x1070 + 8 + 0x10);
+    CHECK(t->sites[4].dst == 0 && t->sites[4].src1 == 1); /* extrq xmm0, xmm1 */
+    isa_table_free(t);
+}
+
 static void test_sha256_match(void) {
     /* FIPS 180-4 vectors: "abc" and the empty message. */
     static const uint8_t abc[32] = {0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
@@ -503,6 +558,7 @@ int main(void) {
     isa_emulate_set_image(image);
 
     test_table_validation();
+    test_table_written_by_the_generator();
     test_sha256_match();
     test_jmp_and_flags();
     test_relocated_site();
