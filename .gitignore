@@ -30,3 +30,87 @@ patches.json
 /docs/ISSUE_ACTION_PLAN_*.md
 # AMD FidelityFX DLLs (FSR 4.1.1 is built from the user's own): never in the repository
 *.dll
+# --- Jogo (dump do próprio console): base, update, DLC ------------------------
+eboot.bin
+eboot*.bin
+*.self
+*.sprx
+*.prx
+*.elf
+*.oelf
+*.pkg
+*.sfo
+*.csdr
+*.zar
+*.trp
+sce_sys/
+sce_module/
+sce_discmap*.plt
+CUSA*/
+app0/
+patch0/
+addcont/
+addcont[0-9]*/
+*.iso
+*.ISO
+*.bin
+*.BIN
+*.img
+
+# --- Firmware, licenças da conta, chaves (ADR-0005, ADR-0006) ----------------
+firmware/
+sys_modules/
+licenses/
+*.rif
+*.idx
+*.rap
+*.act.dat
+*.key
+*.keys
+keys/
+*.pem
+*.p12
+
+# --- Código ou dados DERIVADOS do jogo ----------------------------------------
+generated/
+extracted/
+shaders_dump/
+*.spv.dump
+link.json
+patches.bin
+content.bin
+content-profile.json
+
+# --- Saves, capturas, traces --------------------------------------------------
+user/
+saves/
+savedata/
+*.sav
+*.state
+*.rdc
+*.rgp
+*.rmv
+*.trace
+*.pm4
+radv_dumps_*/
+
+# --- Dumps de memória e de processo -------------------------------------------
+dumps/
+*.dmp
+*.core
+# só arquivos de core na raiz/com sufixo numérico: "core" sozinho casaria com src/core/
+/core
+# ...e "/core" sozinho também pegaria uma PASTA core/ na raiz: reabilita só a pasta.
+!/core/
+core.[0-9]*
+*.raw
+*.ram
+vgcore.*
+
+# --- Caches -------------------------------------------------------------------
+shader_cache/
+pipeline_cache/
+*.pipeline_cache
+*.vkpc
+mesa_shader_cache/
+
