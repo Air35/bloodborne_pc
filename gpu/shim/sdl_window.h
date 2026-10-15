@@ -5,12 +5,11 @@
 #include <mutex>
 #include <string>
 #include "common/types.h"
+#include "video_driver.h" // sotc: WindowSystemType and the driver -> window system mapping
 
 struct SDL_Window;
 
 namespace Frontend {
-
-enum class WindowSystemType : u8 { Headless, Windows, X11, Wayland, Metal };
 
 struct WindowSystemInfo {
     void* display_connection = nullptr;

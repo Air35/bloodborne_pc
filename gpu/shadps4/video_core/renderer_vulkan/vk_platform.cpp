@@ -64,6 +64,18 @@ vk::SurfaceKHR CreateSurface(vk::Instance instance, const Frontend::WindowSDL& e
     const auto& window_info = emu_window.GetWindowInfo();
     vk::SurfaceKHR surface{};
 
+    // sotc: a windowless SDL driver (offscreen/dummy) presents to a headless surface, so the
+    // renderer runs with no compositor (docs/plans/2026-10-15-a3-gpu-headless.md).
+    if (window_info.type == Frontend::WindowSystemType::Headless) {
+        const vk::HeadlessSurfaceCreateInfoEXT headless_ci{};
+        if (instance.createHeadlessSurfaceEXT(&headless_ci, nullptr, &surface) !=
+            vk::Result::eSuccess) {
+            LOG_CRITICAL(Render_Vulkan, "Failed to initialize headless surface");
+            UNREACHABLE();
+        }
+        return surface;
+    }
+
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     if (window_info.type == Frontend::WindowSystemType::Windows) {
         const vk::Win32SurfaceCreateInfoKHR win32_ci = {
@@ -171,6 +183,8 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     switch (window_type) {
     case Frontend::WindowSystemType::Headless:
+        // sotc: asked for always; the sanitizing pass below drops it where it is not offered.
+        extensions.push_back(VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME);
         break;
 #if defined(VK_USE_PLATFORM_WIN32_KHR)
     case Frontend::WindowSystemType::Windows:

@@ -165,6 +165,10 @@ target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
+# sotc: which window system an SDL video driver maps to, headless included (ADR-0016, docs/05 §12).
+add_executable(video-driver-test EXCLUDE_FROM_ALL ../tests/test_video_driver.cpp)
+target_compile_options(video-driver-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(video-driver-test PRIVATE .)
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(motion-history-test PRIVATE ..)

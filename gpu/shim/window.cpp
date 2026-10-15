@@ -77,16 +77,17 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
-    if (driver && !std::strcmp(driver, "x11")) {
-        window_info.type = WindowSystemType::X11;
+    // sotc: the mapping lives in video_driver.h (tested); offscreen/dummy give a Headless window
+    // with no native handles (the surface is a VK_EXT_headless_surface).
+    if (!ClassifyVideoDriver(driver, window_info.type)) {
+        UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
+    }
+    if (window_info.type == WindowSystemType::X11) {
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
         window_info.render_surface = reinterpret_cast<void*>(SDL_GetNumberProperty(wp, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0));
-    } else if (driver && !std::strcmp(driver, "wayland")) {
-        window_info.type = WindowSystemType::Wayland;
+    } else if (window_info.type == WindowSystemType::Wayland) {
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
-    } else {
-        UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
