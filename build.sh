@@ -108,6 +108,10 @@ if [[ ${1:-} == --test ]]; then
     out/title-profile-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_cpu_check.c src/cpu_check.c -o out/cpu-check-test
     out/cpu-check-test
+    # isa_emulate runs inside guest code: no XMM/YMM (docs/10; the SSE4a operands arrive spilled).
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -c src/isa_emulate.c -o out/isa_emulate.o
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_emulate.c src/cpu_check.c out/isa_emulate.o -o out/isa-emulate-test
+    out/isa-emulate-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_fiber.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/fiber-test
     out/fiber-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/online-test

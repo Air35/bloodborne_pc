@@ -51,7 +51,7 @@ static const CpuSet fatal_sets[] = {
     {"SSE4.2", LEAF1, L1_SSE42, 0},
     {"POPCNT", LEAF1, L1_POPCNT, 0},
 };
-/* Display order of cpu_set_names is the order of this table (gow3's, with SSE4a at the end). */
+/* Display order of cpu_set_names is the order of this table (as gow3 91b6e61, SSE4a at the end). */
 static const CpuSet rewritable_sets[] = {
     {"MOVBE", LEAF1, L1_MOVBE, CPU_SET_MOVBE}, {"F16C", LEAF1, L1_F16C, CPU_SET_F16C},
     {"BMI1", LEAF7, L7_BMI1, CPU_SET_BMI1},    {"LZCNT", EXT1, E1_LZCNT, CPU_SET_LZCNT},
