@@ -12,6 +12,7 @@
 #include <sched.h>
 #include <setjmp.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
@@ -344,10 +345,15 @@ static ABI int32_t posix_set_sched(GuestThread *t,int policy,const int *param) {
 /* sotc: pthread_cancel (0D4-FVvEikw#libScePosix; 2 call sites in the SotC eboot, plan A2).
  * Guest threads have no cancellation points here (no host unwinder, see thread_exit), so the
  * request is only logged: the target behaves as a thread with cancellation disabled. A join
- * on it that never returns shows the gap in the log [a verificar: call sites in the eboot]. */
+ * on it that never returns shows the gap in the log [a verificar: call sites in the eboot].
+ * Line format of docs/05 §8.2 (no central logger in the fork yet; it moves there with the
+ * sotc rename, plan 2026-10-15-a3-revisao-lote4). */
 static ABI int32_t posix_cancel(GuestThread *t) {
     if (!find_thread(t)) return 3;
-    fprintf(stderr,"WARN L3/thread pthread_cancel on '%s' recorded, not acted on\n",t->name);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC,&now);
+    fprintf(stderr,"%.3f WARN  L3/thread pthread_cancel_ignored thread=%s\n",
+            (double)now.tv_sec*1e3+(double)now.tv_nsec/1e6,t->name);
     return 0;
 }
 

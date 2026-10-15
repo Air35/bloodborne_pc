@@ -9,11 +9,35 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "runtime.h"
 
 void runtime_restart(void) {
     abort();
+}
+
+/* stderr capture: capture_begin sends stderr to a temporary file; capture_end restores it and
+ * copies what was written into out (NUL-terminated). */
+typedef struct {
+    FILE* sink;
+    int saved;
+} Capture;
+static Capture capture_begin(void) {
+    Capture c = {tmpfile(), -1};
+    assert(c.sink);
+    fflush(stderr);
+    c.saved = dup(STDERR_FILENO);
+    assert(c.saved >= 0 && dup2(fileno(c.sink), STDERR_FILENO) >= 0);
+    return c;
+}
+static void capture_end(Capture c, char* out, size_t size) {
+    fflush(stderr);
+    assert(dup2(c.saved, STDERR_FILENO) >= 0 && !close(c.saved));
+    rewind(c.sink);
+    const size_t n = fread(out, 1, size - 1, c.sink);
+    out[n] = '\0';
+    fclose(c.sink);
 }
 
 static void* resolve(const char* name, const char* library) {
@@ -98,7 +122,18 @@ int main(void) {
     assert(set_sched(&junk, 3, &new_prio) == 3);
 
     Cancel cancel = (Cancel)resolve("pthread_cancel", "libScePosix");
-    assert(cancel && cancel(&junk) == 3 && cancel(self()) == 0); /* recorded, not acted on */
+    assert(cancel && cancel(&junk) == 3);
+    /* Recorded, not acted on; the line follows docs/05 §8.2: <ms> <LEVEL> <layer>/<comp> <event>
+     * key=value. */
+    char line[256];
+    double ms = -1;
+    char rest[200];
+    Capture capture = capture_begin();
+    const int32_t cancelled = cancel(self());
+    capture_end(capture, line, sizeof(line));
+    assert(cancelled == 0);
+    assert(sscanf(line, "%lf WARN  L3/thread pthread_cancel_ignored thread=%199s", &ms, rest) == 2);
+    assert(ms >= 0 && strchr(line, '\n') == line + strlen(line) - 1);
 
     /* Available memory: largest free aligned gap (shadPS4 b4e7ae7 core/memory.cpp:1235-1280). */
     AvailableDirect avail =
