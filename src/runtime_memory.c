@@ -385,6 +385,49 @@ static int direct_range_allocated(uint64_t phys, uint64_t size) {
 }
 
 static ABI uint64_t direct_size(void) { return POOL_SIZE; }
+/* sotc: sceKernelAvailableDirectMemorySize (C0f7TJcbfac#libkernel): the largest free gap of
+ * direct memory in [low, high) after aligning its start; ENOMEM if none. Contract from shadPS4
+ * b4e7ae7 core/memory.cpp:1235-1280 and kernel/memory.cpp:120-143 (consulted). Lock held. */
+static uint64_t free_gap_end(uint64_t at, uint64_t end, uint64_t *covered_end) {
+    uint64_t gap_end=end;
+    *covered_end=0;
+    for (int i=0; i<LIMIT; ++i) {
+        const Block b=blocks[i];
+        if (!b.used || b.start+b.size<=at) continue;
+        if (b.start<=at) { *covered_end=b.start+b.size; return at; }
+        if (b.start<gap_end) gap_end=b.start;
+    }
+    return gap_end;
+}
+static ABI int32_t direct_available(uint64_t low, uint64_t high, uint64_t alignment,
+                                    uint64_t *phys_out, uint64_t *size_out) {
+    if (!phys_out || !size_out) return INVALID;
+    if (!alignment) alignment=1;
+    const uint64_t end=high<POOL_SIZE ? high : POOL_SIZE;
+    uint64_t best_at=0, best_size=0;
+    read_lock();
+    for (uint64_t at=low; at<end;) {
+        uint64_t covered_end;
+        const uint64_t gap_end=free_gap_end(at,end,&covered_end);
+        if (covered_end) { at=covered_end; continue; }
+        const uint64_t start=align_up(at,alignment);
+        if (start<gap_end && gap_end-start>best_size) { best_at=start; best_size=gap_end-start; }
+        at=gap_end;
+    }
+    read_unlock();
+    if (!best_size) return NO_MEMORY;
+    *phys_out=best_at; *size_out=best_size;
+    return 0;
+}
+/* sotc: sceKernelAvailableFlexibleMemorySize (aNz11fnnzi4#libkernel): budget minus use
+ * (shadPS4 b4e7ae7 core/memory.h:186-188, consulted). */
+static ABI int32_t flexible_available(uint64_t *size_out) {
+    if (!size_out) return INVALID;
+    read_lock();
+    *size_out=FLEXIBLE_SIZE-flexible_bytes;
+    read_unlock();
+    return 0;
+}
 static ABI int32_t direct_allocate(int64_t low, int64_t high, uint64_t size,
                                   uint64_t alignment, int type, int64_t *out) {
     if (!alignment) alignment = PAGE;
@@ -649,6 +692,8 @@ static const RuntimeExport exports[]={
     {"sceKernelVirtualQuery",virtual_query}, {"sceKernelGetDirectMemoryType",direct_memory_type},
     {"sceKernelBatchMap",batch_map}, {"sceKernelBatchMap2",batch_map2},
     {"mmap",posix_mmap},
+    {"sceKernelAvailableDirectMemorySize",direct_available},
+    {"sceKernelAvailableFlexibleMemorySize",flexible_available},
 };
 uintptr_t runtime_memory_resolve(const char *name) {
     /* Direct-memory NIDs are exercised by test_runtime.c before names are loaded. */

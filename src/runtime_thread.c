@@ -321,6 +321,35 @@ static ABI int32_t posix_attr_set_param(ThreadAttr **a,const int *p) { return po
 static ABI int32_t posix_create(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg) { return posix(create(t,a,e,arg,"posix")); }
 static ABI int32_t posix_create_name(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg,const char *name) { return posix(create(t,a,e,arg,name)); }
 static ABI int32_t posix_join(GuestThread *t,void **r) { return posix(thread_join(t,r)); }
+/* sotc: pthread_{get,set}schedparam (FIs3-UQT9sg, Xs9hdiD7sAA#libScePosix), contract from
+ * shadPS4 b4e7ae7 kernel/threads/pthread.cpp:539-593 (consulted): the policy and priority are
+ * stored with the thread; the host scheduler is not changed (as the reference). FreeBSD
+ * policies: 1 FIFO, 2 OTHER, 3 RR. */
+static ABI int32_t posix_get_sched(GuestThread *t,int *policy,int *param) {
+    if (!policy || !param) return 22;
+    if (!find_thread(t)) return 3;
+    pthread_mutex_lock(&lock);
+    *policy=t->attr.policy; *param=t->attr.prio;
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
+static ABI int32_t posix_set_sched(GuestThread *t,int policy,const int *param) {
+    if (!param || policy<1 || policy>3) return 22;
+    if (!find_thread(t)) return 3;
+    pthread_mutex_lock(&lock);
+    t->attr.policy=policy; t->attr.prio=*param;
+    pthread_mutex_unlock(&lock);
+    return 0;
+}
+/* sotc: pthread_cancel (0D4-FVvEikw#libScePosix; 2 call sites in the SotC eboot, plan A2).
+ * Guest threads have no cancellation points here (no host unwinder, see thread_exit), so the
+ * request is only logged: the target behaves as a thread with cancellation disabled. A join
+ * on it that never returns shows the gap in the log [a verificar: call sites in the eboot]. */
+static ABI int32_t posix_cancel(GuestThread *t) {
+    if (!find_thread(t)) return 3;
+    fprintf(stderr,"WARN L3/thread pthread_cancel on '%s' recorded, not acted on\n",t->name);
+    return 0;
+}
 
 int32_t runtime_thread_spawn(void **out,void *(ABI *entry)(void *),void *argument,uint64_t stack,const char *name) {
     ThreadAttr *attr=NULL;
@@ -355,6 +384,8 @@ uintptr_t runtime_thread_resolve(const char *name) {
         {"euKRgm0Vn2M#libkernel",posix_attr_set_param}, {"OxhIB8LB-PQ#libkernel",posix_create},
         {"Jmi+9w9u0E4#libkernel",posix_create_name}, {"h9CcP3J0oVM#libkernel",posix_join},
         {"FJrT5LuUBAU#libkernel",thread_exit},
+        {"FIs3-UQT9sg#libkernel",posix_get_sched}, {"Xs9hdiD7sAA#libkernel",posix_set_sched},
+        {"0D4-FVvEikw#libkernel",posix_cancel},
     };
     for (size_t i=0;i<sizeof(table)/sizeof(*table);++i)
         if (!strcmp(name,table[i].nid)) return (uintptr_t)table[i].fn;
