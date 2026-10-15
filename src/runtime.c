@@ -260,6 +260,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (eventflag) return eventflag;
     uintptr_t sotc_kernel = runtime_sotc_kernel_resolve(name);
     if (sotc_kernel) return sotc_kernel;
+    uintptr_t fiber = runtime_fiber_resolve(name);
+    if (fiber) return fiber;
     uintptr_t services = runtime_services_resolve(name);
     if (services) return services;
     uintptr_t ajm = runtime_ajm_resolve(name);

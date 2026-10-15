@@ -63,6 +63,8 @@ uintptr_t runtime_kernel_resolve(const char *name);
 uintptr_t runtime_eventflag_resolve(const char *name);
 /* sotc: small libkernel/libScePosix functions the SotC imports (runtime_sotc_kernel.c). */
 uintptr_t runtime_sotc_kernel_resolve(const char *name);
+/* sotc: libSceFiber (runtime_fiber.c). */
+uintptr_t runtime_fiber_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* Online play (runtime_net.c, BB_ONLINE=1): the online module answers the network and PSN imports. */
