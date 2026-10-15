@@ -64,7 +64,9 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+/* sotc: `blocks` remembers the size asked at mount, for sceSaveDataGetMountInfo (docs/plans/
+ * 2026-10-15-a3-hle-lote5.md). */
+static struct { int used; char host[700], meta[700]; uint64_t blocks; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -153,12 +155,16 @@ static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     initialized=0; return 0;
 }
-static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
+/* sotc: the request is one struct (the old signature would take a sixth parameter for `blocks`). */
+typedef struct { int32_t user; const char *title; const DirName *dir; uint32_t mode; uint64_t blocks; } MountRequest;
+static int32_t mount(const MountRequest *rq, MountResult *result) {
+    const DirName *dir=rq->dir;
+    const uint32_t mode=rq->mode;
     if (!initialized) return ERR_NOT_INITIALIZED;
-    if (user<0) return ERR_INVALID_USER;
+    if (rq->user<0) return ERR_INVALID_USER;
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
     char base[600], host[640], meta[680];
-    root(user,title,base,sizeof(base));
+    root(rq->user,rq->title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir->data);
     struct stat st;
@@ -177,6 +183,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     slots[slot].used=1;
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
+    slots[slot].blocks=rq->blocks;
     memset(result,0,sizeof(*result));
     char point[32];
     snprintf(point,sizeof(point),"/savedata%d",slot&15);
@@ -191,11 +198,13 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,m->title ? m->title->data : NULL,m->dir,m->mode,result);
+    const MountRequest rq={m->user,m->title ? m->title->data : NULL,m->dir,m->mode,m->blocks};
+    return mount(&rq,result);
 }
 static ABI int32_t save_mount2(const Mount2 *m, MountResult *result) {
     if (!m) return ERR_PARAMETER;
-    return mount(m->user,NULL,m->dir,m->mode,result);
+    const MountRequest rq={m->user,NULL,m->dir,m->mode,m->blocks};
+    return mount(&rq,result);
 }
 static int slot_of(const MountPoint *point) {
     if (!point || strncmp(point->data,"/savedata",9)) return -1;
@@ -257,6 +266,204 @@ static ABI int32_t save_delete(const Delete *d) {
     nftw(host,remove_entry,16,FTW_DEPTH|FTW_PHYS);
     nftw(meta,remove_entry,16,FTW_DEPTH|FTW_PHYS);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
+    return 0;
+}
+/* --- sotc: backup of a save (docs/plans/2026-10-15-a3-hle-lote5.md) ---------------------------
+ * <base>/.<dir>.backup/data is a copy of the save directory and .../meta a copy of
+ * <dir>.sce_sys. The dot keeps backup and temporaries out of save_search (it skips dot names).
+ * Contract: shadPS4 b4e7ae7 save_data/savedata.cpp:587-640 (CheckBackupData), 1322-1360
+ * (RestoreBackupData), 1715-1718 (UmountWithBackup), 995-1017 (GetMountInfo), consulted. The
+ * on-disk layout is ours: the reference keeps it in a module that was not consulted. Each tree
+ * is built beside the old one and swapped in by rename, so a failure keeps the previous copy.
+ * Backups are synchronous: the game's wait-and-retry on 0x809F0013 (eboot+0xa49da7, 0xa48f82;
+ * BACKUP_BUSY by its behaviour [a verificar]) never has a reason to run. Deleting a save does
+ * not delete its backup [a verificar: console behaviour]. */
+enum { TREE_DEPTH=8, SAVE_BLOCK_SIZE=32768 };
+typedef struct { void *buffer; uint64_t capacity, size; uint8_t reserved[32]; } IconOut;
+typedef struct { int32_t user; int32_t pad; const TitleId *title; const DirName *dir; Param *param;
+                 IconOut *icon; uint8_t reserved[32]; } CheckBackup;
+typedef struct { int32_t user; int32_t pad; const TitleId *title; const DirName *dir; const void *fingerprint;
+                 uint32_t unused; uint8_t reserved[32]; int32_t pad2; } RestoreBackup;
+typedef struct { uint64_t blocks, free_blocks; uint8_t reserved[32]; } MountInfo;
+typedef struct { char root[720], data[740], meta[740]; } BackupPaths;
+_Static_assert(sizeof(CheckBackup)==72 && sizeof(RestoreBackup)==72 && sizeof(MountInfo)==48,"backup layouts");
+
+static int is_dir(const char *path) {
+    struct stat st;
+    return !stat(path,&st) && S_ISDIR(st.st_mode);
+}
+static int copy_file(const char *from, const char *to) {
+    FILE *in=fopen(from,"rb"), *out=in ? fopen(to,"wb") : NULL;
+    int ok=in && out;
+    char buffer[16384];
+    for (size_t n; ok && (n=fread(buffer,1,sizeof(buffer),in))>0;) ok=fwrite(buffer,1,n,out)==n;
+    ok=ok && !ferror(in);
+    if (out) ok=!fflush(out) && !fsync(fileno(out)) && ok;
+    if (in) fclose(in);
+    if (out) ok=!fclose(out) && ok;
+    return ok ? 0 : -1;
+}
+/* Directories and regular files only (a symlink in a save is not followed or copied). */
+static int copy_tree(const char *from, const char *to, int depth) {
+    DIR *d=opendir(from);
+    if (!d) return -1;
+    int rc=mkdir(to,0755) && errno!=EEXIST ? -1 : 0;
+    for (struct dirent *e; !rc && (e=readdir(d));) {
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        char src[760], dst[760];
+        struct stat st;
+        if ((size_t)snprintf(src,sizeof(src),"%s/%s",from,e->d_name)>=sizeof(src) ||
+            (size_t)snprintf(dst,sizeof(dst),"%s/%s",to,e->d_name)>=sizeof(dst) || lstat(src,&st)) rc=-1;
+        else if (S_ISDIR(st.st_mode)) rc=depth<TREE_DEPTH ? copy_tree(src,dst,depth+1) : -1;
+        else if (S_ISREG(st.st_mode)) rc=copy_file(src,dst);
+    }
+    closedir(d);
+    return rc;
+}
+static uint64_t tree_bytes(const char *path, int depth) {
+    DIR *d=opendir(path);
+    if (!d) return 0;
+    uint64_t total=0;
+    for (struct dirent *e; (e=readdir(d));) {
+        char child[760];
+        struct stat st;
+        if (!strcmp(e->d_name,".") || !strcmp(e->d_name,"..")) continue;
+        if ((size_t)snprintf(child,sizeof(child),"%s/%s",path,e->d_name)>=sizeof(child) || lstat(child,&st)) continue;
+        if (S_ISREG(st.st_mode)) total+=(uint64_t)st.st_size;
+        else if (S_ISDIR(st.st_mode) && depth<TREE_DEPTH) total+=tree_bytes(child,depth+1);
+    }
+    closedir(d);
+    return total;
+}
+static void remove_tree(const char *path) {
+    nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS);
+}
+/* "<dir>/<name>" -> "<dir>/.<name><suffix>": a hidden sibling on the same filesystem. */
+static int hidden_sibling(const char *path, const char *suffix, char *out, size_t size) {
+    const char *slash=strrchr(path,'/');
+    if (!slash) return -1;
+    const int n=snprintf(out,size,"%.*s/.%s%s",(int)(slash-path),path,slash+1,suffix);
+    return n<0 || (size_t)n>=size ? -1 : 0;
+}
+/* Makes `to` a copy of `from`: built as a hidden sibling, then swapped in (the old one is moved
+ * aside first and put back if the final rename fails). */
+static int replace_tree(const char *from, const char *to) {
+    char fresh[780], old[780];
+    if (hidden_sibling(to,".new",fresh,sizeof(fresh)) || hidden_sibling(to,".old",old,sizeof(old))) return -1;
+    remove_tree(fresh);
+    remove_tree(old);
+    if (copy_tree(from,fresh,0)) { remove_tree(fresh); return -1; }
+    const int had=is_dir(to);
+    if (had && rename(to,old)) { remove_tree(fresh); return -1; }
+    if (rename(fresh,to)) {
+        if (had) rename(old,to);
+        remove_tree(fresh);
+        return -1;
+    }
+    remove_tree(old);
+    return 0;
+}
+static int backup_paths(const char *host, BackupPaths *b) {
+    if (hidden_sibling(host,".backup",b->root,sizeof(b->root))) return -1;
+    return (size_t)snprintf(b->data,sizeof(b->data),"%s/data",b->root)>=sizeof(b->data) ||
+           (size_t)snprintf(b->meta,sizeof(b->meta),"%s/meta",b->root)>=sizeof(b->meta) ? -1 : 0;
+}
+static int make_backup(const char *host, const char *meta) {
+    BackupPaths b;
+    if (backup_paths(host,&b) || (mkdir(b.root,0755) && errno!=EEXIST)) return -1;
+    if (replace_tree(host,b.data)) return -1;
+    return is_dir(meta) && replace_tree(meta,b.meta) ? -1 : 0;
+}
+static ABI int32_t save_umount_with_backup(const MountPoint *point) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    char host[700], meta[700];
+    pthread_mutex_lock(&lock); /* held over the copy: a new mount of this save waits for it */
+    const int slot=slot_of(point);
+    if (slot>=0) {
+        snprintf(host,sizeof(host),"%s",slots[slot].host);
+        snprintf(meta,sizeof(meta),"%s",slots[slot].meta);
+        runtime_file_unmount(point->data);
+        slots[slot].used=0;
+    }
+    const int rc=slot>=0 ? make_backup(host,meta) : 0;
+    pthread_mutex_unlock(&lock);
+    if (slot<0) return ERR_NOT_FOUND;
+    return rc ? ERR_INTERNAL : 0;
+}
+/* Resolves the save of `user`/`title`/`dir` and its backup paths; the save must not be mounted
+ * (the reference answers BUSY; its value was not in the consulted text, so ERR_BAD_MOUNTED).
+ * Called with `lock` held. */
+static int32_t backup_lookup(int32_t user, const char *title, const DirName *dir, char *host,
+                             size_t size, BackupPaths *b) {
+    if (!dir || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
+    if (user<0) return ERR_INVALID_USER;
+    char base[600];
+    root(user,title,base,sizeof(base));
+    if ((size_t)snprintf(host,size,"%s/%s",base,dir->data)>=size || backup_paths(host,b)) return ERR_PARAMETER;
+    for (int i=0;i<SLOTS;++i) if (slots[i].used && !strcmp(slots[i].host,host)) return ERR_BAD_MOUNTED;
+    return is_dir(b->data) ? 0 : ERR_NOT_FOUND;
+}
+/* The icon the caller asked for: as much of the backup's icon0.png as fits its buffer. */
+static void load_backup_icon(const char *meta, IconOut *icon) {
+    char path[780];
+    if (!icon || !icon->buffer) return;
+    icon->size=0;
+    if ((size_t)snprintf(path,sizeof(path),"%s/icon0.png",meta)>=sizeof(path)) return;
+    FILE *f=fopen(path,"rb");
+    if (!f) return;
+    icon->size=fread(icon->buffer,1,icon->capacity,f);
+    fclose(f);
+}
+static ABI int32_t save_check_backup(const CheckBackup *check) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!check || !check->dir) return ERR_PARAMETER;
+    char host[700];
+    BackupPaths b;
+    pthread_mutex_lock(&lock);
+    int32_t r=backup_lookup(check->user,check->title ? check->title->data : NULL,check->dir,host,sizeof(host),&b);
+    if (!r && check->param && read_param(b.meta,check->param)) r=ERR_INTERNAL;
+    if (!r) load_backup_icon(b.meta,check->icon);
+    pthread_mutex_unlock(&lock);
+    return r;
+}
+static int restore_trees(const char *host, const BackupPaths *b) {
+    char meta[780];
+    if (replace_tree(b->data,host)) return -1;
+    if (!is_dir(b->meta)) return 0;
+    if ((size_t)snprintf(meta,sizeof(meta),"%s.sce_sys",host)>=sizeof(meta)) return -1;
+    return replace_tree(b->meta,meta);
+}
+static ABI int32_t save_restore_backup(const RestoreBackup *restore) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!restore || !restore->dir) return ERR_PARAMETER;
+    char host[700];
+    BackupPaths b;
+    pthread_mutex_lock(&lock);
+    int32_t r=backup_lookup(restore->user,restore->title ? restore->title->data : NULL,restore->dir,host,sizeof(host),&b);
+    if (!r && restore_trees(host,&b)) r=ERR_INTERNAL;
+    pthread_mutex_unlock(&lock);
+    if (!r) printf("Runtime: save data '%s' restored from its backup\n",restore->dir->data);
+    return r;
+}
+/* Total blocks as asked at mount; free = total - used / block size, as the reference. The SotC
+ * reads `blocks` << 15 (eboot+0xa4aa98..0xa4aa9c); what it does with that is [a verificar]. */
+static ABI int32_t save_mount_info(const MountPoint *point, MountInfo *info) {
+    if (!initialized) return ERR_NOT_INITIALIZED;
+    if (!point || !info) return ERR_PARAMETER;
+    char host[700];
+    uint64_t blocks=0;
+    pthread_mutex_lock(&lock);
+    const int slot=slot_of(point);
+    if (slot>=0) {
+        snprintf(host,sizeof(host),"%s",slots[slot].host);
+        blocks=slots[slot].blocks;
+    }
+    pthread_mutex_unlock(&lock);
+    if (slot<0) return ERR_NOT_MOUNTED;
+    const uint64_t used=tree_bytes(host,0)/SAVE_BLOCK_SIZE;
+    memset(info,0,sizeof(*info));
+    info->blocks=blocks;
+    info->free_blocks=blocks>used ? blocks-used : 0;
     return 0;
 }
 /* SQL-LIKE pattern: % any run, _ one character. */
@@ -354,6 +561,8 @@ static const RuntimeExport exports[]={
     {"sceSaveDataMount",save_mount}, {"sceSaveDataMount2",save_mount2}, {"sceSaveDataUmount",save_umount},
     {"sceSaveDataSetParam",save_set_param}, {"sceSaveDataSaveIcon",save_icon}, {"sceSaveDataDelete",save_delete},
     {"sceSaveDataDirNameSearch",save_search},
+    {"sceSaveDataUmountWithBackup",save_umount_with_backup}, {"sceSaveDataCheckBackupData",save_check_backup},
+    {"sceSaveDataRestoreBackupData",save_restore_backup}, {"sceSaveDataGetMountInfo",save_mount_info},
     {"sceSaveDataSetupSaveDataMemory",memory_setup}, {"sceSaveDataGetSaveDataMemory",memory_get},
     {"sceSaveDataSetSaveDataMemory",memory_set},
 };
