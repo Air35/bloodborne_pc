@@ -106,6 +106,8 @@ if [[ ${1:-} == --test ]]; then
     out/savedata-backup-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_title_profile.c "${runtime[@]}" "${titles[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/title-profile-test
     out/title-profile-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_cpu_check.c src/cpu_check.c -o out/cpu-check-test
+    out/cpu-check-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_fiber.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/fiber-test
     out/fiber-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/online-test
