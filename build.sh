@@ -112,6 +112,8 @@ if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -c src/isa_emulate.c -o out/isa_emulate.o
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_emulate.c src/cpu_check.c out/isa_emulate.o -o out/isa-emulate-test
     out/isa-emulate-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_rewrite.c src/isa_rewrite.c src/cpu_check.c out/isa_emulate.o -o out/isa-rewrite-test
+    out/isa-rewrite-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_fiber.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/fiber-test
     out/fiber-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/online-test
