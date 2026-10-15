@@ -127,6 +127,9 @@ static ABI int32_t netctl_nat(uint32_t *info) {
 }
 static ABI int32_t lib_init_id(void) { return new_id(); }
 static ABI int32_t ok_void(void) { return 0; }
+/* sotc: OrbisSystemServiceDisplaySafeAreaInfo starts with the ratio; the whole screen is safe
+ * (gow3 91b6e61 src/runtime_services.c, safe_area). */
+static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; *info=1.0f; return 0; }
 static ABI int32_t http_fail(void) { return HTTP_NETWORK; }
 /* Objects are created so setup code proceeds; any transfer fails as unplugged. */
 static ABI int32_t http_object(void) { return new_id(); }
@@ -274,6 +277,8 @@ static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint6
     *ctx=new_id(); return 0;
 }
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
+/* sotc: ids come from new_id() (>0); gow3 91b6e61 src/runtime_services.c:461 (trophy_release). */
+static ABI int32_t trophy_release(int32_t id) { return id>0 ? 0 : TROPHY_INVALID; }
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
@@ -335,6 +340,15 @@ static ABI int32_t playgo_speed(int32_t handle,int32_t speed) { (void)speed; ret
 #define DISC_MAP_NO_BITMAP ((int32_t)0x81100004)
 static ABI int32_t discmap_on_hdd(const char *path,int64_t offset,int64_t size,int32_t *result) {
     (void)path; (void)offset; (void)size; (void)result; return DISC_MAP_NO_BITMAP;
+}
+/* sotc: fJgP+wqifno (SDK name unknown; shadPS4 b4e7ae7 disc_map.cpp:20-26 Func_7C980FFB0AA27E7A):
+ * imported by the SotC's libSceFios2.prx; reports no HDD placement data, successfully. */
+static ABI int32_t discmap_7c98(const char *path,int64_t offset,int64_t size,int32_t *flags,int32_t *r1,int32_t *r2) {
+    (void)path; (void)offset; (void)size;
+    if (flags) *flags=0;
+    if (r1) *r1=0;
+    if (r2) *r2=0;
+    return 0;
 }
 static ABI int32_t discmap_8a82(const char *path,int64_t offset,int64_t size,int32_t *flags,int32_t *r1,int32_t *r2) {
     (void)path; (void)offset; (void)size; (void)flags; (void)r1; (void)r2; return DISC_MAP_NO_BITMAP;
@@ -465,6 +479,14 @@ static const RuntimeExport exports[]={
     {"sceMouseInit",ok_void}, {"sceMouseOpen",mouse_open}, {"sceMouseRead",mouse_read}, {"sceMouseClose",mouse_close},
     {"sceAudioInOpen",audio_in_open},
     {"sceDiscMapIsRequestOnHDD",discmap_on_hdd}, {"sceDiscMap_8A828CAEE7EDD5E9",discmap_8a82},
+    {"sceDiscMap_7C980FFB0AA27E7A",discmap_7c98}, /* sotc */
+    /* sotc: imported by Shadow of the Colossus (--check-imports, plan A3 lote 2). */
+    {"sceNpTrophyDestroyContext",trophy_release}, {"sceNpTrophyDestroyHandle",trophy_release},
+    {"sceSystemServiceGetDisplaySafeAreaInfo",safe_area},
+    {"sceScreenShotEnable",ok_void}, {"sceScreenShotDisable",ok_void},
+    {"sceVideoRecordingSetInfo",ok_void}, {"sceGameLiveStreamingEnableLiveStreaming",ok_void},
+    {"sceNetCtlInit",ok_void}, {"sceNetCtlTerm",ok_void},
+    {"sceHttpGetAllResponseHeaders",http_fail}, {"sceNetGetSockInfo",net_unreachable},
     {"sceVoiceInit",ok_void}, {"sceVoiceEnd",ok_void},
 };
 uintptr_t runtime_services_resolve(const char *name) {

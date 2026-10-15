@@ -748,3 +748,4 @@
 {"ZT4ODD2Ts9o#libSceLibcInternal","Need_sceLibcInternal"},
 {"lbQKqsERhtE#libSceDiscMap","sceDiscMapIsRequestOnHDD"},
 {"ioKMruft1ek#libSceDiscMap","sceDiscMap_8A828CAEE7EDD5E9"},
+{"fJgP+wqifno#libSceDiscMap","sceDiscMap_7C980FFB0AA27E7A"},

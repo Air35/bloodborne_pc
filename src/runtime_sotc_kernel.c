@@ -7,6 +7,8 @@
  * pthread.cpp:479-491 (sched_get_priority_*), kernel.cpp:169-185 (UUID). */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -62,11 +64,69 @@ static ABI int32_t thread_id(void) {
     return (int32_t)gettid();
 }
 
+/* Module records and C++ unwinding support, from gow3 91b6e61 src/runtime_kernel.c:167-183
+ * (docs/auditorias/2026-10-14-gow3-pecas-a1-91b6e611d282.md). The runtime keeps no module
+ * records; the game does not throw C++ exceptions (the SotC eboot imports no __cxa_throw nor
+ * _Unwind_*, docs/plans/2026-10-14-a3-hle-lote2.md), so unwinding finds no frame data and
+ * resuming a context is a stop, never a silent success. */
+static ABI int32_t module_info_from_addr(uint64_t address, int32_t flags, void* info) {
+    (void)address;
+    if (flags >= 3)
+        return (int32_t)UINT32_C(0x80020016); /* EINVAL */
+    if (!info)
+        return (int32_t)UINT32_C(0x8002000e); /* EFAULT */
+    return (int32_t)UINT32_C(0x80020003);     /* ESRCH */
+}
+static ABI int32_t kernel_mlock(const void* address, uint64_t size) {
+    (void)address;
+    (void)size;
+    return 0;
+}
+static ABI int32_t elf_phdr_match_addr(void* info, uint64_t address) {
+    (void)info;
+    (void)address;
+    return 0;
+}
+static ABI int32_t is_signal_return(uint64_t pc) {
+    (void)pc;
+    return 0;
+}
+static ABI void pthread_cxa_finalize(void* dso) {
+    (void)dso;
+}
+static ABI __attribute__((noreturn)) void unwind_resume(void) {
+    fputs("STOP: guest C++ exception unwinding (sigreturn) is not supported\n", stderr);
+    runtime_report();
+    exit(23);
+}
+/* Host memory is never paged out by the runtime: syncing a mapping has nothing to do. */
+static ABI int32_t posix_msync(void* address, uint64_t size, int flags) {
+    (void)address;
+    (void)size;
+    (void)flags;
+    return 0;
+}
+static ABI int32_t address_sanitizer_enabled(void) {
+    return 0;
+} /* retail build */
+
 static const RuntimeExport exports[] = {
-    {"sceKernelIsNeoMode", is_neo_mode},      {"sceKernelUuidCreate", uuid_create},
-    {"sceKernelSleep", kernel_sleep},         {"sched_get_priority_max", priority_max},
-    {"sched_get_priority_min", priority_min}, {"scePthreadGetthreadid", thread_id},
+    {"sceKernelIsNeoMode", is_neo_mode},
+    {"sceKernelUuidCreate", uuid_create},
+    {"sceKernelSleep", kernel_sleep},
+    {"sched_get_priority_max", priority_max},
+    {"sched_get_priority_min", priority_min},
+    {"scePthreadGetthreadid", thread_id},
     {"pthread_getthreadid_np", thread_id},
+    {"sceKernelGetModuleInfoFromAddr", module_info_from_addr},
+    {"sceKernelGetModuleInfoForUnwind", module_info_from_addr},
+    {"sceKernelMlock", kernel_mlock},
+    {"__elf_phdr_match_addr", elf_phdr_match_addr},
+    {"_is_signal_return", is_signal_return},
+    {"__pthread_cxa_finalize", pthread_cxa_finalize},
+    {"sigreturn", unwind_resume},
+    {"msync", posix_msync},
+    {"sceKernelIsAddressSanitizerEnabled", address_sanitizer_enabled},
 };
 
 uintptr_t runtime_sotc_kernel_resolve(const char* name) {
