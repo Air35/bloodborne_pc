@@ -228,7 +228,17 @@ if [[ ${BB_ONLINE:-0} == 1 && -f scripts/online.py ]]; then
     SHADPS4_HTTP_HOST_OVERRIDES_JSON=$("$PYTHON" scripts/online.py overrides --user "${BB_USER_DIR:-$data/user}") || true
     export SHADPS4_HTTP_HOST_OVERRIDES_JSON
 fi
-probe_args=("$out/boot-linked.bin" --content-profile "$out/content.bin" --patches "$out/patches.bin" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "$@")
+# sotc: ISA rewrite (docs/10, ADR-0010). When this CPU lacks sets the game's code uses (MOVBE,
+# BMI1, LZCNT, SSE4a), the table that rewrites them is generated from the linked image (reused
+# while the image is the same); SOTC_ISA_MODE chooses the policy. A fatal missing set or
+# SOTC_ISA_MODE=native is reported by the probe itself, with exit code 20.
+isa_args=()
+isa_plan=$("$probe" --cpu-features 2>/dev/null || true)
+if [[ $isa_plan == *'ISA: rewrite='* && $isa_plan != *'ISA: rewrite=none'* && ${BB_SKIP_CPU_CHECK:-} != 1 ]]; then
+    "$PYTHON" scripts/isa_rewrite.py "$out/boot-linked.bin" --out "$out"
+    isa_args=(--isa-rewrite "$out/isa-rewrite.bin")
+fi
+probe_args=("$out/boot-linked.bin" --content-profile "$out/content.bin" --patches "$out/patches.bin" --app0 "$game" --user "${BB_USER_DIR:-$data/user}" --timeout "${BB_TIMEOUT:-0}" "${isa_args[@]}" "$@")
 if [[ -n ${mod_game:-} ]]; then
     "$probe" "${probe_args[@]}" &
     mod_pid=$!

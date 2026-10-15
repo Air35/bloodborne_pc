@@ -48,11 +48,50 @@ class LoaderTests(unittest.TestCase):
                     self.assertIn('content profile',r.stderr)
 
     def run_image(self, data, *options):
+        # sotc: these tests are about the loader, not about the CPU: independent of the host's
+        # instruction sets (a host that lacks some would stop with STOP/20, docs/10 §3).
+        env = dict(os.environ, BB_SKIP_CPU_CHECK='1')
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'boot.bin'
             path.write_bytes(data)
             return subprocess.run([str(EXE.resolve()), str(path), '--cpu-only', *options],
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5, env=env)
+
+    def cpu_features(self, mode=None):
+        env = {k: v for k, v in os.environ.items() if k not in ('BB_SKIP_CPU_CHECK', 'SOTC_ISA_MODE')}
+        if mode is not None:
+            env['SOTC_ISA_MODE'] = mode
+        return subprocess.run([str(EXE.resolve()), '--cpu-features'], capture_output=True, text=True,
+                              timeout=5, env=env)
+
+    def test_cpu_features_reports_the_plan_or_stops(self):
+        # sotc: docs/10 §3. A host with a fatal set missing answers STOP/20; otherwise CPU + ISA lines.
+        r = self.cpu_features()
+        self.assertIn(r.returncode, (0, 20), r.stdout + r.stderr)
+        if r.returncode == 0:
+            self.assertRegex(r.stdout, r'CPU: (complete|missing .+)\nISA: rewrite=.+\n')
+        else:
+            self.assertIn('STOP:', r.stdout)
+
+    def test_isa_mode_is_validated_never_silently_auto(self):
+        r = self.cpu_features('bogus')
+        if 'STOP: this CPU lacks instruction sets' not in r.stdout:    # a fatal set missing stops first
+            self.assertEqual(r.returncode, 20, r.stdout)
+            self.assertIn('SOTC_ISA_MODE=bogus', r.stdout)
+
+    def test_rewrite_mode_names_every_rewritable_set(self):
+        r = self.cpu_features('rewrite')
+        if r.returncode == 0:
+            self.assertIn('ISA: rewrite=MOVBE, F16C, BMI1, LZCNT, SSE4a', r.stdout)
+
+    def test_native_mode_stops_when_something_is_missing(self):
+        plan = self.cpu_features()
+        r = self.cpu_features('native')
+        if plan.returncode == 0 and 'CPU: missing' in plan.stdout:
+            self.assertEqual(r.returncode, 20, r.stdout)
+            self.assertIn('does not rewrite', r.stdout)
+        elif plan.returncode == 0:
+            self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_original_instruction_reaches_named_import(self):
         # jmp [rip+2]; two padding bytes; relocated function pointer at +8

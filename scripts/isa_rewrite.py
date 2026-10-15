@@ -541,9 +541,25 @@ def summary(sites, flags=0):
     return text
 
 
+def table_matches(path, image):
+    """True when the table at path was generated from exactly this image (it is then reused:
+    the scan takes about a minute for the game and run.sh builds the image on every launch)."""
+    try:
+        head = Path(path).read_bytes()[:HEADER.size]
+    except OSError:
+        return False
+    if len(head) < HEADER.size:
+        return False
+    magic, size, digest = HEADER.unpack(head)[:3]
+    return magic == MAGIC and size == len(image) and digest == hashlib.sha256(image).digest()
+
+
 def generate(boot, out, ranges_path=None, objdump='objdump'):
-    """Scan the executable segments of boot (a BBPROBE5 file) and write <out>/isa-rewrite.bin."""
+    """Scan the executable segments of boot (a BBPROBE5 file) and write <out>/isa-rewrite.bin.
+    Returns (sites, flags), or (None, 0) when an existing table already matches the image."""
     segments, image = read_boot_linked(Path(boot).read_bytes())
+    if table_matches(Path(out, 'isa-rewrite.bin'), image):
+        return None, 0
     modules = None
     if ranges_path and Path(ranges_path).exists():
         modules = json.loads(Path(ranges_path).read_text(encoding='utf-8')).get('modules')
@@ -573,7 +589,7 @@ def main(argv):
     except (OSError, ValueError, RuntimeError) as error:
         print(f'ISA: rewrite table unavailable ({error})')
         return 1
-    print(summary(sites, flags))
+    print('ISA: rewrite table reused (same image)' if sites is None else summary(sites, flags))
     return 0
 
 

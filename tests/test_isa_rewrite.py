@@ -331,6 +331,22 @@ class TableTests(unittest.TestCase):
         self.assertIn('2 unsupported', text)
         self.assertIn('linear scan', text)
 
+    def test_existing_table_is_reused_only_for_the_same_image(self):
+        code, stream = assemble()
+        image = bytes(BASE) + code
+        data = rw.encode_table(image, rw.scan_instructions(stream, code, BASE, FUNCTIONS))
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / 'isa-rewrite.bin'
+            self.assertFalse(rw.table_matches(path, image))              # no file yet
+            path.write_bytes(data)
+            self.assertTrue(rw.table_matches(path, image))
+            self.assertFalse(rw.table_matches(path, image + b'\0'))      # different size
+            self.assertFalse(rw.table_matches(path, image[:-1] + b'\xff'))   # same size, other bytes
+            path.write_bytes(data[:30])
+            self.assertFalse(rw.table_matches(path, image))              # truncated
+            path.write_bytes(b'X' + data[1:])
+            self.assertFalse(rw.table_matches(path, image))              # not an ISATAB1 file
+
     def test_boot_linked_reader_rejects_other_formats(self):
         with self.assertRaises(ValueError):
             rw.read_boot_linked(b'BBPROBE2' + bytes(100))

@@ -7,6 +7,8 @@
 #include <inttypes.h>
 #include <cpuid.h>
 #include "runtime.h"
+#include "cpu_check.h"
+#include "isa_rewrite.h"
 #include "title_profile.h"
 #include "gpu/bbgpu.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
@@ -43,10 +45,6 @@ int vulkan_smoke(void);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 
-/* The game's code was compiled for the PS4's CPU (AMD Jaguar) and runs as it is: AVX, BMI1
- * (andn/bextr/blsr/tzcnt), MOVBE, LZCNT and POPCNT, thousands of each in eboot.bin. A CPU without
- * them stops at the first one with SIGILL (exit code 132, issue #26), and lzcnt/tzcnt even run as
- * bsr/bsf there, with other results. Said before the game starts; BB_SKIP_CPU_CHECK=1 skips it. */
 /* sotc: imports the GPU library serves (registered by bbgpu_init); names are NID#library. */
 static int gpu_library_import(const char *name) {
     static const char *const libraries[]={"#libSceGnmDriver","#libSceVideoOut"};
@@ -57,36 +55,39 @@ static int gpu_library_import(const char *name) {
     }
     return 0;
 }
-static void check_cpu(void) {
+/* sotc: the game's code was compiled for the PS4's CPU (AMD Jaguar) and runs as it is: AVX, BMI1
+ * (andn/bextr/blsr/tzcnt), MOVBE, LZCNT and POPCNT, thousands of each in eboot.bin, and SSE4a in
+ * a few functions. A CPU without one stops at the first with SIGILL, and lzcnt/tzcnt even run as
+ * bsr/bsf there, with other results. cpu_check.c classifies the host by CPUID bit; the sets it
+ * lacks are rewritten by isa_rewrite.c from a table (SOTC_ISA_MODE, docs/10, ADR-0010). Said
+ * before the game starts; BB_SKIP_CPU_CHECK=1 skips all of it (tests on hosts that lack sets).
+ * Sets isa_missing/isa_sets; returns 0, or 20 after a STOP line. */
+static unsigned isa_missing, isa_sets;
+static char isa_missing_names[96], isa_sets_names[96];
+static IsaTable *isa_table;
+static int cpu_setup(void) {
     const char *skip = getenv("BB_SKIP_CPU_CHECK");
-    if (skip && !strcmp(skip, "1")) return;
-    unsigned a, b, c, d, leaf1_c = 0, leaf7_b = 0, ext1_c = 0;
-    if (__get_cpuid(1, &a, &b, &c, &d)) leaf1_c = c;
-    if (__get_cpuid_count(7, 0, &a, &b, &c, &d)) leaf7_b = b;
-    if (__get_cpuid(0x80000001u, &a, &b, &c, &d)) ext1_c = c;
-    int avx = (leaf1_c & bit_AVX) && (leaf1_c & bit_OSXSAVE);
-    if (avx) {
-        unsigned lo, hi;
-        __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
-        avx = (lo & 6) == 6; /* the OS saves SSE and AVX state */
+    if (skip && !strcmp(skip, "1")) return 0;
+    const CpuFeatureWords words = cpu_feature_words();
+    char fatal[96];
+    if (cpu_missing_fatal(words, fatal, sizeof fatal)) {
+        printf("STOP: this CPU lacks instruction sets the game's code uses and no rewrite can supply: %s "
+               "(an Intel Sandy Bridge 2011 or newer with AVX, or an AMD with AVX, is needed)\n", fatal);
+        return 20;
     }
-    const struct { int present; const char *name; } features[] = {
-        {avx, "AVX"}, {(leaf7_b & bit_BMI) != 0, "BMI1"}, {(leaf1_c & bit_MOVBE) != 0, "MOVBE"},
-        {(ext1_c & bit_LZCNT) != 0, "LZCNT"}, {(leaf1_c & bit_POPCNT) != 0, "POPCNT"},
-        {(leaf1_c & bit_SSE4_2) != 0, "SSE4.2"},
-    };
-    char missing[64] = "";
-    for (unsigned i = 0; i < sizeof(features) / sizeof(features[0]); ++i) {
-        if (features[i].present) continue;
-        if (missing[0]) strcat(missing, ", ");
-        strcat(missing, features[i].name);
+    isa_missing = cpu_missing_rewritable(words, isa_missing_names, sizeof isa_missing_names);
+    IsaPolicy policy;
+    const char *text = getenv("SOTC_ISA_MODE");
+    if (isa_policy_parse(text, &policy)) {
+        printf("STOP: SOTC_ISA_MODE=%s is not auto, native, rewrite or rewrite:<list of movbe,bmi1,lzcnt,f16c,sse4a>\n", text);
+        return 20;
     }
-    if (!missing[0]) return;
-    fprintf(stderr,
-            "ERROR: this CPU lacks %s. The game's code was compiled for the PS4's CPU and uses "
-            "these instructions directly: it needs an Intel Haswell (4th generation Core, 2013) or "
-            "newer, or an AMD Ryzen. BB_SKIP_CPU_CHECK=1 starts anyway.\n", missing);
-    exit(1);
+    if (isa_policy_resolve(&policy, isa_missing, &isa_sets)) {
+        printf("STOP: this CPU lacks %s and SOTC_ISA_MODE=native does not rewrite them\n", isa_missing_names);
+        return 20;
+    }
+    cpu_set_names(isa_sets, isa_sets_names, sizeof isa_sets_names);
+    return 0;
 }
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
@@ -150,6 +151,8 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
 #ifndef _WIN32
 static void fault(int sig, siginfo_t *info, void *context) {
+    /* sotc: an int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
+    if (sig == SIGTRAP && isa_table && isa_rewrite_handle_sigtrap(isa_table, context)) return;
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
@@ -167,7 +170,13 @@ static void fault(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
     Dl_info where;
-    if (rip - (uintptr_t)image < 0x10000000)
+    /* sotc: inside the stub of a rewritten site, the emulation of that instruction faulted. */
+    const int isa_site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
+    if (isa_site >= 0)
+        snprintf(line, sizeof(line), "Guest fault (signal %d) while emulating ISA site 0x%llx (%s), address %p\n",
+                 sig, (unsigned long long)isa_table->sites[isa_site].offset,
+                 isa_kind_name(isa_table->sites[isa_site].kind), info->si_addr);
+    else if (rip - (uintptr_t)image < 0x10000000)
         snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p\n",
                  sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr);
     else if (dladdr((void *)rip, &where) && where.dli_fname)
@@ -208,6 +217,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+    if (isa_table) { isa_rewrite_report(isa_table, stderr); fflush(stderr); } /* sotc: hot ISA sites */
     _exit(128 + sig);
 }
 #endif
@@ -349,9 +359,17 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+    if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {
+        /* sotc: what check-env and run.sh ask before building a table (docs/10 §7). */
+        const int rc = cpu_setup();
+        if (rc) return rc;
+        printf(isa_missing ? "CPU: missing %s\n" : "CPU: complete\n", isa_missing_names);
+        printf("ISA: rewrite=%s\n", isa_sets ? isa_sets_names : "none");
+        return 0;
+    }
     int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
@@ -360,6 +378,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--isa-rewrite") && i+1<argc) isa_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
@@ -367,7 +386,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
         return 1;
     }
-    if (!check_imports) check_cpu(); /* sotc: --check-imports runs no guest code */
+    if (!check_imports) { /* sotc: --check-imports runs no guest code */
+        const int rc = cpu_setup();
+        if (rc) return rc;
+    }
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
         unsigned char data[28];
@@ -403,6 +425,7 @@ int main(int argc, char **argv) {
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL); /* sotc: int3 ISA sites */
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
@@ -509,9 +532,23 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-    image = allocate(round_page(size));
+    /* sotc: the stubs of the ISA rewrite follow the image in the same low mapping (rel32 jmps reach). */
+    if (isa_sets) {
+        isa_table = isa_file ? isa_table_load(isa_file) : NULL;
+        if (!isa_table) {
+            printf("STOP: this CPU needs %s rewritten and no valid rewrite table was given (--isa-rewrite)\n", isa_sets_names);
+            return 20;
+        }
+    }
+    const size_t stub_area = isa_table ? round_page(isa_stub_area_size(isa_table)) : 0;
+    image = allocate(round_page(size) + stub_area);
+    unsigned char *stubs = image + round_page(size);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    if (isa_table && isa_table_matches(isa_table, image, size)) {
+        printf("STOP: this CPU needs %s rewritten and the rewrite table does not match this image\n", isa_sets_names);
+        return 20;
+    }
     if (!cpu_only) {
         char title[128]="PS4 game", serial[16]="UNKNOWN", sfo[4096]; /* sotc: neutral fallback (ADR-0016) */
         uint32_t attributes=0;
@@ -580,6 +617,19 @@ int main(int argc, char **argv) {
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (!cpu_only) bbgpu_patch_image(image, size);
+    if (isa_table) { /* sotc: after the patches (a patched site is skipped), before the pages are protected */
+        const IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
+        if (r.unsupported_needed) {
+            printf("STOP: this CPU needs %s rewritten and %u sites use encodings the rewrite cannot emulate\n",
+                   isa_sets_names, r.unsupported_needed);
+            fflush(NULL);
+            _exit(20); /* no destructors: GPU threads are running */
+        }
+        printf("ISA: rewriting %s%s%s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
+               isa_sets_names, isa_missing ? "; CPU lacks " : "; forced by SOTC_ISA_MODE", isa_missing_names,
+               r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        protect(stubs, stub_area, 5);
+    }
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
