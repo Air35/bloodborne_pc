@@ -22,6 +22,15 @@ DEFAULT_MODULES = ('libc.prx', 'libSceFios2.prx')
 FS_LOAD = bytes.fromhex('64488b042500000000')  # mov rax, fs:[0]
 
 
+def canonical(identity, fallback=None):
+    """NID#library for an import identity (NID, (library, version), module).
+
+    sotc: from gow3 91b6e61 scripts/link_modules.py:25-27: host tables key imports as
+    NID#library, the same for every game (the eboot's own letters differ per game).
+    """
+    return f'{identity[0]}#{identity[1][0]}' if identity else fallback
+
+
 def module(path):
     source = path.read_bytes()
     elf, header, ph, _, missing = parse_self(source)
@@ -107,19 +116,13 @@ def link(game, out, module_names=DEFAULT_MODULES):
         raise ValueError('unexpected boot trailer')
 
     identities = {main['identity'](name): i for i, name in enumerate(names)}
-    main_libraries = {identity: key for key, identity in main['libraries'].items()}
-    main_modules = {identity: key for key, identity in main['modules'].items()}
+    names = [canonical(main['identity'](name), name) for name in names]
 
     def imported(symbol):
         key = symbol['identity']
         if key not in identities:
-            n, lib, mod = key
-            # Main-program spelling when the identity matches (existing host
-            # tables use it); otherwise NID#library for new libraries.
-            name = (f'{n}#{main_libraries[lib]}#{main_modules[mod]}'
-                    if lib in main_libraries and mod in main_modules else f'{n}#{lib[0]}')
             identities[key] = len(names)
-            names.append(name)
+            names.append(canonical(key))
         return identities[key]
 
     exports, by_nid = {}, collections.defaultdict(list)

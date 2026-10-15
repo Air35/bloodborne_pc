@@ -16,14 +16,14 @@ void runtime_restart(void) { abort(); }
  * libraries) there is nothing to check. */
 int main(void) {
     static const char *const online[]={
-        "Nlev7Lg8k3A#E#F",  /* sceNetInit */
-        "A9cVMUtEp4Y#K#L",  /* sceHttpInit */
-        "hdpVEUDFW3s#L#M",  /* sceSslInit */
-        "2rsFmlGWleQ#R#S",  /* sceNpCheckNpAvailability */
-        "10t3e5+JPnU#P#Q",  /* sceNpMatching2Initialize */
-        "3KOuC4RmZZU#T#U",  /* sceNpSignalingInitialize */
+        "Nlev7Lg8k3A#libSceNet",  /* sceNetInit */
+        "A9cVMUtEp4Y#libSceHttp",  /* sceHttpInit */
+        "hdpVEUDFW3s#libSceSsl",  /* sceSslInit */
+        "2rsFmlGWleQ#libSceNpManager",  /* sceNpCheckNpAvailability */
+        "10t3e5+JPnU#libSceNpMatching2",  /* sceNpMatching2Initialize */
+        "3KOuC4RmZZU#libSceNpSignaling",  /* sceNpSignalingInitialize */
     };
-    static const char *const local="XbkjbobZlCY#l#m"; /* sceNpTrophyCreateContext */
+    static const char *const local="XbkjbobZlCY#libSceNpTrophy"; /* sceNpTrophyCreateContext */
     const char *path="out/gpu/libbbnet.so";
     void *module=dlopen(path,RTLD_NOW|RTLD_LOCAL); /* the same handle the runtime gets */
     if (!module) {

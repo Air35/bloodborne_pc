@@ -201,33 +201,45 @@ static ABI __attribute__((noreturn)) void guest_libc_exit(int status) {
     runtime_report();
     exit(status);
 }
+/* sotc: imports are spelled NID#library by link_modules.py, the same for every game (the
+ * eboot's own letters differ per game). libScePosix exports libkernel's symbols with the same
+ * contracts, so both share the libkernel key. From gow3 91b6e61 src/runtime.c:185-192
+ * (docs/auditorias/2026-10-14-gow3-pecas-a1-91b6e611d282.md). */
+static const char *canonical_name(const char *name, char out[128]) {
+    const char *posix=strstr(name,"#libScePosix");
+    if (!posix || posix[12] || posix-name>100) return name;
+    snprintf(out,128,"%.*s#libkernel",(int)(posix-name),name);
+    return out;
+}
 uintptr_t runtime_resolve(const char *name, int is_data) {
     if (!(capabilities & 1)) return 0;
+    char canonical[128];
+    name=canonical_name(name,canonical);
     if (is_data) {
         static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
-        if (!strcmp(name, "f7uOxY9mM1U#p#J")) return (uintptr_t)&stack_canary;
+        if (!strcmp(name, "f7uOxY9mM1U#libkernel")) return (uintptr_t)&stack_canary;
         if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
         return 0;
     }
-    /* Exact scoped imports for CUSA03173; the suffix identifies library/module. */
-    if (!strcmp(name, "bzQExy189ZI#q#q")) return (uintptr_t)init_env;
-    if (!strcmp(name, "8G2LB+A3rzg#q#q")) return (uintptr_t)guest_atexit;
-    if (!strcmp(name, "tsvEmnenz48#q#q")) return (uintptr_t)guest_cxa_atexit;
-    if (!strcmp(name, "uMei1W9uyNo#q#q")) return (uintptr_t)guest_libc_exit;
+    /* Exact scoped imports: the NID#library suffix limits each one to its library. */
+    if (!strcmp(name, "bzQExy189ZI#libc")) return (uintptr_t)init_env;
+    if (!strcmp(name, "8G2LB+A3rzg#libc")) return (uintptr_t)guest_atexit;
+    if (!strcmp(name, "tsvEmnenz48#libc")) return (uintptr_t)guest_cxa_atexit;
+    if (!strcmp(name, "uMei1W9uyNo#libc")) return (uintptr_t)guest_libc_exit;
     /* Not imported by the current eboot, exposed for ABI tests/future use. */
-    if (!strcmp(name, "H2e8t5ScQGc#q#q")) return (uintptr_t)guest_finalize;
-    if (!strcmp(name, "3GPpjQdAMTw#q#q")) return (uintptr_t)guard_acquire;
-    if (!strcmp(name, "9rAeANT2tyE#q#q")) return (uintptr_t)guard_release;
-    if (!strcmp(name, "2emaaluWzUw#q#q")) return (uintptr_t)guard_abort;
-    if (!strcmp(name, "Ou3iL1abvng#p#J")) return (uintptr_t)stack_fail;
-    if (!strcmp(name, "8zTFvBIAIN8#q#q")) return (uintptr_t)guest_memset;
-    if (!strcmp(name, "Q3VBxCXhUHs#q#q")) return (uintptr_t)guest_memcpy;
-    if (!strcmp(name, "+P6FRGH4LfA#q#q")) return (uintptr_t)guest_memmove;
-    if (!strcmp(name, "DfivPArhucg#q#q")) return (uintptr_t)guest_memcmp;
-    if (!strcmp(name, "j4ViWNHEgww#q#q")) return (uintptr_t)guest_strlen;
-    if (!strcmp(name, "vNe1w4diLCs#p#J")) return (uintptr_t)guest_tls_get_addr;
-    if (!strcmp(name, "959qrazPIrg#p#J")) return (uintptr_t)guest_procparam;
-    if (!strcmp(name, "p5EcQeEeJAE#p#J")) return (uintptr_t)guest_set_heap_api;
+    if (!strcmp(name, "H2e8t5ScQGc#libc")) return (uintptr_t)guest_finalize;
+    if (!strcmp(name, "3GPpjQdAMTw#libc")) return (uintptr_t)guard_acquire;
+    if (!strcmp(name, "9rAeANT2tyE#libc")) return (uintptr_t)guard_release;
+    if (!strcmp(name, "2emaaluWzUw#libc")) return (uintptr_t)guard_abort;
+    if (!strcmp(name, "Ou3iL1abvng#libkernel")) return (uintptr_t)stack_fail;
+    if (!strcmp(name, "8zTFvBIAIN8#libc")) return (uintptr_t)guest_memset;
+    if (!strcmp(name, "Q3VBxCXhUHs#libc")) return (uintptr_t)guest_memcpy;
+    if (!strcmp(name, "+P6FRGH4LfA#libc")) return (uintptr_t)guest_memmove;
+    if (!strcmp(name, "DfivPArhucg#libc")) return (uintptr_t)guest_memcmp;
+    if (!strcmp(name, "j4ViWNHEgww#libc")) return (uintptr_t)guest_strlen;
+    if (!strcmp(name, "vNe1w4diLCs#libkernel")) return (uintptr_t)guest_tls_get_addr;
+    if (!strcmp(name, "959qrazPIrg#libkernel")) return (uintptr_t)guest_procparam;
+    if (!strcmp(name, "p5EcQeEeJAE#libkernel")) return (uintptr_t)guest_set_heap_api;
     uintptr_t mutex = runtime_mutex_resolve(name);
     if (mutex) return mutex;
     uintptr_t thread = runtime_thread_resolve(name);
@@ -271,13 +283,29 @@ const char *runtime_symbol(const char *nid) {
 }
 /* Same symbol name means same contract whether imported from libkernel or
  * libScePosix, so newer modules resolve by name through runtime_symbol. */
+/* sotc: is this NID in import_names.inc under any library? Then its library decides (scope). */
+static int nid_known(const char *nid) {
+    for (size_t i=0;i<sizeof(import_names)/sizeof(*import_names);++i)
+        if (!strncmp(nid,import_names[i].nid,11)) return 1;
+    return 0;
+}
 uintptr_t runtime_lookup(const RuntimeExport *table,size_t count,const char *nid) {
     const char *symbol=runtime_symbol(nid);
-    if (!symbol) return 0;
-    for (size_t i=0;i<count;++i) if (!strcmp(symbol,table[i].name)) return (uintptr_t)table[i].function;
+    if (symbol) {
+        for (size_t i=0;i<count;++i) if (!strcmp(symbol,table[i].name)) return (uintptr_t)table[i].function;
+        return 0;
+    }
+    /* sotc: NIDs the original game never imported: compare with the NID of each table name.
+     * Only for NID#library spellings whose NID import_names.inc does not scope. */
+    const char *hash=strchr(nid,'#');
+    if (!hash || hash-nid!=11 || !hash[1] || nid_known(nid)) return 0;
+    char computed[12];
+    for (size_t i=0;i<count;++i)
+        if (runtime_nid(table[i].name,computed) && !memcmp(computed,nid,11)) return (uintptr_t)table[i].function;
     return 0;
 }
 const char *runtime_import_name(const char *name) {
-    const char *symbol=runtime_symbol(name);
+    char canonical[128];
+    const char *symbol=runtime_symbol(canonical_name(name,canonical));
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
 }

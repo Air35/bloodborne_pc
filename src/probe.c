@@ -46,6 +46,16 @@ static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message);
  * (andn/bextr/blsr/tzcnt), MOVBE, LZCNT and POPCNT, thousands of each in eboot.bin. A CPU without
  * them stops at the first one with SIGILL (exit code 132, issue #26), and lzcnt/tzcnt even run as
  * bsr/bsf there, with other results. Said before the game starts; BB_SKIP_CPU_CHECK=1 skips it. */
+/* sotc: imports the GPU library serves (registered by bbgpu_init); names are NID#library. */
+static int gpu_library_import(const char *name) {
+    static const char *const libraries[]={"#libSceGnmDriver","#libSceVideoOut"};
+    const size_t length=strlen(name);
+    for (size_t i=0;i<sizeof(libraries)/sizeof(*libraries);++i) {
+        const size_t suffix=strlen(libraries[i]);
+        if (length>suffix && !strcmp(name+length-suffix,libraries[i])) return 1;
+    }
+    return 0;
+}
 static void check_cpu(void) {
     const char *skip = getenv("BB_SKIP_CPU_CHECK");
     if (skip && !strcmp(skip, "1")) return;
@@ -338,13 +348,13 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
-    check_cpu();
-    int cpu_only = 0, strict_imports = 0;
+    int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
+        else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
@@ -353,9 +363,10 @@ int main(int argc, char **argv) {
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
         return 1;
     }
+    if (!check_imports) check_cpu(); /* sotc: --check-imports runs no guest code */
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
         unsigned char data[28];
@@ -539,6 +550,30 @@ int main(int argc, char **argv) {
             }
         }
         memcpy(image + relocs[i].target, &value, 8);
+    }
+    if (check_imports) {
+        /* sotc: lists every import the game would stop at, without running it. From gow3 91b6e61
+         * src/probe.c:888-903. GnmDriver/VideoOut are registered only by bbgpu_init (it opens the
+         * window), so with --cpu-only they are reported apart instead of as missing. */
+        unsigned char *checked=calloc(import_count ? import_count : 1,1);
+        if (!checked) fail("allocation failed");
+        uint64_t missing=0, gpu_left=0;
+        for (uint64_t i=0;i<nr;++i) {
+            uint64_t index=relocs[i].value;
+            if (!relocs[i].kind || checked[index]) continue;
+            checked[index]=1;
+            if (runtime_resolve(names[index],relocs[i].kind==2) || (native_libc && bindings[index])) continue;
+            if (!gpu_enabled && gpu_library_import(names[index])) {
+                printf("GPU (not checked without the GPU library): %s\n",names[index]);
+                ++gpu_left;
+                continue;
+            }
+            printf("MISSING: %s (%s)\n",names[index],runtime_import_name(names[index]));
+            ++missing;
+        }
+        printf("Imports: %" PRIu64 " missing, %" PRIu64 " left to the GPU library\n",missing,gpu_left);
+        fflush(NULL);
+        _exit(missing ? 1 : 0); /* no destructors: GPU threads may be running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (!cpu_only) bbgpu_patch_image(image, size);

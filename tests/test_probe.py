@@ -2,6 +2,7 @@
 from paths import ROOT
 from pathlib import Path
 import struct
+import os
 import subprocess
 import tempfile
 import unittest
@@ -66,7 +67,7 @@ class LoaderTests(unittest.TestCase):
         self.assertIn('first unsupported PS4 import: after-native',r.stdout)
 
     def test_host_contract_takes_priority_over_native_export(self):
-        r=self.run_image(native_package(name='bzQExy189ZI#q#q',native=b'\x0f\x0b'))
+        r=self.run_image(native_package(name='bzQExy189ZI#libc',native=b'\x0f\x0b'))
         self.assertEqual(r.returncode,20,r.stdout+r.stderr)
         self.assertIn('_init_env returned',r.stdout)
         self.assertIn('first unsupported PS4 import: after-native',r.stdout)
@@ -121,17 +122,34 @@ class LoaderTests(unittest.TestCase):
     def test_runtime_returns_from_verified_init_env(self):
         # Align stack, call _init_env through +32, then tail-jump to unknown +40.
         code = b'\x48\x83\xec\x08\xff\x15\x16\0\0\0\x48\x83\xc4\x08\xff\x25\x14\0\0\0'
-        data = package(code, [(32,1,0,0),(40,1,1,0)], ['bzQExy189ZI#q#q','after-init'], 1)
+        data = package(code, [(32,1,0,0),(40,1,1,0)], ['bzQExy189ZI#libc','after-init'], 1)
         r = self.run_image(data)
         self.assertEqual(r.returncode,20,r.stderr)
         self.assertIn('first unsupported PS4 import: after-init',r.stdout)
         self.assertIn('_init_env=1',r.stdout)
         strict = self.run_image(data,'--strict-imports')
         self.assertEqual(strict.returncode,20,strict.stderr)
-        self.assertIn('first unsupported PS4 import: bzQExy189ZI#q#q',strict.stdout)
+        self.assertIn('first unsupported PS4 import: bzQExy189ZI#libc',strict.stdout)
+
+    def test_check_imports_lists_missing_without_running(self):
+        # sotc: --check-imports lists what would stop the game without running it; it needs no
+        # CPU check (no guest code runs) and, with --cpu-only, reports GPU-library imports apart.
+        names = ['bzQExy189ZI#libc', 'AAAAAAAAAAA#libSceFoo', 'BBBBBBBBBBB#libSceGnmDriver']
+        data = package(b'\xc3' + b'\0' * 31, [(8,1,0,0),(16,1,1,0),(24,1,2,0)], names, 1)
+        env = {k: v for k, v in os.environ.items() if k != 'BB_SKIP_CPU_CHECK'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boot.bin'
+            path.write_bytes(data)
+            r = subprocess.run([str(EXE.resolve()), str(path), '--cpu-only', '--check-imports'],
+                               capture_output=True, text=True, timeout=5, env=env)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('MISSING: AAAAAAAAAAA#libSceFoo', r.stdout)
+        self.assertNotIn('bzQExy189ZI', r.stdout)
+        self.assertIn('GPU (not checked without the GPU library): BBBBBBBBBBB#libSceGnmDriver', r.stdout)
+        self.assertIn('Imports: 1 missing, 1 left to the GPU library', r.stdout)
 
     def test_unverified_runtime_stays_disabled(self):
-        r = self.run_image(package(b'\xff\x25\x02\0\0\0\x90\x90',[(8,1,0,0)],['bzQExy189ZI#q#q'],0))
+        r = self.run_image(package(b'\xff\x25\x02\0\0\0\x90\x90',[(8,1,0,0)],['bzQExy189ZI#libc'],0))
         self.assertEqual(r.returncode,20,r.stderr)
         self.assertIn('_init_env=0',r.stdout)
 
