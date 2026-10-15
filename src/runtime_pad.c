@@ -752,13 +752,18 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     return 0;
 }
 static ABI int32_t pad_ok_handle(int32_t handle) { return handle==PAD_HANDLE && opened ? 0 : ERR_INVALID_HANDLE; }
+/* sotc: the light bar colour is accepted (gow3 91b6e61 src/runtime_pad.c:443-446). */
+static ABI int32_t pad_light_bar(int32_t handle, const uint8_t *rgb) {
+    if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
+    (void)rgb; return 0;
+}
 static ABI int32_t pad_ok_handle_flag(int32_t handle, uint8_t flag) { (void)flag; return pad_ok_handle(handle); }
 
 static const RuntimeExport exports[]={
     {"scePadInit",pad_init}, {"scePadOpen",pad_open}, {"scePadClose",pad_close},
     {"scePadReadState",pad_read_state}, {"scePadRead",pad_read},
     {"scePadGetControllerInformation",pad_info}, {"scePadSetVibration",pad_vibration},
-    {"scePadResetOrientation",pad_ok_handle},
+    {"scePadResetOrientation",pad_ok_handle}, {"scePadSetLightBar",pad_light_bar}, /* sotc */
     {"scePadSetAngularVelocityDeadbandState",pad_ok_handle_flag}, {"scePadSetTiltCorrectionState",pad_ok_handle_flag},
     {"scePadSetMotionSensorState",pad_ok_handle_flag},
 };

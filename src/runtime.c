@@ -219,6 +219,9 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
         static int32_t need_libc_internal = 1; /* SDK marker variable referenced by Fios2 */
         if (!strcmp(name, "f7uOxY9mM1U#libkernel")) return (uintptr_t)&stack_canary;
         if (!strcmp(name, "ZT4ODD2Ts9o#libSceLibcInternal")) return (uintptr_t)&need_libc_internal;
+        /* sotc: __progname, read by the SotC's libc.prx; the process is eboot.bin (as argv[0]). */
+        static const char *progname = "eboot.bin";
+        if (!strcmp(name, "djxxOmW6-aw#libkernel")) return (uintptr_t)&progname;
         return 0;
     }
     /* Exact scoped imports: the NID#library suffix limits each one to its library. */

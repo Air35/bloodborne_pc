@@ -221,6 +221,15 @@ static ABI int32_t audio_outputs(const OutputParam *params, uint32_t count) {
     for (uint32_t i=0;i<count;++i) { int32_t r=output_port(params[i].handle,params[i].data,i==0); if (r<0) return r; result=r; }
     return result;
 }
+/* sotc: there is no controller speaker: the level is accepted for a valid port. */
+static ABI int32_t audio_mix_level_pad_speaker(int32_t handle, int32_t level) {
+    (void)level;
+    int32_t error=0;
+    pthread_mutex_lock(&table_lock);
+    Port *p=port_of(handle,&error);
+    pthread_mutex_unlock(&table_lock);
+    return p ? 0 : error;
+}
 static ABI int32_t audio_volume(int32_t handle, int32_t flags, const int32_t *volume) {
     int32_t error=0;
     pthread_mutex_lock(&table_lock);
@@ -264,7 +273,7 @@ static ABI int32_t audio_last_time(int32_t handle, uint64_t *time) {
 static const RuntimeExport exports[]={
     {"sceAudioOutInit",audio_init}, {"sceAudioOutOpen",audio_open}, {"sceAudioOutClose",audio_close},
     {"sceAudioOutOutput",audio_output}, {"sceAudioOutOutputs",audio_outputs},
-    {"sceAudioOutSetVolume",audio_volume}, {"sceAudioOutGetPortState",audio_state},
+    {"sceAudioOutSetVolume",audio_volume}, {"sceAudioOutSetMixLevelPadSpk",audio_mix_level_pad_speaker}, /* sotc */ {"sceAudioOutGetPortState",audio_state},
     {"sceAudioOutGetLastOutputTime",audio_last_time},
 };
 uintptr_t runtime_audio_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }

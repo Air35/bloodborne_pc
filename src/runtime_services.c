@@ -131,6 +131,35 @@ static ABI int32_t ok_void(void) { return 0; }
  * (gow3 91b6e61 src/runtime_services.c, safe_area). */
 static ABI int32_t safe_area(float *info) { if (!info) return SYSTEM_PARAMETER; *info=1.0f; return 0; }
 static ABI int32_t http_fail(void) { return HTTP_NETWORK; }
+/* sotc: URI escaping is local work (no network): unreserved characters (RFC 3986) stay, the
+ * rest becomes %XX; *require gets the size with the terminator. Contract and error codes from
+ * shadPS4 b4e7ae7 network/http.cpp:3594-3650 and network/http_error.h (consulted). */
+static int uri_unreserved(unsigned char c) {
+    return (c>='A' && c<='Z') || (c>='a' && c<='z') || (c>='0' && c<='9') || c=='-' || c=='_' || c=='.' || c=='~';
+}
+static ABI int32_t http_uri_escape(char *out,uint64_t *require,uint64_t prepare,const char *in) {
+    if (!in) return (int32_t)0x804311fe; /* INVALID_VALUE */
+    uint64_t needed=1;
+    for (const unsigned char *c=(const unsigned char *)in;*c;++c)
+        needed+=uri_unreserved(*c) ? 1 : 3;
+    if (require) *require=needed;
+    if (!out) return 0;
+    if (prepare<needed) return (int32_t)0x80431022; /* OUT_OF_MEMORY */
+    static const char hex[]="0123456789ABCDEF";
+    for (const unsigned char *c=(const unsigned char *)in;*c;++c) {
+        if (uri_unreserved(*c)) { *out++=(char)*c; continue; }
+        *out++='%'; *out++=hex[*c>>4]; *out++=hex[*c&15];
+    }
+    *out=0;
+    return 0;
+}
+/* sotc: launching another executable (or restarting) is not supported: stop visibly. */
+static ABI __attribute__((noreturn)) void load_exec(const char *path,const char *const *argv) {
+    (void)argv;
+    fprintf(stderr,"STOP: sceSystemServiceLoadExec(%s) is not supported\n",path ? path : "(null)");
+    runtime_report();
+    exit(21);
+}
 /* Objects are created so setup code proceeds; any transfer fails as unplugged. */
 static ABI int32_t http_object(void) { return new_id(); }
 static ABI int32_t http_epoll(int32_t ctx,void **handle) {
@@ -175,7 +204,10 @@ static ABI int32_t voice_info(uint32_t port,uint32_t *info) {
 /* ---- Common dialogs: nothing is displayed; an opened dialog finishes. ---- */
 typedef struct { const char *name; int initialized, status; } Dialog;
 static Dialog dialogs[]={{"CommonDialog",0,0},{"MsgDialog",0,0},{"SaveDataDialog",0,0},
-                         {"NpProfileDialog",0,0},{"NpCommerceDialog",0,0},{"ImeDialog",0,0}};
+                         {"NpProfileDialog",0,0},{"NpCommerceDialog",0,0},{"ImeDialog",0,0},
+                         {"ErrorDialog",0,0}}; /* sotc: ErrorDialog (index 6) */
+/* sotc: button of the finished dialog (1 = OK/YES), gow3 91b6e61 Dialog.button. */
+static uint32_t dialog_buttons[sizeof(dialogs)/sizeof(*dialogs)];
 static int common_initialized;
 static ABI int32_t common_init(void) { common_initialized=1; return 0; }
 static int32_t dialog_init(int i) {
@@ -185,7 +217,7 @@ static int32_t dialog_init(int i) {
 static int32_t dialog_open(int i) {
     if (!dialogs[i].initialized) return DIALOG_NOT_INITIALIZED;
     printf("Runtime: %s opened; completed immediately (no dialog UI yet)\n",dialogs[i].name);
-    dialogs[i].status=3; return 0;
+    dialogs[i].status=3; dialog_buttons[i]=1; return 0;
 }
 static int32_t dialog_status(int i) { return dialogs[i].status; }
 static int32_t dialog_term(int i) {
@@ -197,7 +229,101 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_open(const void *p) { (void)p; return dialog_open(i); } \
     static ABI int32_t tag##_status(void) { return dialog_status(i); } \
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
-DIALOG(msg,1) DIALOG(save,2) DIALOG(profile,3) DIALOG(commerce,4)
+DIALOG(profile,3) DIALOG(commerce,4)
+/* sotc: progress-bar dialogs (Shadow of the Colossus calls sceSaveDataDialogProgressBarSetValue
+ * 12 times). From gow3 91b6e61 src/runtime_services.c (dialog_open_progress, dialog_close,
+ * dialog_progress, dialog_result, dialog_open_mode; docs/auditorias/2026-10-14-gow3-pecas-a1-*).
+ * A progress bar shows the game's own work: it runs until the game closes it; other modes
+ * finish at once with OK, as before. */
+#define DIALOG_RUNNING 2
+#define DIALOG_FINISHED 3
+#define DIALOG_ALREADY_INITIALIZED ((int32_t)0x80B80004)
+#define DIALOG_NOT_FINISHED ((int32_t)0x80B80005)
+#define DIALOG_INVALID_STATE ((int32_t)0x80B80006)
+#define DIALOG_PARAM_INVALID ((int32_t)0x80B8000A)
+#define DIALOG_NOT_RUNNING ((int32_t)0x80B8000B)
+#define DIALOG_ARG_NULL ((int32_t)0x80B8000D)
+static int32_t dialog_open_progress(int i) {
+    if (!dialogs[i].initialized) return DIALOG_NOT_INITIALIZED;
+    printf("Runtime: %s progress bar opened (runs until closed)\n",dialogs[i].name);
+    dialogs[i].status=DIALOG_RUNNING; dialog_buttons[i]=0; return 0;
+}
+static int32_t dialog_close(int i) {
+    if (dialogs[i].status!=DIALOG_RUNNING) return DIALOG_NOT_RUNNING;
+    dialogs[i].status=DIALOG_FINISHED; return 0;
+}
+static int32_t dialog_progress(int i, uint32_t target) {
+    if (dialogs[i].status!=DIALOG_RUNNING) return DIALOG_NOT_RUNNING;
+    return target ? DIALOG_PARAM_INVALID : 0;
+}
+/* Result: result (OK), button; SaveDataDialog's begins with the mode (offset 4). */
+static int32_t dialog_result(int i, unsigned char *out, size_t offset) {
+    if (dialogs[i].status!=DIALOG_FINISHED) return DIALOG_NOT_FINISHED;
+    if (!out) return DIALOG_ARG_NULL;
+    uint32_t values[2]={0,dialog_buttons[i]};
+    memcpy(out+offset,values,8);
+    return 0;
+}
+static int32_t dialog_open_mode(int i, const unsigned char *param, size_t mode_offset, uint32_t progress_mode) {
+    if (!param) return DIALOG_ARG_NULL;
+    uint32_t mode; memcpy(&mode,param+mode_offset,4);
+    return mode==progress_mode ? dialog_open_progress(i) : dialog_open(i);
+}
+/* OrbisMsgDialogParam: BaseParam (48 bytes), size, mode @56 (2 = progress bar). */
+static ABI int32_t msg_init(void) { return dialog_init(1); }
+static ABI int32_t msg_open(const unsigned char *p) { return dialog_open_mode(1,p,56,2); }
+static ABI int32_t msg_status(void) { return dialog_status(1); }
+static ABI int32_t msg_term(void) { return dialog_term(1); }
+static ABI int32_t msg_close(void) { return dialog_close(1); }
+static ABI int32_t msg_progress(uint32_t target, uint32_t value) { (void)value; return dialog_progress(1,target); }
+static ABI int32_t msg_result(unsigned char *out) { return dialog_result(1,out,0); }
+/* OrbisSaveDataDialogParam: BaseParam, size, mode @52 (5 = progress bar), userData @112.
+ * OrbisSaveDataDialogResult: mode, result, buttonId, dirName* @16, param* @24, userData @32
+ * (layout as documented by gow3 91b6e61). No save list UI: the chosen save is "none". */
+static uint32_t save_mode;
+static uint64_t save_user_data;
+static ABI int32_t save_init(void) { return dialog_init(2); }
+static ABI int32_t save_open(const unsigned char *p) {
+    if (!p) return DIALOG_ARG_NULL;
+    if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
+    memcpy(&save_mode,p+52,4);
+    memcpy(&save_user_data,p+112,8);
+    return dialog_open_mode(2,p,52,5);
+}
+static ABI int32_t save_status(void) { return dialog_status(2); }
+static ABI int32_t save_term(void) { return dialog_term(2); }
+static ABI int32_t save_close(void) { return dialog_close(2); }
+static ABI int32_t save_progress(uint32_t target, uint32_t rate) { (void)rate; return dialog_progress(2,target); }
+static ABI int32_t save_result(unsigned char *out) {
+    const int32_t r=dialog_result(2,out,4);
+    if (r) return r;
+    memcpy(out,&save_mode,4);
+    char *dir; memcpy(&dir,out+16,8);
+    if (dir) memset(dir,0,32);
+    memcpy(out+32,&save_user_data,8);
+    return 0;
+}
+static ABI int32_t save_ready(void) { return 1; }
+/* sotc: ErrorDialog (shadPS4 b4e7ae7 ime/error_dialog.cpp, consulted): Param {size, errorCode,
+ * userId, reserved}. No UI: the code is logged and the dialog is answered at once. */
+static ABI int32_t error_init(void) {
+    return dialogs[6].initialized ? DIALOG_ALREADY_INITIALIZED : dialog_init(6);
+}
+static ABI int32_t error_open(const int32_t *param) {
+    if (!dialogs[6].initialized) return DIALOG_INVALID_STATE;
+    if (!param) return DIALOG_ARG_NULL;
+    printf("Runtime: ErrorDialog error code 0x%08x (answered OK)\n",(uint32_t)param[1]);
+    return dialog_open(6);
+}
+static ABI int32_t error_status(void) { return dialog_status(6); }
+static ABI int32_t error_close(void) { return dialog_close(6); }
+static ABI int32_t error_term(void) { return dialog_term(6); }
+/* sotc: true while any common dialog is shown (none are, without a dialog UI, unless a
+ * progress bar is open). shadPS4 b4e7ae7 commondialog.cpp always answers false. */
+static ABI int32_t common_is_used(void) {
+    for (size_t i=0;i<sizeof(dialogs)/sizeof(*dialogs);++i) if (dialogs[i].status==DIALOG_RUNNING) return 1;
+    return 0;
+}
 static ABI int32_t profile_result(void *result) { if (result) memset(result,0,4); return 0; }
 /* ImeDialog: text typed on the keyboard into the game window (title bar shows it).
  * OrbisImeDialogParam: user, type, languages(8), enter label, method, filter,
@@ -462,8 +588,17 @@ static const RuntimeExport exports[]={
     {"sceCommonDialogInitialize",common_init},
     {"sceMsgDialogInitialize",msg_init}, {"sceMsgDialogOpen",msg_open},
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
+    {"sceMsgDialogClose",msg_close}, {"sceMsgDialogProgressBarSetValue",msg_progress}, /* sotc */
+    {"sceMsgDialogGetResult",msg_result}, {"sceMsgDialogGetStatus",msg_status},        /* sotc */
     {"sceSaveDataDialogInitialize",save_init}, {"sceSaveDataDialogOpen",save_open},
     {"sceSaveDataDialogUpdateStatus",save_status}, {"sceSaveDataDialogTerminate",save_term},
+    {"sceSaveDataDialogGetStatus",save_status}, {"sceSaveDataDialogClose",save_close},  /* sotc */
+    {"sceSaveDataDialogProgressBarSetValue",save_progress},                             /* sotc */
+    {"sceSaveDataDialogGetResult",save_result}, {"sceSaveDataDialogIsReadyToDisplay",save_ready},
+    {"sceErrorDialogInitialize",error_init}, {"sceErrorDialogOpen",error_open},         /* sotc */
+    {"sceErrorDialogUpdateStatus",error_status}, {"sceErrorDialogClose",error_close},
+    {"sceErrorDialogTerminate",error_term}, {"sceCommonDialogIsUsed",common_is_used},
+    {"sceHttpUriEscape",http_uri_escape}, {"sceSystemServiceLoadExec",load_exec},       /* sotc */
     {"sceNpProfileDialogInitialize",profile_init}, {"sceNpProfileDialogOpen",profile_open},
     {"sceNpProfileDialogUpdateStatus",profile_status}, {"sceNpProfileDialogTerminate",profile_term},
     {"sceNpProfileDialogGetResult",profile_result},

@@ -110,7 +110,68 @@ static ABI int32_t address_sanitizer_enabled(void) {
     return 0;
 } /* retail build */
 
+/* POSIX sockets: no network (CLAUDE.md §1; same "cable unplugged" model as the Net library in
+ * runtime_services.c). No socket is ever created, so every descriptor is invalid. errno uses
+ * FreeBSD numbers. */
+enum { GUEST_EBADF = 9, GUEST_EINVAL = 22, GUEST_ENETUNREACH = 51 };
+static int32_t posix_fail(int32_t guest_errno) {
+    *runtime_errno() = guest_errno;
+    return -1;
+}
+static ABI int32_t posix_socket(int domain, int type, int protocol) {
+    (void)domain;
+    (void)type;
+    (void)protocol;
+    return posix_fail(GUEST_ENETUNREACH);
+}
+static ABI int32_t posix_bad_descriptor(int fd) {
+    (void)fd;
+    return posix_fail(GUEST_EBADF);
+}
+/* select() with no descriptor set is the classic portable sleep; any set descriptor is invalid. */
+typedef struct {
+    int64_t sec, usec;
+} GuestTimeval;
+static int any_descriptor(const unsigned char* set, int nfds) {
+    for (int fd = 0; set && fd < nfds && fd < 1024; ++fd)
+        if (set[fd / 8] & (1u << (fd % 8)))
+            return 1;
+    return 0;
+}
+static ABI int32_t posix_select(int nfds, const unsigned char* readfds,
+                                const unsigned char* writefds, const unsigned char* exceptfds,
+                                const GuestTimeval* timeout) {
+    if (nfds < 0)
+        return posix_fail(GUEST_EINVAL);
+    if (any_descriptor(readfds, nfds) || any_descriptor(writefds, nfds) ||
+        any_descriptor(exceptfds, nfds))
+        return posix_fail(GUEST_EBADF);
+    if (!timeout || timeout->sec < 0 || timeout->usec < 0 || timeout->usec >= 1000000)
+        return posix_fail(GUEST_EINVAL); /* would wait forever on nothing */
+    struct timespec left = {(time_t)timeout->sec, (long)timeout->usec * 1000};
+    while (nanosleep(&left, &left) && errno == EINTR) {
+    }
+    return 0;
+}
+/* Priority protocols (none, inherit, protect) are accepted; host mutexes keep their own. */
+static ABI int32_t mutexattr_setprotocol(void** attr, int protocol) {
+    if (!attr || !*attr || protocol < 0 || protocol > 2)
+        return POSIX_EINVAL;
+    return 0;
+}
+
 static const RuntimeExport exports[] = {
+    {"socket", posix_socket},
+    {"bind", posix_bad_descriptor},
+    {"connect", posix_bad_descriptor},
+    {"listen", posix_bad_descriptor},
+    {"accept", posix_bad_descriptor},
+    {"recv", posix_bad_descriptor},
+    {"send", posix_bad_descriptor},
+    {"setsockopt", posix_bad_descriptor},
+    {"shutdown", posix_bad_descriptor},
+    {"select", posix_select},
+    {"pthread_mutexattr_setprotocol", mutexattr_setprotocol},
     {"sceKernelIsNeoMode", is_neo_mode},
     {"sceKernelUuidCreate", uuid_create},
     {"sceKernelSleep", kernel_sleep},

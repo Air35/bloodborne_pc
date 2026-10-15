@@ -88,10 +88,124 @@ static void services(void) {
     assert(sock_info && sock_info() == (int32_t)0x80410133); /* ENETUNREACH */
 }
 
+/* Lote 3: dialogs in progress-bar mode stay open until closed (gow3 91b6e61 dialog_open_progress,
+ * dialog_close, dialog_progress, dialog_result, dialog_open_mode); other modes finish with OK. */
+typedef int32_t(ABI* Ptr1)(const void*);
+typedef int32_t(ABI* Progress)(uint32_t, uint32_t);
+enum { NONE = 0, INITIALIZED = 1, RUNNING = 2, FINISHED = 3 };
+#define NOT_RUNNING ((int32_t)0x80B8000B)
+#define NOT_FINISHED ((int32_t)0x80B80005)
+#define ARG_NULL ((int32_t)0x80B8000D)
+#define PARAM_INVALID ((int32_t)0x80B8000A)
+static void dialogs(void) {
+    Int0 init = GET(Int0, "sceSaveDataDialogInitialize", "libSceSaveDataDialog");
+    Ptr1 open = GET(Ptr1, "sceSaveDataDialogOpen", "libSceSaveDataDialog");
+    Int0 status = GET(Int0, "sceSaveDataDialogGetStatus", "libSceSaveDataDialog");
+    Int0 update = GET(Int0, "sceSaveDataDialogUpdateStatus", "libSceSaveDataDialog");
+    Int0 close = GET(Int0, "sceSaveDataDialogClose", "libSceSaveDataDialog");
+    Progress progress =
+        GET(Progress, "sceSaveDataDialogProgressBarSetValue", "libSceSaveDataDialog");
+    Ptr1 result = GET(Ptr1, "sceSaveDataDialogGetResult", "libSceSaveDataDialog");
+    Int0 ready = GET(Int0, "sceSaveDataDialogIsReadyToDisplay", "libSceSaveDataDialog");
+    Int0 used = GET(Int0, "sceCommonDialogIsUsed", "libSceCommonDialog");
+    assert(init && open && status && update && close && progress && result && ready && used);
+    assert(ready() == 1 && used() == 0 && init() == 0 && status() == INITIALIZED);
+    unsigned char param[128] = {0}, out[64];
+    uint32_t mode = 5; /* progress bar */
+    memcpy(param + 52, &mode, 4);
+    assert(open(NULL) == ARG_NULL && open(param) == 0 && status() == RUNNING);
+    assert(progress(0, 50) == 0 && progress(1, 50) == PARAM_INVALID && update() == RUNNING);
+    assert(result(out) == NOT_FINISHED);
+    assert(close() == 0 && status() == FINISHED && close() == NOT_RUNNING);
+    assert(progress(0, 60) == NOT_RUNNING);
+    mode = 2; /* any other mode: answered at once, OK */
+    memcpy(param + 52, &mode, 4);
+    uint64_t user_data = 0x1122334455667788u;
+    memcpy(param + 112, &user_data, 8);
+    char dir[32] = "x";
+    void* dir_ptr = dir;
+    memset(out, 0xee, sizeof(out));
+    memcpy(out + 16, &dir_ptr, 8);
+    memset(out + 24, 0, 8);
+    assert(open(param) == 0 && status() == FINISHED && result(out) == 0);
+    uint32_t got[3];
+    memcpy(got, out, 12);
+    assert(got[0] == 2 && got[1] == 0 && got[2] == 1 && dir[0] == 0); /* mode, OK, button */
+    assert(!memcmp(out + 32, &user_data, 8));
+
+    Int0 msg_init = GET(Int0, "sceMsgDialogInitialize", "libSceMsgDialog");
+    Ptr1 msg_open = GET(Ptr1, "sceMsgDialogOpen", "libSceMsgDialog");
+    Int0 msg_close = GET(Int0, "sceMsgDialogClose", "libSceMsgDialog");
+    Ptr1 msg_result = GET(Ptr1, "sceMsgDialogGetResult", "libSceMsgDialog");
+    assert(msg_init && msg_open && msg_close && msg_result && msg_init() == 0);
+    unsigned char msg[96] = {0};
+    mode = 2; /* MsgDialog progress bar */
+    memcpy(msg + 56, &mode, 4);
+    assert(msg_open(msg) == 0 && msg_result(out) == NOT_FINISHED && msg_close() == 0);
+    assert(msg_result(out) == 0);
+
+    Int0 err_init = GET(Int0, "sceErrorDialogInitialize", "libSceErrorDialog");
+    Ptr1 err_open = GET(Ptr1, "sceErrorDialogOpen", "libSceErrorDialog");
+    Int0 err_status = GET(Int0, "sceErrorDialogUpdateStatus", "libSceErrorDialog");
+    Int0 err_close = GET(Int0, "sceErrorDialogClose", "libSceErrorDialog");
+    Int0 err_term = GET(Int0, "sceErrorDialogTerminate", "libSceErrorDialog");
+    assert(err_init && err_open && err_status && err_close && err_term);
+    int32_t err_param[4] = {16, (int32_t)0x80020003, 1, 0};
+    assert(err_open(err_param) == (int32_t)0x80B80006); /* not initialized: INVALID_STATE */
+    assert(err_init() == 0 && err_init() == (int32_t)0x80B80004);
+    assert(err_open(NULL) == ARG_NULL && err_open(err_param) == 0 && err_status() == FINISHED);
+    assert(err_close() == NOT_RUNNING && err_term() == 0 && err_status() == NONE);
+}
+
+typedef int32_t(ABI* Escape)(char*, uint64_t*, uint64_t, const char*);
+typedef int32_t(ABI* Socket)(int, int, int);
+typedef int32_t(ABI* Fd)(int);
+typedef int32_t(ABI* Select)(int, void*, void*, void*, void*);
+typedef int32_t(ABI* SetProtocol)(void**, int);
+static void network_and_posix(void) {
+    Escape escape = GET(Escape, "sceHttpUriEscape", "libSceHttp");
+    char out[64];
+    uint64_t need = 0;
+    assert(escape && escape(out, &need, sizeof(out), NULL) == (int32_t)0x804311fe);
+    assert(escape(NULL, &need, 0, "a b/~") == 0 && need == 10);
+    assert(escape(out, &need, 5, "a b/~") == (int32_t)0x80431022);
+    assert(escape(out, &need, sizeof(out), "a b/~") == 0 && !strcmp(out, "a%20b%2F~"));
+
+    Socket sock = GET(Socket, "socket", "libScePosix");
+    Fd close_sock = GET(Fd, "shutdown", "libScePosix");
+    assert(sock && sock(2, 1, 0) == -1 && *runtime_errno() == 51);      /* ENETUNREACH */
+    assert(close_sock && close_sock(3) == -1 && *runtime_errno() == 9); /* EBADF */
+    Select sel = GET(Select, "select", "libScePosix");
+    struct {
+        int64_t sec, usec;
+    } timeout = {0, 1000};
+    assert(sel && sel(0, NULL, NULL, NULL, &timeout) == 0); /* no descriptors: a sleep */
+    uint64_t set = 1u << 3;
+    assert(sel(4, &set, NULL, NULL, &timeout) == -1 && *runtime_errno() == 9);
+
+    SetProtocol protocol = GET(SetProtocol, "pthread_mutexattr_setprotocol", "libScePosix");
+    void* attr = &attr;
+    assert(protocol && protocol(&attr, 0) == 0 && protocol(&attr, 2) == 0);
+    assert(protocol(&attr, 3) == 22 && protocol(NULL, 0) == 22);
+
+    typedef int32_t(ABI * HandleArg)(int32_t, int64_t);
+    HandleArg light = GET(HandleArg, "scePadSetLightBar", "libScePad");
+    HandleArg mix = GET(HandleArg, "sceAudioOutSetMixLevelPadSpk", "libSceAudioOut");
+    assert(light && light(77, 0) == (int32_t)0x80920003); /* no such pad handle */
+    assert(mix && mix(77, 0) < 0);                        /* no such audio port */
+    char nid[12], key[64];
+    assert(runtime_nid("__progname", nid));
+    snprintf(key, sizeof(key), "%s#libkernel", nid);
+    const char* const* progname = (const char* const*)runtime_resolve(key, 1);
+    assert(progname && !strcmp(*progname, "eboot.bin"));
+}
+
 int main(void) {
     runtime_start(1);
     kernel_support();
     services();
+    dialogs();
+    network_and_posix();
     puts("PASS: kernel module-support symbols, offline services, DiscMap 7C98");
     return 0;
 }
