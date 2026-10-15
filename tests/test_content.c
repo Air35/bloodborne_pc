@@ -32,7 +32,22 @@ int main(int argc,char **argv) {
         assert((uint32_t)loaded(0xb5)==0x805a1001);
         assert(load(0xb5)==0 && loaded(0xb5)==0 && (uint32_t)loaded(0xb4)==0x805a1001);
         assert(unload(0xb5)==0 && (uint32_t)loaded(0xb5)==0x805a1001);
-        puts("PASS: independent module references"); return 0;
+        /* sotc: sceSysmoduleLoadModuleInternalWithArg (hHrGoGoNf+s), called by libSceFios2 with
+         * id 0xd7: same host-provided, reference-counted modules; ids with bit 31 are the
+         * internal ones and do not alias the public id of the same low bits. */
+        typedef int32_t (ABI *Internal)(uint32_t,int32_t,const void *,uint64_t,int32_t *);
+        Internal internal=GET(Internal,"hHrGoGoNf+s#libSceSysmodule");
+        assert(internal);
+        int32_t result=-1;
+        assert(internal(0xd7,0,NULL,0,&result)==0 && result==0 && loaded(0xd7)==0);
+        assert(unload(0xd7)==0 && (uint32_t)loaded(0xd7)==0x805a1001);
+        assert(internal(0xd7,0,NULL,0,NULL)==0 && unload(0xd7)==0);          /* res_out is optional */
+        assert((uint32_t)internal(0,0,NULL,0,&result)==0x805a1000);          /* INVALID_ID */
+        assert((uint32_t)internal(0x80000000u,0,NULL,0,&result)==0x805a1000);
+        assert((uint32_t)internal(0xd7,0,NULL,1,&result)==0x805a1000);       /* unk must be 0 */
+        assert(internal(0x80000039u,0,NULL,0,&result)==0);
+        assert((uint32_t)loaded(0x39)==0x805a1001);                          /* not the public 0x39 */
+        puts("PASS: independent module references, internal load"); return 0;
     }
     assert((uint32_t)loaded(0)==0x805a1000);
     assert((uint32_t)loaded(0xb4)==0x805a1001);

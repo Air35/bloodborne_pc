@@ -52,6 +52,30 @@ static ABI int32_t module_unload(uint16_t id) {
     if (id==0xb4) { refs=module_refs[id]; if (!refs) initialized=0; }
     return 0;
 }
+/* sceSysmoduleLoadModuleInternalWithArg (NID hHrGoGoNf+s): the module id is 32 bits wide here
+ * and bit 31 marks the internal ones. Same contract as shadPS4 b4e7ae7 sysmodule.cpp: an id
+ * whose low 31 bits are zero, or a non-zero `unk`, is INVALID_ID. Ids with bit 31 clear are the
+ * public modules (shared reference table); internal ones count separately, so 0x80000039 does
+ * not alias public 0x39. The module arguments are not interpreted (every module is the host's).
+ * Writing 0 to *res_out is the module-start result of a module that needs no start routine
+ * [a verificar: contract of res_out beyond shadPS4's]. */
+static unsigned internal_refs[0x10000];
+static ABI int32_t module_load_internal(uint32_t id,int32_t argc,const void *argv,uint64_t unk,
+                                        int32_t *res_out) {
+    (void)argc; (void)argv;
+    const uint32_t index=id&0x7fffffffu;
+    if (!index || index>0xffff || unk) return INVALID_ID;
+    if (!(id&0x80000000u)) {
+        int32_t result=module_load((uint16_t)index);
+        if (!result && res_out) *res_out=0;
+        return result;
+    }
+    if (internal_refs[index]==UINT32_MAX) { fputs("STOP: module reference overflow\n",stderr); exit(21); }
+    ++internal_refs[index];
+    printf("Runtime: internal system module 0x%x loaded (host implementation)\n",id);
+    if (res_out) *res_out=0;
+    return 0;
+}
 static void require_loaded(void) {
     require_provider();
     if (!refs) { fputs("STOP: AppContent called before module load\n",stderr); exit(21); }
@@ -124,6 +148,7 @@ uintptr_t runtime_content_resolve(const char *name) {
     if (!strcmp(name,"g8cM39EUZ6o#libSceSysmodule")) return (uintptr_t)module_load;
     if (!strcmp(name,"fMP5NHUOaMk#libSceSysmodule")) return (uintptr_t)module_loaded;
     if (!strcmp(name,"eR2bZFAAU0Q#libSceSysmodule")) return (uintptr_t)module_unload;
+    if (!strcmp(name,"hHrGoGoNf+s#libSceSysmodule")) return (uintptr_t)module_load_internal;
     if (!strcmp(name,"R9lA82OraNs#libSceAppContent")) return (uintptr_t)content_init;
     if (!strcmp(name,"99b82IKXpH4#libSceAppContent")) return (uintptr_t)param_int;
     if (!strcmp(name,"xnd8BJzAxmk#libSceAppContent")) return (uintptr_t)addon_list;
