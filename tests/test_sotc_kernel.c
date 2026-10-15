@@ -61,6 +61,15 @@ typedef int32_t(ABI* Allocate)(int64_t, int64_t, uint64_t, uint64_t, int32_t, in
 typedef int32_t(ABI* Release)(int64_t, uint64_t);
 typedef int32_t(ABI* MapFlexible)(void**, uint64_t, int32_t, int32_t);
 typedef int32_t(ABI* Unmap)(void*, uint64_t);
+typedef struct {
+    int64_t t;
+    uint32_t west_sec, dst_sec;
+} Timesec;
+typedef struct {
+    int32_t minuteswest, dsttime;
+} Timezone;
+typedef int32_t(ABI* UtcToLocal)(int64_t, int64_t*, Timesec*, uint64_t*);
+typedef int32_t(ABI* LocalToUtc)(int64_t, int64_t, int64_t*, Timezone*, int32_t*);
 
 static int32_t other_tid;
 static void* tid_thread(void* arg) {
@@ -168,7 +177,37 @@ int main(void) {
     assert(map_flex(&flex, 4 * page, 3, 0) == 0);
     assert(avail_flex(&flex_after) == 0 && flex_after == flex_before - 4 * page);
     assert(unmap(flex, 4 * page) == 0);
+
+    /* Time zone conversions with POSIX TZ strings (no tzdata needed). Contract: shadPS4 b4e7ae7
+     * kernel/time.cpp:457-530 (consulted); its DST sum and its LocaltimeToUtc sign are not
+     * followed (see runtime_sotc_kernel.c), so the expectations are the arithmetic itself. */
+    UtcToLocal to_local = (UtcToLocal)resolve("sceKernelConvertUtcToLocaltime", "libkernel");
+    LocalToUtc to_utc = (LocalToUtc)resolve("sceKernelConvertLocaltimeToUtc", "libkernel");
+    assert(to_local && to_utc);
+    const int64_t january = 1705000000, july = 1720000000; /* 2024-01-11, 2024-07-03 (UTC) */
+    int64_t local = 0, utc = 0;
+    Timesec st = {0};
+    uint64_t dst = 99;
+    Timezone zone = {0};
+    int32_t dst_seconds = 99;
+    setenv("TZ", "UTC+3", 1); /* 3 h west, no DST */
+    tzset();
+    assert(to_local(january, &local, &st, &dst) == 0 && local == january - 3 * 3600);
+    assert(st.t == january && (int32_t)st.west_sec == -3 * 3600 && st.dst_sec == 0 && dst == 0);
+    assert(to_utc(local, 0, &utc, &zone, &dst_seconds) == 0 && utc == january);
+    assert(zone.minuteswest == 180 && zone.dsttime == 0 && dst_seconds == 0);
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+    assert(to_local(january, &local, NULL, NULL) == 0 && local == january - 5 * 3600);
+    assert(to_local(july, &local, &st, &dst) == 0 && local == july - 4 * 3600 && dst == 3600);
+    assert(st.dst_sec == 3600 && (int32_t)st.west_sec == -4 * 3600);
+    assert(to_utc(local, 0, &utc, &zone, &dst_seconds) == 0 && utc == july);
+    assert(zone.minuteswest == 240 && dst_seconds == 3600);
+    assert(to_local(july, NULL, &st, &dst) == (int32_t)0x80020016);
+    assert(to_utc(local, 0, &utc, NULL, &dst_seconds) == (int32_t)0x80020016);
+    unsetenv("TZ");
+    tzset();
     puts("PASS: base-PS4 mode, UUID v4, sleep, priority ranges, thread IDs, schedparam, cancel, "
-         "available memory");
+         "available memory, time zone conversion");
     return 0;
 }

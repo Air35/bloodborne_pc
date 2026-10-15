@@ -49,6 +49,67 @@ static ABI int32_t kernel_sleep(uint32_t seconds) {
     return 0;
 }
 
+/* sceKernelConvertUtcToLocaltime (-o5uEDpN+oY) and sceKernelConvertLocaltimeToUtc (0NTHN1NKONI),
+ * both #libkernel; no direct call in the SotC eboot (plan A3 lote 5), so the callers are linked
+ * modules [a verificar: which]. Argument layout from shadPS4 b4e7ae7 kernel/time.cpp:457-530
+ * (consulted). The reference is inconsistent: it adds the DST amount on top of an offset that
+ * already includes it, and LocaltimeToUtc subtracts minuteswest where west is positive. Here the
+ * zone comes from the host (localtime_r/mktime, so per-date DST) and the arithmetic is plain:
+ *   local = utc + gmtoff;  utc = mktime(local wall clock).
+ * Timesec.west_sec keeps what both reference branches store (the offset east of UTC as u32, the
+ * name says "west") [a verificar against the console]. */
+typedef struct {
+    int64_t t;
+    uint32_t west_sec, dst_sec;
+} Timesec;
+typedef struct {
+    int32_t minuteswest, dsttime;
+} GuestTimezone;
+enum { DST_SECONDS = 3600 }; /* the DST step is not reported by libc; one hour everywhere */
+
+static ABI int32_t convert_utc_to_local(int64_t utc, int64_t* local, Timesec* st, uint64_t* dst) {
+    if (!local)
+        return ORBIS_EINVAL;
+    const time_t at = (time_t)utc;
+    struct tm tm;
+    if (!localtime_r(&at, &tm))
+        return ORBIS_EINVAL;
+    const uint32_t dst_sec = tm.tm_isdst > 0 ? DST_SECONDS : 0;
+    *local = utc + tm.tm_gmtoff;
+    if (st) {
+        st->t = utc;
+        st->west_sec = (uint32_t)(int32_t)tm.tm_gmtoff;
+        st->dst_sec = dst_sec;
+    }
+    if (dst)
+        *dst = dst_sec;
+    return 0;
+}
+
+/* `unused` is the second argument the reference carries without using it. */
+static ABI int32_t convert_local_to_utc(int64_t local, int64_t unused, int64_t* utc,
+                                        GuestTimezone* zone, int32_t* dst_seconds) {
+    (void)unused;
+    if (!zone)
+        return ORBIS_EINVAL;
+    const time_t wall = (time_t)local;
+    struct tm tm;
+    if (!gmtime_r(&wall, &tm))
+        return ORBIS_EINVAL;
+    tm.tm_isdst = -1;
+    const time_t at = mktime(&tm);
+    struct tm back;
+    if (!localtime_r(&at, &back))
+        return ORBIS_EINVAL;
+    if (utc)
+        *utc = (int64_t)at;
+    zone->minuteswest = (int32_t)(-back.tm_gmtoff / 60);
+    zone->dsttime = 0; /* folded into minuteswest, as runtime_kernel.c's sceKernelGettimezone */
+    if (dst_seconds)
+        *dst_seconds = back.tm_isdst > 0 ? DST_SECONDS : 0;
+    return 0;
+}
+
 static int realtime_policy(int32_t policy) {
     return policy == SCHED_FIFO_PS4 || policy == SCHED_RR_PS4;
 }
@@ -175,6 +236,8 @@ static const RuntimeExport exports[] = {
     {"sceKernelIsNeoMode", is_neo_mode},
     {"sceKernelUuidCreate", uuid_create},
     {"sceKernelSleep", kernel_sleep},
+    {"sceKernelConvertUtcToLocaltime", convert_utc_to_local},
+    {"sceKernelConvertLocaltimeToUtc", convert_local_to_utc},
     {"sched_get_priority_max", priority_max},
     {"sched_get_priority_min", priority_min},
     {"scePthreadGetthreadid", thread_id},
