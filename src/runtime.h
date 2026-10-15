@@ -67,6 +67,8 @@ uintptr_t runtime_kernel_ext_resolve(const char *name);
 void runtime_set_neo_mode(int enabled);
 /* sotc: gestures, USB keyboard and share menu with no device (runtime_peripherals.c). */
 uintptr_t runtime_peripherals_resolve(const char *name);
+/* sotc: libSceNgs2 muted fallback, handles only, no DSP (runtime_ngs2.c, ADR-0015). */
+uintptr_t runtime_ngs2_resolve(const char *name);
 /* sotc: libScePngEnc with a dependency-free encoder (runtime_pngenc.c). */
 uintptr_t runtime_pngenc_resolve(const char *name);
 /* sotc: libSceFiber (runtime_fiber.c). */

@@ -105,6 +105,8 @@ if [[ ${1:-} == --test ]]; then
     out/services-ext-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_pngenc.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/pngenc-test
     out/pngenc-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_ngs2.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/ngs2-test
+    out/ngs2-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_savedata_backup.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/savedata-backup-test
     out/savedata-backup-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_title_profile.c "${runtime[@]}" "${titles[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/title-profile-test

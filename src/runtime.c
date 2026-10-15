@@ -267,6 +267,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (peripherals) return peripherals;
     uintptr_t pngenc = runtime_pngenc_resolve(name);
     if (pngenc) return pngenc;
+    uintptr_t ngs2 = runtime_ngs2_resolve(name);
+    if (ngs2) return ngs2;
     uintptr_t fiber = runtime_fiber_resolve(name);
     if (fiber) return fiber;
     uintptr_t services = runtime_services_resolve(name);
