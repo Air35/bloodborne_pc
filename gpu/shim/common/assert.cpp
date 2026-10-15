@@ -1,4 +1,5 @@
 // bbport: GPU-side assertion failures stop the port with exit code 23.
+#include <execinfo.h>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
@@ -18,6 +19,12 @@ void assert_fail_impl() {
     }
     std::fflush(stdout);
     std::fputs("STOP: GPU library assertion failed (see GPU log above)\n", stderr);
+    // sotc: where the assertion came from. The call chain (symbols of the GPU library and of
+    // bb-probe, which is linked -rdynamic) is the only evidence a headless run leaves of which
+    // Vulkan call failed. Best effort, async-signal-safe variant (no allocation).
+    void* frames[32];
+    const int depth = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, depth, STDERR_FILENO);
     std::_Exit(23);
 }
 
