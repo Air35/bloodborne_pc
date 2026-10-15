@@ -263,6 +263,8 @@ uintptr_t runtime_resolve(const char *name, int is_data) {
     if (eventflag) return eventflag;
     uintptr_t sotc_kernel = runtime_sotc_kernel_resolve(name);
     if (sotc_kernel) return sotc_kernel;
+    uintptr_t sotc_devices = runtime_sotc_devices_resolve(name);
+    if (sotc_devices) return sotc_devices;
     uintptr_t fiber = runtime_fiber_resolve(name);
     if (fiber) return fiber;
     uintptr_t services = runtime_services_resolve(name);

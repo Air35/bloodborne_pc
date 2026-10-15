@@ -200,12 +200,86 @@ static void network_and_posix(void) {
     assert(progname && !strcmp(*progname, "eboot.bin"));
 }
 
+/* Peripherals with no device behind them (runtime_sotc_devices.c, plan A3 lote 5). */
+typedef int32_t(ABI* Gesture2)(int32_t, const void*);
+typedef int32_t(ABI* GestureIndex)(int32_t, const void*, uint32_t, void*);
+typedef void(ABI* ImeHandler)(void*, const void*);
+typedef int32_t(ABI* KeyboardOpen)(int32_t, const void*);
+typedef int32_t(ABI* KeyboardClose)(int32_t);
+typedef int32_t(ABI* ImeUpdate)(ImeHandler);
+typedef struct {
+    uint32_t option;
+    int8_t reserved1[4];
+    void* arg;
+    ImeHandler handler;
+    int8_t reserved2[8];
+} KeyboardParam; /* shadPS4 b4e7ae7 ime/ime_common.h (OrbisImeKeyboardParam) */
+static ABI void ime_handler(void* arg, const void* event) {
+    (void)arg;
+    (void)event;
+    abort(); /* no keyboard: no event may reach the game */
+}
+
+static void gestures(void) {
+    static const char* const names[] = {"sceSystemGestureOpen",
+                                        "sceSystemGestureClose",
+                                        "sceSystemGestureCreateTouchRecognizer",
+                                        "sceSystemGestureUpdateTouchRecognizer",
+                                        "sceSystemGestureInitializePrimitiveTouchRecognizer",
+                                        "sceSystemGestureUpdatePrimitiveTouchRecognizer",
+                                        "sceSystemGestureFinalizePrimitiveTouchRecognizer"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        Gesture2 f = GET(Gesture2, names[i], "libSceSystemGesture");
+        assert(f && f(0, NULL) == 0);
+    }
+    Gesture2 count = GET(Gesture2, "sceSystemGestureGetTouchEventsCount", "libSceSystemGesture");
+    GestureIndex by_index =
+        GET(GestureIndex, "sceSystemGestureGetTouchEventByIndex", "libSceSystemGesture");
+    unsigned char event[64] = {0xAA};
+    assert(count && count(0, NULL) == 0); /* eboot+0xa2c232: jle skips the loop */
+    assert(by_index && by_index(0, NULL, 0, event) == 0 && event[0] == 0xAA);
+}
+
+static void keyboard(void) {
+    enum { USER = 1, USER_INVALID = -1 };
+    const int32_t busy = (int32_t)0x80BC0001, not_opened = (int32_t)0x80BC0002;
+    const int32_t bad_user = (int32_t)0x80BC0010, bad_handler = (int32_t)0x80BC0022;
+    const int32_t bad_address = (int32_t)0x80BC0031, bad_reserved = (int32_t)0x80BC0032;
+    KeyboardOpen open = GET(KeyboardOpen, "sceImeKeyboardOpen", "libSceIme");
+    KeyboardClose close = GET(KeyboardClose, "sceImeKeyboardClose", "libSceIme");
+    ImeUpdate update = GET(ImeUpdate, "sceImeUpdate", "libSceIme");
+    assert(open && close && update);
+    KeyboardParam param = {.handler = ime_handler};
+    assert(update(ime_handler) == not_opened && close(USER) == not_opened);
+    assert(open(USER, NULL) == bad_address);
+    param.handler = NULL;
+    assert(open(USER, &param) == bad_handler);
+    param.handler = ime_handler;
+    assert(open(USER_INVALID, &param) == bad_user);
+    param.reserved2[3] = 1;
+    assert(open(USER, &param) == bad_reserved);
+    param.reserved2[3] = 0;
+    assert(open(USER, &param) == 0 && open(USER, &param) == busy);
+    assert(update(ime_handler) == 0); /* no events: ime_handler would abort */
+    assert(close(USER_INVALID) == bad_user && close(USER) == 0 && close(USER) == not_opened);
+}
+
+static void share(void) {
+    Int0 init = GET(Int0, "sceShareUtilityInitializeEx2", "libSceShareUtility");
+    Int0 menu = GET(Int0, "sceShareUtilityOpenShareMenuDefault", "libSceShareUtility");
+    assert(init && init() == 0 && menu && menu() == 0);
+}
+
 int main(void) {
     runtime_start(1);
     kernel_support();
     services();
     dialogs();
     network_and_posix();
-    puts("PASS: kernel module-support symbols, offline services, DiscMap 7C98");
+    gestures();
+    keyboard();
+    share();
+    puts("PASS: kernel module-support symbols, offline services, DiscMap 7C98, peripherals "
+         "without a device");
     return 0;
 }
