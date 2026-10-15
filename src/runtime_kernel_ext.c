@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -117,6 +118,25 @@ static ABI int32_t convert_local_to_utc(int64_t local, int64_t unused, int64_t* 
     zone->dsttime = 0; /* folded into minuteswest, as runtime_kernel.c's sceKernelGettimezone */
     if (dst_seconds)
         *dst_seconds = back.tm_isdst > 0 ? DST_SECONDS : 0;
+    return 0;
+}
+
+/* sceLibcHeapGetTraceInfo (NWtTN10cJzE#libSceLibcInternalExt): no reference implementation
+ * (shadPS4 b4e7ae7 has only the NID name). Contract read from the caller, the libc heap init at
+ * libc.prx +0x63df1 (plan A3 lote 6): it passes a 32-byte struct preloaded from a constant
+ * {u32 size = 0x20, u32 0, u32 1, u32 0, ...}, ignores the result, then reads the u32 at +0xC
+ * (non-zero turns heap tracing on) and the u64 at +0x10 and +0x18. Tracing is off here: the
+ * fields past the header are zeroed, within the size the caller declared. Console behaviour for
+ * a size below 0x10 or other versions of the struct is [a verificar]. */
+static ABI int32_t libc_heap_trace_info(void* info) {
+    enum { HEADER = 0x0c, FULL = 0x20 };
+    if (!info)
+        return ORBIS_EINVAL;
+    uint32_t declared;
+    memcpy(&declared, info, sizeof declared);
+    const uint32_t end = declared < FULL ? declared : FULL;
+    if (end > HEADER)
+        memset((unsigned char*)info + HEADER, 0, end - HEADER);
     return 0;
 }
 
@@ -246,6 +266,7 @@ static const RuntimeExport exports[] = {
     {"sceKernelIsNeoMode", is_neo_mode},
     {"sceKernelUuidCreate", uuid_create},
     {"sceKernelSleep", kernel_sleep},
+    {"sceLibcHeapGetTraceInfo", libc_heap_trace_info},
     {"sceKernelConvertUtcToLocaltime", convert_utc_to_local},
     {"sceKernelConvertLocaltimeToUtc", convert_local_to_utc},
     {"sched_get_priority_max", priority_max},

@@ -212,6 +212,21 @@ int main(void) {
     assert(to_utc(local, 0, &utc, NULL, &dst_seconds) == (int32_t)0x80020016);
     unsetenv("TZ");
     tzset();
+
+    /* sceLibcHeapGetTraceInfo: the libc heap init (libc.prx +0x63df1, docs/plans A3 lote 6)
+     * passes a 32-byte struct {u32 size = 0x20, u32 0, u32 1, u32 trace flag, u64, u64}, ignores
+     * the result and reads the flag and the two quadwords. Tracing off = those fields zero. */
+    typedef int32_t(ABI * TraceInfo)(void*);
+    TraceInfo trace = (TraceInfo)resolve("sceLibcHeapGetTraceInfo", "libSceLibcInternalExt");
+    assert(trace);
+    uint32_t info[8] = {0x20, 0, 1, 0xdeadbeef, 0xfeedface, 0x12345678, 0x9abcdef0, 0xcafef00d};
+    assert(trace(info) == 0);
+    assert(info[0] == 0x20 && info[1] == 0 && info[2] == 1); /* the caller's header is kept */
+    assert(info[3] == 0 && info[4] == 0 && info[5] == 0 && info[6] == 0 && info[7] == 0);
+    uint32_t small[8] = {0x10, 0, 1, 0xdeadbeef, 0xfeedface, 0x12345678, 0x9abcdef0, 0xcafef00d};
+    assert(trace(small) == 0 && small[3] == 0); /* only what the declared size covers... */
+    assert(small[4] == 0xfeedface && small[7] == 0xcafef00d); /* ...nothing past it */
+    assert(trace(NULL) == (int32_t)0x80020016);
     puts("PASS: base-PS4 mode, UUID v4, sleep, priority ranges, thread IDs, schedparam, cancel, "
          "available memory, time zone conversion");
     return 0;
