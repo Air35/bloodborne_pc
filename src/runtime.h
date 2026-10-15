@@ -59,6 +59,10 @@ const char *runtime_symbol(const char *nid);
 int runtime_nid(const char *name, char out[12]);
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *nid);
 uintptr_t runtime_kernel_resolve(const char *name);
+/* sotc: kernel event flags (runtime_eventflag.c). */
+uintptr_t runtime_eventflag_resolve(const char *name);
+/* sotc: small libkernel/libScePosix functions the SotC imports (runtime_sotc_kernel.c). */
+uintptr_t runtime_sotc_kernel_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);
 uintptr_t runtime_services_resolve(const char *name);
 /* Online play (runtime_net.c, BB_ONLINE=1): the online module answers the network and PSN imports. */
