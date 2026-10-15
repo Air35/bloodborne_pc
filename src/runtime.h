@@ -65,6 +65,8 @@ uintptr_t runtime_eventflag_resolve(const char *name);
 uintptr_t runtime_sotc_kernel_resolve(const char *name);
 /* sotc: gestures, USB keyboard and share menu with no device (runtime_sotc_devices.c). */
 uintptr_t runtime_sotc_devices_resolve(const char *name);
+/* sotc: libScePngEnc with a dependency-free encoder (runtime_sotc_png.c). */
+uintptr_t runtime_sotc_png_resolve(const char *name);
 /* sotc: libSceFiber (runtime_fiber.c). */
 uintptr_t runtime_fiber_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);
