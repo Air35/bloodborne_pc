@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: kernel module-support symbols and offline services that Shadow of the Colossus (or its
- * libc.prx/libSceFios2.prx) imports and bbport lacked. Contracts: gow3 91b6e61
+/* sotc: kernel module-support symbols and offline services that the games (or their
+ * libc.prx/libSceFios2.prx) import and the base port lacked. Contracts: gow3 91b6e61
  * src/runtime_kernel.c:167-183 and src/runtime_services.c (trophy release, safe area);
  * shadPS4 b4e7ae7 src/core/libraries/disc_map/disc_map.cpp:20-26 (consulted). */
 #define _GNU_SOURCE
@@ -200,7 +200,7 @@ static void network_and_posix(void) {
     assert(progname && !strcmp(*progname, "eboot.bin"));
 }
 
-/* Peripherals with no device behind them (runtime_sotc_devices.c, plan A3 lote 5). */
+/* Peripherals with no device behind them (runtime_peripherals.c, plan A3 lote 5). */
 typedef int32_t(ABI* Gesture2)(int32_t, const void*);
 typedef int32_t(ABI* GestureIndex)(int32_t, const void*, uint32_t, void*);
 typedef void(ABI* ImeHandler)(void*, const void*);

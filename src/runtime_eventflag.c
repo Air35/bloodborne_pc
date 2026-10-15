@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: kernel event flags (libkernel sceKernel*EventFlag), imported by Shadow of the Colossus
- * (30 static call sites, docs/plans/2026-10-14-a2-inventario-imports.md). Contracts: PS4 SDK
+/* sotc: kernel event flags (libkernel sceKernel*EventFlag), a system library any title can
+ * import (30 static call sites in the first target, docs/plans/2026-10-14-a2-inventario-imports.md).
+ * Contracts: PS4 SDK
  * behaviour as implemented by shadPS4 b4e7ae7 src/core/libraries/kernel/threads/event_flag.cpp
  * (consulted, reimplemented): AND/OR waits, clear none/all/waited bits, Poll = EBUSY instead of
  * ETIMEDOUT, single-waiter flags refuse a second waiter (EPERM), Delete wakes waiters (EACCES).

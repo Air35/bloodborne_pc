@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: small libkernel/libScePosix functions Shadow of the Colossus imports and bbport lacked
- * (runtime_sotc_kernel.c). Values: ADR-0009 (base PS4) and shadPS4 b4e7ae7
+/* sotc: small libkernel/libScePosix functions the base port lacked (runtime_kernel_ext.c).
+ * Values: ADR-0009 (base PS4, the neutral default) and shadPS4 b4e7ae7
  * src/core/libraries/kernel/threads/pthread.h:32-40 (priority ranges), consulted only. */
 #define _GNU_SOURCE
 #include <assert.h>
@@ -91,7 +91,12 @@ int main(void) {
     }
     /* NID of sceKernelIsNeoMode is fixed by the SDK (docs/02 §4). */
     NoArgs neo = (NoArgs)runtime_resolve("WslcK1FQcGI#libkernel", 0);
-    assert(neo && neo() == 0);
+    assert(neo && neo() == 0); /* neutral default: base PS4 (ADR-0009) */
+    /* The game profile pushes its value (ADR-0016); the core never asks for the title. */
+    runtime_set_neo_mode(1);
+    assert(neo() == 1);
+    runtime_set_neo_mode(0);
+    assert(neo() == 0);
 
     Uuid uuid = (Uuid)resolve("sceKernelUuidCreate", "libkernel");
     unsigned char a[16], b[16];
@@ -180,7 +185,7 @@ int main(void) {
 
     /* Time zone conversions with POSIX TZ strings (no tzdata needed). Contract: shadPS4 b4e7ae7
      * kernel/time.cpp:457-530 (consulted); its DST sum and its LocaltimeToUtc sign are not
-     * followed (see runtime_sotc_kernel.c), so the expectations are the arithmetic itself. */
+     * followed (see runtime_kernel_ext.c), so the expectations are the arithmetic itself. */
     UtcToLocal to_local = (UtcToLocal)resolve("sceKernelConvertUtcToLocaltime", "libkernel");
     LocalToUtc to_utc = (LocalToUtc)resolve("sceKernelConvertLocaltimeToUtc", "libkernel");
     assert(to_local && to_utc);

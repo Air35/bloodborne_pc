@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: peripherals Shadow of the Colossus imports that have no device behind them here
+/* sotc: peripherals the games import that have no device behind them here
  * (docs/plans/2026-10-15-a3-hle-lote5.md): touchpad gestures, the USB keyboard of libSceIme and
  * the system share menu. Contracts consulted in shadPS4 b4e7ae7 (reimplemented, nothing copied):
  * src/core/libraries/system_gesture/system_gesture.cpp (every entry STUBBED, returns OK),
@@ -169,6 +169,6 @@ static const RuntimeExport exports[] = {
     {"sceShareUtilityOpenShareMenuDefault", share_open_menu},
 };
 
-uintptr_t runtime_sotc_devices_resolve(const char* name) {
+uintptr_t runtime_peripherals_resolve(const char* name) {
     return RUNTIME_LOOKUP(exports, name);
 }

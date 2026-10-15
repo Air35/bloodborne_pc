@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: libScePngEnc (runtime_sotc_png.c, plan docs/plans/2026-10-15-a3-hle-lote5.md). The PNG
+/* sotc: libScePngEnc (runtime_pngenc.c, plan docs/plans/2026-10-15-a3-hle-lote5.md). The PNG
  * produced is decoded back here (chunks, CRC-32, stored deflate blocks, Adler-32, pixels) with no
  * library. Layouts and error codes: shadPS4 b4e7ae7 libpng/pngenc.h, pngenc_error.h (consulted);
  * the arguments mirror the SotC call at eboot+0x963ab..0x963e7 (RGB, 8 bits, filter 0xf, level 6,

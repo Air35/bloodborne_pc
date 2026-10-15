@@ -263,6 +263,6 @@ static const RuntimeExport exports[] = {
     {"scePngEncEncode", png_encode},
 };
 
-uintptr_t runtime_sotc_png_resolve(const char* name) {
+uintptr_t runtime_pngenc_resolve(const char* name) {
     return RUNTIME_LOOKUP(exports, name);
 }

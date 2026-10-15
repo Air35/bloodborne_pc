@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* sotc: small libkernel/libScePosix functions Shadow of the Colossus imports and bbport lacked
- * (--check-imports, docs/plans/2026-10-14-a1-imports-nid-biblioteca.md). Resolved by name
+/* sotc: small libkernel/libScePosix functions the games' libraries import and the base port
+ * lacked (--check-imports, docs/plans/2026-10-14-a1-imports-nid-biblioteca.md). Title-agnostic
+ * (ADR-0016): per-title values are set by the profile through runtime_set_*. Resolved by name
  * (runtime_nid.c), so the same entry serves libkernel and libScePosix spellings.
  * References (consulted, reimplemented): ADR-0009 (sceKernelIsNeoMode = 0, base PS4);
  * shadPS4 b4e7ae7 src/core/libraries/kernel/threads/pthread.h:32-40 (priority ranges),
  * pthread.cpp:479-491 (sched_get_priority_*), kernel.cpp:169-185 (UUID). */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -21,9 +23,17 @@ enum { POSIX_EINVAL = 22 };                          /* FreeBSD errno numbers */
 enum { SCHED_FIFO_PS4 = 1, SCHED_RR_PS4 = 3 };       /* FreeBSD sched policies */
 enum { PRIO_FIFO_LOWEST = 256, PRIO_FIFO_HIGHEST = 767 };
 
-/* ADR-0009: the game must see a base PS4 (no Pro paths). */
+/* ADR-0009: the neutral default is a base PS4 (no Pro paths). A game profile may push another
+ * value through runtime_set_neo_mode (ADR-0016: the core never asks which title is running).
+ * Module state behind an accessor (docs/05 §4); set once at start, before guest threads. */
+static atomic_int neo_mode;
+
+void runtime_set_neo_mode(int enabled) {
+    atomic_store_explicit(&neo_mode, enabled != 0, memory_order_relaxed);
+}
+
 static ABI int32_t is_neo_mode(void) {
-    return 0;
+    return atomic_load_explicit(&neo_mode, memory_order_relaxed);
 }
 
 /* Random RFC 4122 version-4 UUID into a 16-byte guest buffer. */
@@ -253,6 +263,6 @@ static const RuntimeExport exports[] = {
     {"sceKernelIsAddressSanitizerEnabled", address_sanitizer_enabled},
 };
 
-uintptr_t runtime_sotc_kernel_resolve(const char* name) {
+uintptr_t runtime_kernel_ext_resolve(const char* name) {
     return RUNTIME_LOOKUP(exports, name);
 }

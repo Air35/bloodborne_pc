@@ -136,7 +136,7 @@ static void expect_file(const char* name, const char* text) {
 }
 
 int main(void) {
-    char user_root[] = "/tmp/sotc-save-test-XXXXXX";
+    char user_root[] = "/tmp/save-backup-test-XXXXXX";
     assert(mkdtemp(user_root));
     runtime_file_configure(user_root, user_root);
     runtime_start(1);

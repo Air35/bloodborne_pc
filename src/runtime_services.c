@@ -230,8 +230,8 @@ static int32_t dialog_term(int i) {
     static ABI int32_t tag##_status(void) { return dialog_status(i); } \
     static ABI int32_t tag##_term(void) { return dialog_term(i); }
 DIALOG(profile,3) DIALOG(commerce,4)
-/* sotc: progress-bar dialogs (Shadow of the Colossus calls sceSaveDataDialogProgressBarSetValue
- * 12 times). From gow3 91b6e61 src/runtime_services.c (dialog_open_progress, dialog_close,
+/* sotc: progress-bar dialogs (a target title calls sceSaveDataDialogProgressBarSetValue
+ * 12 times, plan A2). From gow3 91b6e61 src/runtime_services.c (dialog_open_progress, dialog_close,
  * dialog_progress, dialog_result, dialog_open_mode; docs/auditorias/2026-10-14-gow3-pecas-a1-*).
  * A progress bar shows the game's own work: it runs until the game closes it; other modes
  * finish at once with OK, as before. */

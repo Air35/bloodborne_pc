@@ -61,12 +61,14 @@ uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *n
 uintptr_t runtime_kernel_resolve(const char *name);
 /* sotc: kernel event flags (runtime_eventflag.c). */
 uintptr_t runtime_eventflag_resolve(const char *name);
-/* sotc: small libkernel/libScePosix functions the SotC imports (runtime_sotc_kernel.c). */
-uintptr_t runtime_sotc_kernel_resolve(const char *name);
-/* sotc: gestures, USB keyboard and share menu with no device (runtime_sotc_devices.c). */
-uintptr_t runtime_sotc_devices_resolve(const char *name);
-/* sotc: libScePngEnc with a dependency-free encoder (runtime_sotc_png.c). */
-uintptr_t runtime_sotc_png_resolve(const char *name);
+/* sotc: small libkernel/libScePosix functions the base port lacked (runtime_kernel_ext.c). */
+uintptr_t runtime_kernel_ext_resolve(const char *name);
+/* sotc: sceKernelIsNeoMode result; 0 (base PS4, ADR-0009) until a game profile sets it. */
+void runtime_set_neo_mode(int enabled);
+/* sotc: gestures, USB keyboard and share menu with no device (runtime_peripherals.c). */
+uintptr_t runtime_peripherals_resolve(const char *name);
+/* sotc: libScePngEnc with a dependency-free encoder (runtime_pngenc.c). */
+uintptr_t runtime_pngenc_resolve(const char *name);
 /* sotc: libSceFiber (runtime_fiber.c). */
 uintptr_t runtime_fiber_resolve(const char *name);
 uintptr_t runtime_file_resolve(const char *name);

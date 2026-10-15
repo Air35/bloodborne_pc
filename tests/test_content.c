@@ -64,8 +64,8 @@ int main(int argc,char **argv) {
     /* <user>/addcont/<title>/<label>: reported installed (The Old Hunters' entitlement). */
     char path[160];
     snprintf(path,sizeof(path),"%s/addcont",user_dir); assert(!mkdir(path,0755));
-    snprintf(path,sizeof(path),"%s/addcont/CUSA00900",user_dir); assert(!mkdir(path,0755));
-    snprintf(path,sizeof(path),"%s/addcont/CUSA00900/SPEXPANSIONDLC03",user_dir); assert(!mkdir(path,0755));
+    snprintf(path,sizeof(path),"%s/addcont/TEST00000",user_dir); assert(!mkdir(path,0755)); /* sotc: fictitious title (ADR-0016) */
+    snprintf(path,sizeof(path),"%s/addcont/TEST00000/SPEXPANSIONDLC03",user_dir); assert(!mkdir(path,0755));
     assert(list(0,NULL,0,&h.hits)==0 && h.hits==1);
     memset(entries,0xaa,sizeof(entries));
     assert(list(0,entries,2,&h.hits)==0 && h.hits==1);
@@ -73,7 +73,7 @@ int main(int argc,char **argv) {
     uint32_t status; memcpy(&status,entries+20,4); assert(status==4);
     for (unsigned i=24;i<sizeof(entries);++i) assert(entries[i]==0xaa);
     rmdir(path);
-    snprintf(path,sizeof(path),"%s/addcont/CUSA00900",user_dir); rmdir(path);
+    snprintf(path,sizeof(path),"%s/addcont/TEST00000",user_dir); rmdir(path);
     snprintf(path,sizeof(path),"%s/addcont",user_dir); rmdir(path);
     rmdir(user_dir);
     assert(unload(0xb4)==0 && loaded(0xb4)==0);
