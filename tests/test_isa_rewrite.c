@@ -30,8 +30,20 @@ enum {
     S6 = 0x140,
     S7 = 0x180,
     S8 = 0x1c0,
-    S9 = 0x200
+    S9 = 0x200,
+    S10 = 0x240
 };
+/* S10 (red zone): the canary rdx at [rsp-0x80], [rsp-0x78], [rsp-0x70], [rsp-0x68]; movq xmm0,rdi;
+ * movq xmm1,rsi; extrq xmm0,xmm1 (the site, +30); then rax = OR of (slot ^ rdx): 0 when the stub
+ * left the 128 bytes below the guest's rsp alone, as the SysV ABI promises a leaf function. */
+static const uint8_t S10_CODE[] = {
+    0x48, 0x89, 0x54, 0x24, 0x80, 0x48, 0x89, 0x54, 0x24, 0x88, 0x48, 0x89, 0x54, 0x24, 0x90,
+    0x48, 0x89, 0x54, 0x24, 0x98, 0x66, 0x48, 0x0f, 0x6e, 0xc7, 0x66, 0x48, 0x0f, 0x6e, 0xce,
+    0x66, 0x0f, 0x79, 0xc1,                   /* extrq xmm0,xmm1 */
+    0x48, 0x8b, 0x44, 0x24, 0x80, 0x48, 0x31, 0xd0, /* mov rax,[rsp-0x80]; xor rax,rdx */
+    0x48, 0x8b, 0x4c, 0x24, 0x88, 0x48, 0x31, 0xd1, 0x48, 0x09, 0xc8,
+    0x48, 0x8b, 0x4c, 0x24, 0x90, 0x48, 0x31, 0xd1, 0x48, 0x09, 0xc8,
+    0x48, 0x8b, 0x4c, 0x24, 0x98, 0x48, 0x31, 0xd1, 0x48, 0x09, 0xc8, 0xc3};
 
 static const uint8_t
     S1_CODE[] = /* mov [rsp-8],0xdeadbeef; mov ecx,edi; blsr ecx,ecx; mov rdx,[rsp-8]; mov
@@ -186,7 +198,7 @@ static void test_jmp_and_flags(void) {
     unsigned char* site = image + S1 + 0x0b;
     CHECK(site[0] == 0xe9 && site + 5 + rel32_at(site + 1) == stubs); /* jmp to stub 0 */
     static const uint8_t prologue[] = {0x48, 0x8d, 0xa4, 0x24,
-                                       0x00, 0xff, 0xff, 0xff}; /* lea rsp,[rsp-0x100] */
+                                       0x80, 0xfe, 0xff, 0xff}; /* lea rsp,[rsp-0x180] */
     CHECK(memcmp(stubs, prologue, sizeof prologue) == 0);
     Snippet s1 = (Snippet)(void*)(image + S1);
     static const uint32_t inputs[] = {0, 1, 0xf0, 0x80000000, 0xffffffff, 0x12345678};
@@ -258,6 +270,22 @@ static void test_sse4a_patched(void) {
                       model_insertq(values[v], 0x5a, length, index));
             }
     CHECK(t->hits[SITE_S6] > 0 && t->hits[SITE_S7] > 0 && t->hits[SITE_S8] > 0);
+    isa_table_free(t);
+}
+
+/* The stub of a rewritten site must not write the guest's red zone (SysV: the 128 bytes below
+ * rsp belong to the leaf function). Found while comparing with ShadowOfTheColossus-PC, whose
+ * patchers protect it explicitly; here the stub keeps its frame below the red zone. */
+static void test_stub_keeps_red_zone(void) {
+    reset_region();
+    IsaSite site = site_at(S10 + 30, 4, ISA_EXTRQ, ISA_MODE_JMP_RELOCATE, 0, 1);
+    relocate(&site, S10 + 34, 5);
+    IsaTable* t = table_of(&site, 1);
+    const IsaReport r = isa_rewrite_apply(t, image, stubs, CPU_SET_ALL);
+    CHECK(r.rewritten == 1);
+    Snippet s10 = (Snippet)(void*)(image + S10);
+    CHECK(s10(0x1122334455667788ull, 8 | 4 << 8, 0xc0ffee0123456789ull) == 0);
+    CHECK(t->hits[0] == 1);
     isa_table_free(t);
 }
 
@@ -555,6 +583,7 @@ int main(void) {
     memcpy(pristine + S7, S7_CODE, sizeof S7_CODE);
     memcpy(pristine + S8, S8_CODE, sizeof S8_CODE);
     memcpy(pristine + S9, S6_CODE, sizeof S6_CODE); /* S9 = S6, trapped instead of jumped */
+    memcpy(pristine + S10, S10_CODE, sizeof S10_CODE);
     isa_emulate_set_image(image);
 
     test_table_validation();
@@ -564,6 +593,7 @@ int main(void) {
     test_relocated_site();
     test_adjacent_and_long_relocation();
     test_sse4a_patched();
+    test_stub_keeps_red_zone();
     test_int3_sites();
     test_changed_bytes_are_skipped();
     test_changed_next_instruction_downgrades();

@@ -308,15 +308,20 @@ static int rel32_to(const unsigned char* next, const unsigned char* target, int3
     return 1;
 }
 
-/* Frame offsets, from rsp right after `lea rsp,[rsp-0x100]`: gpr[i] at 8*i; the XMM images of
- * IsaRegs.xmm follow the gprs (IsaRegs starts 8 bytes below, at the pushed rflags). */
-enum { FRAME_BYTES = 0x100, XMM_DST_AT = 0x80, XMM_SRC_AT = 0x90 };
+/* Frame offsets, from rsp right after `lea rsp,[rsp-0x180]`: gpr[i] at 8*i; the XMM images of
+ * IsaRegs.xmm follow the gprs (IsaRegs starts 8 bytes below, at the pushed rflags). The frame is
+ * 0x80 bytes larger than what it holds so that nothing lands in the guest's red zone (the 128
+ * bytes below its rsp, SysV ABI): with 0x100 the XMM images overwrote [rsp-0x80, rsp-0x60) of a
+ * leaf function (tests/test_isa_rewrite.c, test_stub_keeps_red_zone). */
+enum { FRAME_BYTES = 0x180, XMM_DST_AT = 0x80, XMM_SRC_AT = 0x90 };
+_Static_assert(FRAME_BYTES - (XMM_SRC_AT + 16) >= 128, "the stub frame must stay below the red zone");
 
 static void emit_prologue(unsigned char** p, const IsaSite* s) {
     static const uint8_t lea_rsp_down[] = {0x48, 0x8d, 0xa4, 0x24,
-                                           0x00, 0xff, 0xff, 0xff}; /* lea rsp,[rsp-0x100] */
+                                           0x80, 0xfe, 0xff, 0xff}; /* lea rsp,[rsp-0x180] */
     static const uint8_t lea_rax_rsp_up[] = {0x48, 0x8d, 0x84, 0x24,
-                                             0x00, 0x01, 0x00, 0x00}; /* lea rax,[rsp+0x100] */
+                                             0x80, 0x01, 0x00, 0x00}; /* lea rax,[rsp+0x180] */
+    _Static_assert(FRAME_BYTES == 0x180, "the lea displacements above encode FRAME_BYTES");
     emit_bytes(p, lea_rsp_down, sizeof lea_rsp_down);
     for (int reg = 0; reg < 16; reg++)
         if (reg != 4)
@@ -349,7 +354,7 @@ static void emit_call(unsigned char** p, const IsaSite* s, uint64_t* hit) {
 
 static void emit_epilogue(unsigned char** p, const IsaSite* s) {
     static const uint8_t lea_rsp_up[] = {0x48, 0x8d, 0xa4, 0x24,
-                                         0x00, 0x01, 0x00, 0x00}; /* lea rsp,[rsp+0x100] */
+                                         0x80, 0x01, 0x00, 0x00}; /* lea rsp,[rsp+0x180] */
     for (int reg = 0; reg < 16; reg++)
         if (reg != 4)
             emit_rsp_mov(p, 0x8b, reg, (uint8_t)(8 * reg));
