@@ -106,6 +106,38 @@ void runtime_file_configure(const char *app0,const char *user) {
         runtime_file_mount(guest,path);
     }
 }
+#ifndef _WIN32
+/* sotc: guest paths are case-insensitive, as on the PS4 and in shadPS4 (the game asks for
+ * /app0/pakn.psarc, the dump has pakN.psarc). When the host path is missing, each component
+ * after `root` (the mount's host folder) is replaced in place by the entry of its folder that
+ * matches it without case; a component with no match ends the search (the rest is created or
+ * reported missing as named). Case only: the length never changes. */
+static void match_case(char *path,size_t root) {
+    struct stat st;
+    if (!stat(path,&st)) return;
+    for (char *start=path+root;*start;) {
+        while (*start=='/') ++start;
+        if (!*start) return;
+        char *end=strchr(start,'/');
+        const char saved=end ? *end : 0;
+        if (end) *end=0;
+        if (stat(path,&st)) {
+            start[-1]=0; /* the folder that holds this component */
+            DIR *d=opendir(start-1==path ? "/" : path);
+            start[-1]='/';
+            struct dirent *e;
+            int found=0;
+            while (d && (e=readdir(d)))
+                if (!strcasecmp(e->d_name,start)) { memcpy(start,e->d_name,strlen(start)); found=1; break; }
+            if (d) closedir(d);
+            if (!found) { if (end) *end=saved; return; }
+        }
+        if (!end) return;
+        *end=saved;
+        start=end+1;
+    }
+}
+#endif
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
@@ -123,13 +155,19 @@ static int translate(const char *guest,char *out,size_t size) {
     int result=0;
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
+#ifndef _WIN32
+    if (!result) match_case(out,strlen(m->host));
+#endif
     const int game_path=m && (!strcmp(m->guest,"/app0") || !strcmp(m->guest,"/hostapp"));
     pthread_mutex_unlock(&lock);
     if (!result && game_path && update_root[0] && buffer[best]) {
         char updated[1100];
         HostStat st;
-        if ((size_t)snprintf(updated,sizeof(updated),"%s%s",update_root,buffer+best)<sizeof(updated) &&
-            !host_stat(updated,&st) && (size_t)snprintf(out,size,"%s",updated)>=size) result=ENAMETOOLONG;
+        const int fits=(size_t)snprintf(updated,sizeof(updated),"%s%s",update_root,buffer+best)<sizeof(updated);
+#ifndef _WIN32
+        if (fits) match_case(updated,strlen(update_root));
+#endif
+        if (fits && !host_stat(updated,&st) && (size_t)snprintf(out,size,"%s",updated)>=size) result=ENAMETOOLONG;
     }
     if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     return result;
