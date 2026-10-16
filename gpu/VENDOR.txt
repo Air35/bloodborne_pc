@@ -8,4 +8,16 @@ Backported from upstream after b4e7ae7 (2026-10-02), recompiler correctness fixe
   mode (#5126), e518a6515 S_SUBB_U32 SCC wrap (#5031), 282e5c792 S_ADDC_U32 SCC carry-out (#5030),
   fb6367d29 32-bit literals in the high dword of 64-bit floats (#5114), 94e217781 V_BFM_B32 (#5185),
   d1cb90dbb ADDC (#5200), dd43d1cac V_CVT_PK_U8_F32 (#5194), ef08b1e1f V_ALIGNBIT/ALIGNBYTE (#5186).
-sotc (sotc-remake, marcas "sotc:"): video_core/renderer_vulkan/vk_platform.cpp: superfície Vulkan headless (VK_EXT_headless_surface) para driver SDL sem janela (offscreen/dummy), para rodar o renderizador sem compositor (docs/plans/2026-10-15-a3-gpu-headless.md).
+Since the union with AjncSystem/ShadowOfTheColossus-PC 70bb438 (sotc-remake ADR-0019, audit
+docs/auditorias/2026-10-15-sotc-pc-70bb43859cd7.md): video_core/ is the shadPS4 SotC fork's state
+as carried by that project (its own "sotc:" marks), not the bbport 0.3-0.51 one.
+sotc (sotc-remake, marcas "sotc:"):
+  video_core/renderer_vulkan/vk_platform.cpp: superfície Vulkan headless (VK_EXT_headless_surface)
+    para driver SDL sem janela (offscreen/dummy), e VK_KHR_surface também nela
+    (docs/plans/2026-10-15-a3-gpu-headless.md).
+  video_core/buffer_cache/buffer_cache.h: ARENA_PAGE_BITS = SOTC_ARENA_PAGE_BITS (padrão 32; 29 no
+    lavapipe, ADR-0018 A').
+  video_core/renderer_vulkan/vk_rasterizer.cpp (lambda com tipo explícito) e
+    video_core/page_manager.cpp (MAX_PATH): compilação no Linux.
+  video_core/renderer_vulkan/vk_recorder_cmds.inc: regerado com scripts/gen_recorder_cmds.py sobre
+    Vulkan-Headers 1.4.344 (ADR-0011).
