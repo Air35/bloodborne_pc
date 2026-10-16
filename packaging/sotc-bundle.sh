@@ -150,5 +150,5 @@ __PAYLOAD_BELOW__
 EOF
 cat "$stage/header.sh" "$payload" > "dist/$name.run"
 chmod 755 "dist/$name.run"
-sha256sum "dist/$name.run" > "dist/$name.run.sha256"
+(cd dist && sha256sum "$name.run" > "$name.run.sha256") # checked next to the file
 echo "Bundle: dist/$name.run ($(du -h "dist/$name.run" | cut -f1)); $(ls "$root/lib" | wc -l) bundled libraries"
