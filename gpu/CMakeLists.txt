@@ -43,14 +43,40 @@ endif()
 find_package(Vulkan REQUIRED)
 find_package(fmt REQUIRED)
 find_package(Boost REQUIRED)
-find_package(magic_enum REQUIRED)
+# bbport (Windows): MSYS2 has no magic_enum/miniz packages; the submodules are used instead.
+find_package(magic_enum QUIET)
+if (NOT magic_enum_FOUND)
+    add_library(magic_enum INTERFACE)
+    add_library(magic_enum::magic_enum ALIAS magic_enum)
+    target_include_directories(magic_enum INTERFACE third_party/magic_enum/include
+                                                    third_party/magic_enum/include/magic_enum)
+endif()
 find_package(tsl-robin-map REQUIRED)
-find_package(VulkanMemoryAllocator CONFIG REQUIRED)
+find_package(VulkanMemoryAllocator CONFIG QUIET)
+if (NOT VulkanMemoryAllocator_FOUND)
+    # MSYS2 ships the header (include/vma/vk_mem_alloc.h) without a CMake package.
+    find_path(VMA_INCLUDE_DIR vk_mem_alloc.h PATH_SUFFIXES vma REQUIRED)
+    add_library(VulkanMemoryAllocator INTERFACE)
+    add_library(GPUOpen::VulkanMemoryAllocator ALIAS VulkanMemoryAllocator)
+    target_include_directories(VulkanMemoryAllocator INTERFACE ${VMA_INCLUDE_DIR})
+endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(XXHASH REQUIRED IMPORTED_TARGET libxxhash)
 pkg_check_modules(SDL3 REQUIRED IMPORTED_TARGET sdl3)
-pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
-find_package(miniz REQUIRED)
+if (NOT WIN32)
+    pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
+endif()
+find_package(miniz QUIET)
+if (NOT miniz_FOUND)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS OFF)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+    add_subdirectory(third_party/miniz EXCLUDE_FROM_ALL)
+    unset(CMAKE_POLICY_VERSION_MINIMUM)
+    add_library(miniz::miniz ALIAS miniz)
+endif()
 find_package(Zydis REQUIRED)
 find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 
@@ -87,23 +113,6 @@ add_host_shader(fs_tri.vert fs_tri_vert)
 add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
-add_host_shader(camera_motion.comp camera_motion_comp)
-add_host_shader(upscale_merge.comp upscale_merge_comp)
-add_host_shader(upscale_reactive.comp upscale_reactive_comp)
-add_host_shader(taa.comp taa_comp)
-add_host_shader(taa_sharpen.comp taa_sharpen_comp)
-add_host_shader(taa_sharpen.comp taa_sharpen_ldr_comp LDR_OUTPUT=1)
-add_host_shader(fsr4_color.comp fsr4_decode_comp)
-add_host_shader(fsr4_color.comp fsr4_encode_comp ENCODE=1)
-add_host_shader(fsr4_reactive.comp fsr4_reactive_comp)
-add_host_shader(buffer_multi_copy.comp buffer_multi_copy_comp)
-add_host_shader(occlusion_resolve.comp occlusion_resolve_comp)
-add_host_shader(gpu_timestamp.comp gpu_timestamp_comp)
-add_host_shader(indirect_guard.comp indirect_guard_comp)
-add_host_shader(depth_resample.frag depth_resample_frag)
-add_host_shader(depth_resample.frag depth_stencil_resample_frag HAS_STENCIL=1)
-add_host_shader(depth_resample.frag depth_stencil_bits_frag STENCIL_BITS=1)
-add_host_shader(camera_motion.comp camera_motion_debug_comp DEBUG_OVERLAY=1)
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)
     add_host_shader(tiling.comp tiling_macro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=1)
@@ -121,14 +130,15 @@ set(COMMON
     shim/common/logging/log.cpp)
 file(GLOB AVPLAYER CONFIGURE_DEPENDS shadps4/core/libraries/avplayer/*.cpp)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavformat libavcodec libavutil libswscale libswresample)
-file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp)
-# The layer's own modules (independent of the shadPS4 code): layer/.
-file(GLOB LAYER_SOURCES CONFIGURE_DEPENDS layer/*.cpp)
-# Game profiles (what the translator knows about one game, out of its core): games/.
-file(GLOB GAME_SOURCES CONFIGURE_DEPENDS games/*.cpp)
-# The translator's own command processor (docs/TRANSLATOR_ARCHITECTURE.ru.md, step 2): cp/.
-file(GLOB CP_SOURCES CONFIGURE_DEPENDS cp/*.cpp)
-add_library(bbgpu SHARED ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES} ${LAYER_SOURCES} ${GAME_SOURCES} ${CP_SOURCES}
+file(GLOB SHIM_SOURCES CONFIGURE_DEPENDS shim/*.cpp shim/*/*.cpp sotc/*.cpp)
+# Windows: a DLL cannot leave the runtime_* symbols for bb-probe.exe to resolve, so the
+# library is static there and linked into the executable.
+if (WIN32)
+    set(BBGPU_KIND STATIC)
+else()
+    set(BBGPU_KIND SHARED)
+endif()
+add_library(bbgpu ${BBGPU_KIND} ${VIDEO_CORE} ${RECOMPILER} ${COMMON} ${SHIM_SOURCES}
     shadps4/core/libraries/gnmdriver/gnmdriver.cpp
     shadps4/core/libraries/videoout/driver.cpp shadps4/core/libraries/videoout/video_out.cpp
     shadps4/core/libraries/kernel/equeue.cpp ${AVPLAYER}
@@ -140,29 +150,56 @@ target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui
     third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
 target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
-# Dear ImGui stays private to libbbgpu.so. The library is linked into bb-probe, so its exports are
-# in the global symbol scope; a Vulkan layer carrying its own Dear ImGui without -Bsymbolic
-# (vkShade 0.1) had its ImGui_ImplVulkan_Init bound to this copy, which called the Vulkan loader
-# with the layer's down-chain physical device handle ("Invalid physicalDevice", abort).
-set_source_files_properties(third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp
-    third_party/imgui/imgui_tables.cpp third_party/imgui/imgui_widgets.cpp
-    third_party/imgui/backends/imgui_impl_vulkan.cpp PROPERTIES
-    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
 target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
 set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
-target_include_directories(bbgpu PRIVATE shim layer games cp shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
+    OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
+target_include_directories(bbgpu PRIVATE third_party/stb)
+target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
-# Loaded with bb-probe at startup (DT_NEEDED, never dlopen): thread_local access without a
-# TLS descriptor call (_dl_tlsdesc_return was ~2% of the draw recording thread).
-target_compile_options(bbgpu PRIVATE -ftls-model=initial-exec)
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
-target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
-target_link_libraries(bbgpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
+if (NOT WIN32)
+    target_link_options(bbgpu PRIVATE -Wl,--allow-shlib-undefined)
+endif()
 target_link_libraries(bbgpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
-    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::X11 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+    tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
+if (WIN32)
+    # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
+    # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
+    target_compile_definitions(bbgpu PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(bbgpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/bb_win_compat.h)
+    target_include_directories(bbgpu PRIVATE third_party/xbyak)
+    target_link_libraries(bbgpu PUBLIC Vulkan::Vulkan ws2_32 bcrypt ntdll synchronization winmm)
+else()
+    target_link_libraries(bbgpu PUBLIC PkgConfig::X11)
+endif()
+
+# bbport (Windows): bbgpu is a static library there, so the loader and the HLE runtime are
+# linked here, where CMake knows its dependencies (build.sh builds them with ninja).
+if (WIN32)
+    enable_language(RC)
+    file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
+    file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
+    add_library(atrac9 STATIC ${BB_ATRAC9})
+    target_compile_options(atrac9 PRIVATE -w)
+    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
+    add_executable(bb-probe ../src/probe.c ${BB_RUNTIME} ../src/compat_win.c ../src/vulkan_smoke.c
+        ../packaging/windows/bb-probe.rc)
+    set_target_properties(bb-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
+    target_compile_options(bb-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
+    target_include_directories(bb-probe PRIVATE .. ../src)
+    target_link_libraries(bb-probe PRIVATE bbgpu atrac9 onecore bcrypt ws2_32 winmm -pthread)
+    # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
+    # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
+    target_link_options(bb-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
+    add_executable(bb-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/bb-gpu-capabilities.rc)
+    target_link_libraries(bb-gpu-capabilities PRIVATE Vulkan::Vulkan)
+    # "Play Bloodborne.exe": the game with the launcher's saved settings, no launcher window.
+    add_executable(bb-play WIN32 ../packaging/windows/play.c ../packaging/windows/play.rc)
+    target_compile_options(bb-play PRIVATE -municode)
+    target_link_options(bb-play PRIVATE -municode)
+endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
 # sotc: which window system an SDL video driver maps to, headless included (ADR-0016, docs/05 §12).
@@ -178,12 +215,6 @@ target_link_libraries(motion-shader-test PRIVATE bbgpu)
 add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
 target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(ui-composition-test PRIVATE ..)
-add_executable(cp-decoder-test EXCLUDE_FROM_ALL ../tests/test_cp_decoder.cpp cp/cp_decoder.cpp)
-target_compile_options(cp-decoder-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_include_directories(cp-decoder-test PRIVATE cp)
-add_executable(settings-test EXCLUDE_FROM_ALL ../tests/test_settings.cpp shim/bbport_settings.cpp)
-target_compile_options(settings-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_include_directories(settings-test PRIVATE .. shim)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
@@ -207,40 +238,9 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
 target_link_libraries(camera-motion-test PRIVATE bbgpu)
 add_dependencies(camera-motion-test host_shaders)
 
-add_executable(translation-memory-test EXCLUDE_FROM_ALL ../tests/test_translation_memory.cpp
-    ../tests/test_gpu_runtime_stubs.cpp)
-target_include_directories(translation-memory-test PRIVATE shim shadps4 third_party/gcn/include)
-target_compile_options(translation-memory-test PRIVATE -UNDEBUG -fPIC)
-set_source_files_properties(../tests/test_translation_memory.cpp PROPERTIES
-    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
-target_link_libraries(translation-memory-test PRIVATE bbgpu)
-
 # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
     shim/bbport_settings.cpp)
 target_include_directories(upscaler-support-test PRIVATE shim)
 target_compile_options(upscaler-support-test PRIVATE -UNDEBUG)
 
-add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
-    shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)
-target_include_directories(fsr4-bench PRIVATE shadps4/video_core/renderer_vulkan/fsr411)
-target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan::fsr4-v07-assets Vulkan::Vulkan)
-
-# bbport online module (gpu/bbnet, libbbnet.so): built when its libraries are there (shell.nix);
-# BB_NET=OFF leaves it out. Without it the port plays offline.
-option(BB_NET "Build the online module (shadNet)" ON)
-if (BB_NET)
-    find_package(Protobuf CONFIG QUIET)
-    find_package(nlohmann_json CONFIG QUIET)
-    find_package(OpenSSL QUIET)
-    find_package(ZLIB QUIET)
-    find_path(MINIUPNPC_INCLUDE miniupnpc.h PATH_SUFFIXES miniupnpc)
-    find_library(MINIUPNPC_LIBRARY NAMES miniupnpc)
-    if (Protobuf_FOUND AND nlohmann_json_FOUND AND OpenSSL_FOUND AND ZLIB_FOUND AND
-        MINIUPNPC_INCLUDE AND MINIUPNPC_LIBRARY)
-        add_subdirectory(bbnet)
-        message(STATUS "Online module: on (libbbnet.so)")
-    else()
-        message(STATUS "Online module: off (protobuf, nlohmann_json, OpenSSL, zlib or miniupnpc missing)")
-    endif()
-endif()

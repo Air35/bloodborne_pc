@@ -53,10 +53,6 @@ public:
                                               const ImageInfo& info);
 
 private:
-    void RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
-                              const vk::DescriptorBufferInfo& linear,
-                              const vk::DescriptorBufferInfo& params, u32 dim_x);
-
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);
 
 private:

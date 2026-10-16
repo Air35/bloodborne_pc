@@ -142,7 +142,6 @@ void FaultManager::ProcessFaultBuffer() {
     }};
     scheduler.EndRendering();
     const auto cmdbuf = scheduler.CommandBuffer();
-    const Vulkan::Breadcrumbs::Scope crumb{cmdbuf, scheduler.CrumbStream(), "fault buffer"};
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .dependencyFlags = vk::DependencyFlagBits::eByRegion,
         .bufferMemoryBarrierCount = 1,

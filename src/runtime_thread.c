@@ -1,22 +1,27 @@
 /* Guest threads on host pthreads. Each guest thread owns a FreeBSD-style TCB
  * (variant II: static TLS below the TCB). The loader rewrites the eboot's
  * `mov rax, fs:[0]` into `mov rax, gs:[0]`, so GS base = guest TCB while glibc
- * keeps FS. Priorities/affinity are recorded, not enforced by a PS4 scheduler. */
+ * keeps FS. Priorities/affinity are recorded, not enforced by a PS4 scheduler.
+ * Windows: GS is the TEB and cannot be moved. The guest TCB lives in a TLS slot of the TEB
+ * instead, and the loader rewrites the load to `mov rax, gs:[0x1480+8*slot]` (TlsSlots),
+ * the same 9-byte instruction with another displacement. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
 #include <errno.h>
-#include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <asm/prctl.h>
+#endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define ATTR_MAGIC UINT32_C(0x41545452)
 #define STACK_MARGIN (256*1024)
@@ -41,7 +46,11 @@ typedef struct GuestThread {
     ThreadAttr attr;
     char name[32];
     int detached, finished, joined, host_owned;
+#ifdef _WIN32
+    bb_jmp_buf exit_jump; /* no SEH unwinding through guest frames */
+#else
     jmp_buf exit_jump;
+#endif
     struct GuestThread *next;
 } GuestThread;
 
@@ -49,6 +58,8 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static ThreadAttr *attributes;
 static GuestThread *threads;
 static _Thread_local GuestThread *current;
+/* sotc: true on threads that run guest code (created by the guest, or the main thread). */
+int runtime_thread_is_guest(void) { return current!=NULL; }
 static _Thread_local int32_t guest_errno;
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
@@ -58,14 +69,32 @@ void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
 }
 static uint64_t tls_offset(void) { return (tls_memsz+tls_align-1)&~(tls_align-1); }
+#ifdef _WIN32
+/* TEB TlsSlots[64] start at gs:0x1480; slots 64+ live elsewhere and cannot be used. */
+static DWORD tls_slot=TLS_OUT_OF_INDEXES;
+uint32_t runtime_thread_tcb_offset(void) {
+    if (tls_slot==TLS_OUT_OF_INDEXES) {
+        tls_slot=TlsAlloc();
+        if (tls_slot>=64) { fprintf(stderr,"STOP: no TEB TLS slot below 64 (got %lu)\n",tls_slot); exit(21); }
+    }
+    return 0x1480+8*(uint32_t)tls_slot;
+}
+static void set_gs(void *base) {
+    runtime_thread_tcb_offset();
+    if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
+}
+#define tls_block_alloc(size) _aligned_malloc(size,64)
+#else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
 }
+#define tls_block_alloc(size) aligned_alloc(64,size)
+#endif
 /* Build TCB/static TLS for the calling host thread and point GS at it. */
 static void attach(GuestThread *t) {
     uint64_t offset=tls_offset();
     size_t total=offset+256;
-    unsigned char *block=aligned_alloc(64,(total+63)&~(size_t)63);
+    unsigned char *block=tls_block_alloc((total+63)&~(size_t)63);
     if (!block) { fputs("Cannot allocate guest TLS\n",stderr); exit(1); }
     memset(block,0,total);
     if (tls_filesz) memcpy(block,tls_template,tls_filesz);
@@ -161,6 +190,11 @@ static ABI int32_t attr_set_stack(ThreadAttr **slot,uint64_t size) {
     if (!a || size<16384) return ERR(22);
     a->stack=size; return 0;
 }
+/* Stacks are placed by the runtime, never by the guest. */
+static ABI int32_t attr_get_stackaddr(ThreadAttr **slot,void **address) {
+    if (!find_attr(slot) || !address) return ERR(22);
+    *address=NULL; return 0;
+}
 static ABI int32_t attr_get_stack(ThreadAttr **slot,uint64_t *size) {
     ThreadAttr *a=find_attr(slot);
     if (!a || !size) return ERR(22);
@@ -218,11 +252,22 @@ static void set_host_name(const char *name) {
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
 }
+#ifdef _WIN32
+#define exit_setjmp(t) bb_setjmp((t)->exit_jump)
+#define exit_longjmp(t) bb_longjmp((t)->exit_jump,1)
+#else
+#define exit_setjmp(t) setjmp((t)->exit_jump)
+#define exit_longjmp(t) longjmp((t)->exit_jump,1)
+#endif
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
-    if (!setjmp(t->exit_jump)) t->result=t->entry(t->argument);
+#ifdef _WIN32
+    /* sotc: host thread ids of guest threads, for traces that print GetCurrentThreadId. */
+    if (getenv("SOTC_THREAD_IDS")) fprintf(stderr,"Runtime: guest thread '%s' is host thread %lu\n",t->name,GetCurrentThreadId());
+#endif
+    if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
     return t->result;
@@ -241,9 +286,15 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     uint64_t stack=t->attr.stack<MIN_STACK ? MIN_STACK : t->attr.stack;
     /* Stacks below 1 TiB as on PS4; guest code may pack stack addresses. */
     size_t stack_bytes=(size_t)stack+STACK_MARGIN;
+#ifdef _WIN32
+    /* Windows places the stack itself (low: no high-entropy ASLR) and commits all of it:
+     * guest code has no stack probes and would step over the guard page. */
+    pthread_attr_setstacksize(&host,stack_bytes);
+#else
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
     if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
     else pthread_attr_setstacksize(&host,stack_bytes);
+#endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */
     *out=t;
@@ -282,7 +333,7 @@ static ABI __attribute__((noreturn)) void thread_exit(void *value) {
     if (t->host_owned) { fputs("STOP: pthread_exit on host-owned/main thread\n",stderr); exit(21); }
     t->result=value;
     /* No host unwinder: guest frames have no registered FDEs. */
-    longjmp(t->exit_jump,1);
+    exit_longjmp(t);
 }
 static ABI int32_t thread_yield(void) { sched_yield(); return 0; }
 static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
@@ -322,76 +373,29 @@ static ABI int32_t posix_attr_set_param(ThreadAttr **a,const int *p) { return po
 static ABI int32_t posix_create(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg) { return posix(create(t,a,e,arg,"posix")); }
 static ABI int32_t posix_create_name(GuestThread **t,ThreadAttr **a,GuestEntry e,void *arg,const char *name) { return posix(create(t,a,e,arg,name)); }
 static ABI int32_t posix_join(GuestThread *t,void **r) { return posix(thread_join(t,r)); }
-/* sotc: pthread_{get,set}schedparam (FIs3-UQT9sg, Xs9hdiD7sAA#libScePosix), contract from
- * shadPS4 b4e7ae7 kernel/threads/pthread.cpp:539-593 (consulted): the policy and priority are
- * stored with the thread; the host scheduler is not changed (as the reference). FreeBSD
- * policies: 1 FIFO, 2 OTHER, 3 RR. */
-static ABI int32_t posix_get_sched(GuestThread *t,int *policy,int *param) {
-    if (!policy || !param) return 22;
-    if (!find_thread(t)) return 3;
-    pthread_mutex_lock(&lock);
-    *policy=t->attr.policy; *param=t->attr.prio;
-    pthread_mutex_unlock(&lock);
-    return 0;
-}
-static ABI int32_t posix_set_sched(GuestThread *t,int policy,const int *param) {
-    if (!param || policy<1 || policy>3) return 22;
-    if (!find_thread(t)) return 3;
-    pthread_mutex_lock(&lock);
-    t->attr.policy=policy; t->attr.prio=*param;
-    pthread_mutex_unlock(&lock);
-    return 0;
-}
-/* sotc: pthread_cancel (0D4-FVvEikw#libScePosix; 2 call sites in the SotC eboot, plan A2).
- * Guest threads have no cancellation points here (no host unwinder, see thread_exit), so the
- * request is only logged: the target behaves as a thread with cancellation disabled. A join
- * on it that never returns shows the gap in the log [a verificar: call sites in the eboot].
- * Line format of docs/05 §8.2 (no central logger in the fork yet; it moves there with the
- * sotc rename, plan 2026-10-15-a3-revisao-lote4). */
-static ABI int32_t posix_cancel(GuestThread *t) {
-    if (!find_thread(t)) return 3;
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC,&now);
-    fprintf(stderr,"%.3f WARN  L3/thread pthread_cancel_ignored thread=%s\n",
-            (double)now.tv_sec*1e3+(double)now.tv_nsec/1e6,t->name);
-    return 0;
-}
-
-int32_t runtime_thread_spawn(void **out,void *(ABI *entry)(void *),void *argument,uint64_t stack,const char *name) {
-    ThreadAttr *attr=NULL;
-    int32_t r=attr_init(&attr);
-    if (!r && stack) r=attr_set_stack(&attr,stack);
-    if (!r) r=create((GuestThread **)out,&attr,entry,argument,name);
-    if (attr) attr_destroy(&attr);
-    return posix(r);
-}
-int32_t runtime_thread_join_spawned(void *thread,void **result) {
-    return posix(thread_join((GuestThread *)thread,result));
-}
 
 uintptr_t runtime_thread_resolve(const char *name) {
     static const struct { const char *nid; void *fn; } table[]={
-        {"aI+OeCz8xrQ#libkernel",thread_self}, {"EotR8a3ASf4#libkernel",thread_self},
-        {"9BcDykPmo1I#libkernel",guest_error},
-        {"nsYoNRywwNg#libkernel",attr_init}, {"62KCwEMmzcM#libkernel",attr_destroy},
-        {"x1X76arYMxU#libkernel",attr_get}, {"8+s5BzZjxSg#libkernel",attr_affinity},
-        {"UTXzJbWhhTE#libkernel",attr_set_stack}, {"-Wreprtu0Qs#libkernel",attr_set_detach},
-        {"4+h9EzwKF4I#libkernel",attr_set_policy}, {"DzES9hQF4f4#libkernel",attr_set_param},
-        {"3qxgM4ezETA#libkernel",attr_set_affinity}, {"eXbUSpEaTsA#libkernel",attr_set_inherit},
-        {"JaRMy+QcpeU#libkernel",attr_get_detach}, {"-fA+7ZlGDQs#libkernel",attr_get_stack},
-        {"FXPWHNk8Of0#libkernel",attr_get_param}, {"El+cQ20DynU#libkernel",attr_set_guard},
-        {"6UgtwV+0zb4#libkernel",thread_create}, {"onNY9Byn-W8#libkernel",thread_join},
-        {"4qGrR6eoP9Y#libkernel",thread_detach}, {"3kg7rT0NQIs#libkernel",thread_exit},
-        {"T72hz6ffq08#libkernel",thread_yield}, {"1tKyG7RlMJo#libkernel",thread_get_prio},
-        {"W0Hpm2X0uPE#libkernel",thread_set_prio}, {"bt3CTBKmGyI#libkernel",thread_set_affinity}, {"rcrVFJsQWRY#libkernel",thread_get_affinity},
-        {"GBUY7ywdULE#libkernel",thread_rename}, {"3PtV6p3QNX4#libkernel",thread_equal},
-        {"wtkt-teR1so#libkernel",posix_attr_init}, {"zHchY8ft5pk#libkernel",posix_attr_destroy},
-        {"E+tyo3lp5Lw#libkernel",posix_attr_set_detach}, {"2Q0z6rnBrTE#libkernel",posix_attr_set_stack},
-        {"euKRgm0Vn2M#libkernel",posix_attr_set_param}, {"OxhIB8LB-PQ#libkernel",posix_create},
-        {"Jmi+9w9u0E4#libkernel",posix_create_name}, {"h9CcP3J0oVM#libkernel",posix_join},
-        {"FJrT5LuUBAU#libkernel",thread_exit},
-        {"FIs3-UQT9sg#libkernel",posix_get_sched}, {"Xs9hdiD7sAA#libkernel",posix_set_sched},
-        {"0D4-FVvEikw#libkernel",posix_cancel},
+        {"aI+OeCz8xrQ",thread_self}, {"EotR8a3ASf4",thread_self},
+        {"9BcDykPmo1I",guest_error},
+        {"nsYoNRywwNg",attr_init}, {"62KCwEMmzcM",attr_destroy},
+        {"x1X76arYMxU",attr_get}, {"8+s5BzZjxSg",attr_affinity},
+        {"UTXzJbWhhTE",attr_set_stack}, {"-Wreprtu0Qs",attr_set_detach},
+        {"4+h9EzwKF4I",attr_set_policy}, {"DzES9hQF4f4",attr_set_param},
+        {"3qxgM4ezETA",attr_set_affinity}, {"eXbUSpEaTsA",attr_set_inherit},
+        {"JaRMy+QcpeU",attr_get_detach}, {"-fA+7ZlGDQs",attr_get_stack},
+        {"Ru36fiTtJzA",attr_get_stackaddr}, {"7Xl257M4VNI",thread_equal},
+        {"FXPWHNk8Of0",attr_get_param}, {"El+cQ20DynU",attr_set_guard},
+        {"6UgtwV+0zb4",thread_create}, {"onNY9Byn-W8",thread_join},
+        {"4qGrR6eoP9Y",thread_detach}, {"3kg7rT0NQIs",thread_exit},
+        {"T72hz6ffq08",thread_yield}, {"1tKyG7RlMJo",thread_get_prio},
+        {"W0Hpm2X0uPE",thread_set_prio}, {"bt3CTBKmGyI",thread_set_affinity}, {"rcrVFJsQWRY",thread_get_affinity},
+        {"GBUY7ywdULE",thread_rename}, {"3PtV6p3QNX4",thread_equal},
+        {"wtkt-teR1so",posix_attr_init}, {"zHchY8ft5pk",posix_attr_destroy},
+        {"E+tyo3lp5Lw",posix_attr_set_detach}, {"2Q0z6rnBrTE",posix_attr_set_stack},
+        {"euKRgm0Vn2M",posix_attr_set_param}, {"OxhIB8LB-PQ",posix_create},
+        {"Jmi+9w9u0E4",posix_create_name}, {"h9CcP3J0oVM",posix_join},
+        {"FJrT5LuUBAU",thread_exit},
     };
     for (size_t i=0;i<sizeof(table)/sizeof(*table);++i)
         if (!strcmp(name,table[i].nid)) return (uintptr_t)table[i].fn;
@@ -402,9 +406,4 @@ void runtime_thread_report(void) {
     printf("Runtime: guest threads created=%zu, exited=%zu, joined=%zu\n",created,exited,joined_count);
     pthread_mutex_unlock(&lock);
 }
-#else
-uintptr_t runtime_thread_resolve(const char *name) { (void)name; return 0; }
-void runtime_thread_report(void) {}
-void runtime_thread_attach_main(void) {}
-void runtime_set_main_tls(const void *d,uint64_t f,uint64_t m,uint64_t a) { (void)d;(void)f;(void)m;(void)a; }
-#endif
+

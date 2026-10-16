@@ -37,22 +37,9 @@ void Swapchain::Create(u32 width_, u32 height_) {
     height = height_;
     needs_recreation = false;
 
-    // bbport: a minimised window has a 0x0 surface (issue #31); no swapchain can have that extent.
-    // The old one stays (presents are skipped) until the window is back.
-    SetSurfaceProperties();
-    if (extent.width == 0 || extent.height == 0) {
-        zero_extent = true;
-        needs_recreation = true;
-        return;
-    }
-    zero_extent = false;
-
-    // bbport: the old swapchain is retired through oldSwapchain instead of destroyed first.
-    // NVIDIA's Wayland WSI keeps a wp_tearing_control per swapchain; a fresh swapchain on the
-    // same surface was rejected ("Surface already has a tearing controller", SurfaceLost).
-    const vk::SwapchainKHR old_swapchain = swapchain;
-    swapchain = nullptr;
     Destroy();
+
+    SetSurfaceProperties();
 
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
@@ -80,16 +67,13 @@ void Swapchain::Create(u32 width_, u32 height_) {
         .compositeAlpha = composite_alpha,
         .presentMode = present_mode,
         .clipped = true,
-        .oldSwapchain = old_swapchain,
+        .oldSwapchain = nullptr,
     };
 
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
-    if (old_swapchain) {
-        instance.GetDevice().destroySwapchainKHR(old_swapchain);
-    }
 
     SetupImages();
     RefreshSemaphores();

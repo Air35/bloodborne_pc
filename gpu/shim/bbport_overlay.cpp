@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_overlay.h"
 
-#include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <mutex>
-#include <string>
-#include <string_view>
-#include <vector>
 
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
@@ -20,6 +18,16 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 // DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
+#ifdef _WIN32
+asm(".section .rdata,\"dr\"\n"
+    ".balign 16\n"
+    ".global bb_font_ttf\n"
+    "bb_font_ttf:\n"
+    ".incbin \"" BB_FONT_PATH "\"\n"
+    ".global bb_font_ttf_end\n"
+    "bb_font_ttf_end:\n"
+    ".text\n");
+#else
 asm(".section .rodata\n"
     ".balign 16\n"
     ".hidden bb_font_ttf\n"
@@ -30,6 +38,7 @@ asm(".section .rodata\n"
     ".global bb_font_ttf_end\n"
     "bb_font_ttf_end:\n"
     ".previous\n");
+#endif
 extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
@@ -44,33 +53,38 @@ bool initialized = false;
 std::atomic<bool> menu_open{false};
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
+// The game's text dialog (SetTextEntry), guarded by imgui_mutex.
+bool text_entry_active = false;
+std::string text_entry_prompt, text_entry_text;
+// The game's save/load slot list (OpenSaveList), guarded by imgui_mutex.
+bool list_active = false;
+std::string list_title;
+std::vector<std::string> list_items;
+int list_selected = 0, list_result = -1;
+int list_confirm = -1;  // item waiting for the delete confirmation, or -1
+int list_first_deletable = 0;
+bool list_scroll = false, list_stick_down = false, list_stick_up = false;
 float base_scale = 1.0f;
-// The game's text dialog (ImeDialog, the character name), typed on the keyboard: drawn while it
-// is open. In fullscreen the window title that showed it is not visible (issues #17, #19).
-std::mutex prompt_mutex;
-std::atomic<bool> prompt_active{false};
-std::string prompt_title, prompt_text;
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 
-float PixelDensity(SDL_WindowID id);
+// sotc: the settings menu is Bloodborne's; the SotC port shows only the game's dialogs
+// (BB_OVERLAY_MENU=1 opens the menu anyway).
+bool MenuAllowed() {
+    static const bool allowed = [] {
+        const char* v = std::getenv("BB_OVERLAY_MENU");
+        return v && v[0] == '1';
+    }();
+    return allowed;
+}
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    // The system cursor shows over the menu (window.cpp); ImGui learns where it is now, not at
-    // the next motion: mouse motion is not passed on while the menu is closed.
-    if (value) {
-        if (SDL_Window* window = SDL_GetMouseFocus()) {
-            float x = 0.0f, y = 0.0f;
-            SDL_GetMouseState(&x, &y);
-            const float density = PixelDensity(SDL_GetWindowID(window));
-            ImGui::GetIO().AddMousePosEvent(x * density, y * density);
-        }
-    }
+    ImGui::GetIO().MouseDrawCursor = value;
     if (!value && dirty) {
         dirty = false;
         BbSettings::Save();
@@ -158,66 +172,32 @@ void Hint(const char* text) {
     }
 }
 
-// The settings menu as in 0.3 and 0.4: one window (moved with the mouse, its place kept in
-// bbport.ini), sections one under the other, ImGui's own widgets and keyboard/gamepad navigation.
 void Menu() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    // Where it was moved last (bbport.ini menu_pos, a fraction of the screen), kept on screen.
-    ImVec2 pos(viewport->WorkPos.x + 40.0f * base_scale, viewport->WorkPos.y + 40.0f * base_scale);
-    if (s.menu_x >= 0.0f && s.menu_y >= 0.0f) {
-        const float margin = 80.0f * base_scale;
-        pos.x = viewport->WorkPos.x +
-                std::clamp(s.menu_x * viewport->WorkSize.x, 0.0f, std::max(viewport->WorkSize.x - margin, 0.0f));
-        pos.y = viewport->WorkPos.y +
-                std::clamp(s.menu_y * viewport->WorkSize.y, 0.0f, std::max(viewport->WorkSize.y - margin, 0.0f));
-    }
-    ImGui::SetNextWindowPos(pos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 40.0f * base_scale,
+                                   viewport->WorkPos.y + 40.0f * base_scale),
+                            ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
     bool keep_open = true;
-    if (!ImGui::Begin(
-            BbSettings::MenuText("Bloodborne - Graphics  (Insert / L3+R3)###bbport_settings",
-                                 "Bloodborne — настройки  (Insert / L3+R3)###bbport_settings"),
-            &keep_open, ImGuiWindowFlags_NoCollapse)) {
+    if (!ImGui::Begin("Bloodborne — настройки  (Insert / L3+R3)", &keep_open,
+                      ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
-    // Moved: remembered (saved with the settings when the menu closes).
-    if (!ImGui::IsWindowAppearing() && viewport->WorkSize.x > 0.0f && viewport->WorkSize.y > 0.0f) {
-        const ImVec2 at = ImGui::GetWindowPos();
-        const float fx = (at.x - viewport->WorkPos.x) / viewport->WorkSize.x;
-        const float fy = (at.y - viewport->WorkPos.y) / viewport->WorkSize.y;
-        if (std::abs(at.x - pos.x) >= 1.0f || std::abs(at.y - pos.y) >= 1.0f) {
-            s.menu_x = fx;
-            s.menu_y = fy;
-            dirty = true;
-        }
-    }
-    // Always readable, even when the rest of the menu is in Russian.
-    static const char* languages[] = {"English", "Русский"};
-    int language = s.menu_language == BbSettings::MenuLanguage::Russian ? 1 : 0;
-    if (ImGui::Combo("Language", &language, languages, 2)) {
-        s.menu_language =
-            language == 1 ? BbSettings::MenuLanguage::Russian : BbSettings::MenuLanguage::English;
-        BbSettings::Save();
-    }
-    ImGui::Text(BbSettings::MenuText("%.0f FPS  (%.1f ms)", "%.0f FPS  (%.1f мс)"),
-                frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, frame_ms_avg);
+    ImGui::Text("%.0f FPS  (%.1f мс)", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
+                frame_ms_avg);
 
-    ImGui::SeparatorText(BbSettings::MenuText("Temporal upscaler", "Временной апскейлер"));
-    const char* upscalers[] = {
-        BbSettings::MenuText("Off", "Выкл"), "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1",
-        BbSettings::MenuText("TAA (native anti-aliasing)", "TAA (нативное сглаживание)"),
-        "DLSS (NVIDIA RTX)"};
-    static_assert(sizeof(upscalers) / sizeof(upscalers[0]) == BbSettings::UpscalerCount);
+    ImGui::SeparatorText("Временной апскейлер");
+    static const char* upscalers[] = {"Выкл", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
+                                     "TAA (нативное сглаживание)", "DLSS (NVIDIA RTX)"};
     static const char* later[] = {"XeSS"};
     int upscaler = s.upscaler;
-    if (ImGui::BeginCombo(BbSettings::MenuText("Upscaler", "Апскейлер"), upscalers[upscaler])) {
+    if (ImGui::BeginCombo("Апскейлер", upscalers[upscaler])) {
         for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
-            const bool supported = i == BbSettings::UpscalerFsr4     ? s.fsr4_supported.load()
-                                   : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
-                                   : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load()
-                                                                     : true;
+            const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
+                : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
+                : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load() : true;
             ImGui::BeginDisabled(!supported);
             if (ImGui::Selectable(upscalers[i], i == upscaler)) {
                 Store(s.upscaler, i, true);
@@ -225,8 +205,7 @@ void Menu() {
             ImGui::EndDisabled();
             if (!supported) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("%s", BbSettings::MenuText("— not supported by this GPU",
-                                                         "— не поддерживается видеокартой"));
+                ImGui::TextDisabled("— не поддерживается видеокартой");
             }
         }
         for (const char* name : later) {
@@ -234,66 +213,34 @@ void Menu() {
             ImGui::Selectable(name, false);
             ImGui::EndDisabled();
             ImGui::SameLine();
-            ImGui::TextDisabled("%s", BbSettings::MenuText("— in development", "— в работе"));
+            ImGui::TextDisabled("— в работе");
         }
         ImGui::EndCombo();
     }
-    if (s.upscaler == BbSettings::UpscalerDlss) {
-        Hint(BbSettings::MenuText(
-            "NVIDIA DLSS Super Resolution (RTX GPUs; Native AA is DLAA). Needs the DLSS bridge "
-            "and NVIDIA's library next to the game; otherwise FSR 3.1 is used.",
-            "NVIDIA DLSS Super Resolution (видеокарты RTX; Native AA — это DLAA). Нужны мост DLSS "
-            "и библиотека NVIDIA рядом с игрой; без них используется FSR 3.1."));
-    }
-    const auto problem_text = [](const char* text) {
-        ImGui::PushTextWrapPos();
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", text);
-        ImGui::PopTextWrapPos();
-    };
-    if (const char* problem = s.dlss_problem.load(); problem && s.upscaler == BbSettings::UpscalerDlss) {
-        char line[192];
-        std::snprintf(line, sizeof(line), "DLSS: %s", problem);
-        problem_text(line);
+    if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", problem);
     }
     if (const char* problem = s.fsr4_problem.load()) {
-        char line[192];
-        std::snprintf(line, sizeof(line),
-                      BbSettings::MenuText("FSR 4 unavailable: %s", "FSR 4 недоступен: %s"), problem);
-        problem_text(line);
-        if (!BbSettings::IsFsr4(s.upscaler)) {
-            ImGui::PushTextWrapPos();
-            ImGui::TextUnformatted(BbSettings::MenuText(
-                "The mode selected above is active. You can select FSR 4 again.",
-                "Активен режим, выбранный выше. FSR 4 можно выбрать снова."));
-            ImGui::PopTextWrapPos();
-        }
+        ImGui::PushTextWrapPos();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "FSR 4 недоступен: %s", problem);
+        if (!BbSettings::IsFsr4(s.upscaler))
+            ImGui::TextUnformatted("Активен режим, выбранный выше. FSR 4 можно выбрать снова.");
+        ImGui::PopTextWrapPos();
     }
     if (BbSettings::IsFsr4(s.upscaler)) {
         if (s.upscaler == BbSettings::UpscalerFsr411) {
-            Hint(BbSettings::MenuText(
-                "FSR 4.1.1: the model from AMD's 4.1.1 DLL, reproduced in Vulkan (output matches "
-                "the DLL). Assets are built from your DLL in the launcher.",
-                "FSR 4.1.1: модель из DLL AMD 4.1.1, воспроизведённая в Vulkan (результат совпадает "
-                "с DLL). Ассеты собираются из вашей DLL в лаунчере."));
+            Hint("FSR 4.1.1 в режиме INT8: модель из DLL AMD 4.1.1, воспроизведённая в Vulkan "
+                 "(результат совпадает с DLL). Одна модель для Native..Performance и отдельная "
+                 "для Ultra Performance. Ассеты: tools/fsr4cap/build_assets.sh (нужны DLL и Proton).");
         } else {
-            Hint(BbSettings::MenuText(
-                "FSR 4 in INT8 mode (v07 model from AMD FidelityFX SDK sources). Higher quality "
-                "than FSR 3.1, but the pass is more demanding. Changing the preset rebuilds the "
-                "model (a brief pause).",
-                "FSR 4 в режиме INT8 (модель v07 из исходников AMD FidelityFX SDK). Качество выше, "
-                "чем у FSR 3.1, но проход тяжелее. Смена пресета пересобирает модель (короткая "
-                "пауза)."));
+            Hint("FSR 4 в режиме INT8 (модель v07 из исходников AMD FidelityFX SDK). Качество выше, "
+                 "чем у FSR 3.1, но проход тяжелее. Смена пресета пересобирает модель (короткая "
+                 "пауза). Ассеты: tools/fetch_fsr4_assets.sh.");
         }
-        Checkbox(BbSettings::MenuText("FSR 4: auto exposure", "FSR 4: авто-экспозиция"),
-                 s.fsr4_auto_exposure);
-        Checkbox(BbSettings::MenuText("FSR 4: invert jitter sign", "FSR 4: обратный знак jitter"),
-                 s.fsr4_invert_jitter);
-        Hint(BbSettings::MenuText(
-            "For diagnosing ghosting: the FSR 4 network normalizes color by exposure and uses "
-            "it to decide when to discard previous frames. Changes apply immediately, without a "
-            "restart.",
-            "Проверка при гостинге: сеть FSR 4 нормирует цвет по экспозиции и по ней решает, "
-            "когда отбросить прошлые кадры. Меняются сразу, без перезапуска."));
+        Checkbox("FSR 4: авто-экспозиция", s.fsr4_auto_exposure);
+        Checkbox("FSR 4: обратный знак jitter", s.fsr4_invert_jitter);
+        Hint("Проверка при гостинге: сеть FSR 4 нормирует цвет по экспозиции и по ней решает, "
+             "когда отбросить прошлые кадры. Меняются сразу, без перезапуска.");
     }
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
     const bool taa = s.upscaler == BbSettings::UpscalerTaa;
@@ -303,17 +250,15 @@ void Menu() {
     char preset_label[64];
     std::snprintf(preset_label, sizeof(preset_label), "%s (x%.1f)", BbSettings::PresetName(preset),
                   BbSettings::PresetScale(preset));
-    if (ImGui::BeginCombo(BbSettings::MenuText("Preset", "Пресет"), preset_label)) {
+    if (ImGui::BeginCombo("Пресет", preset_label)) {
         for (int i = 0; i < BbSettings::PresetCount; ++i) {
             char label[64];
             const float scale = BbSettings::PresetScale(i);
             const int output = s.output_res;
-            std::snprintf(
-                label, sizeof(label),
-                BbSettings::MenuText("%s (x%.1f, render %dx%d)", "%s (x%.1f, рендер %dx%d)"),
-                BbSettings::PresetName(i), scale,
-                int(std::lround(BbSettings::OutputWidths[output] / scale / 2) * 2),
-                int(std::lround(BbSettings::OutputHeights[output] / scale / 2) * 2));
+            std::snprintf(label, sizeof(label), "%s (x%.1f, рендер %dx%d)",
+                          BbSettings::PresetName(i), scale,
+                          int(std::lround(BbSettings::OutputWidths[output] / scale / 2) * 2),
+                          int(std::lround(BbSettings::OutputHeights[output] / scale / 2) * 2));
             if (ImGui::Selectable(label, i == preset)) {
                 Store(s.preset, i, true);
             }
@@ -322,122 +267,71 @@ void Menu() {
     }
     ImGui::EndDisabled();
     if (taa) {
-        ImGui::TextWrapped("%s", BbSettings::MenuText(
-            "TAA anti-aliases the scene at output resolution, without an FSR model or upscaling. "
-            "Your saved FSR preset is restored when you select FSR.",
-            "TAA сглаживает сцену в разрешении вывода, без модели FSR и апскейлинга. "
-            "Сохранённый пресет FSR восстановится при выборе FSR."));
+        ImGui::TextWrapped("TAA сглаживает сцену в разрешении вывода, без модели FSR и апскейлинга. "
+                           "Сохранённый пресет FSR восстановится при выборе FSR.");
     }
-    ImGui::Text(
-        BbSettings::MenuText("Active scene render: %d x %d", "Активный рендер сцены: %d x %d"),
-        s.active_render_width.load(), s.active_render_height.load());
+    ImGui::Text("Активный рендер сцены: %d x %d", s.active_render_width.load(),
+                s.active_render_height.load());
     if (BbSettings::FixedRenderSession()) {
-        ImGui::Text(BbSettings::MenuText("Startup preset: %s", "Пресет при запуске: %s"),
-                    BbSettings::PresetName(s.startup_preset));
+        ImGui::Text("Пресет при запуске: %s", BbSettings::PresetName(s.startup_preset));
         if (const char* automatic = std::getenv("BB_AUTO_RENDER_RES");
             automatic && automatic[0] == '1') {
-            Hint(BbSettings::MenuText(
-                "When output is not 1080p, the entire game renders at the preset resolution "
-                "(startup patch): this is fastest on Steam Deck and weaker GPUs. Preset or output "
-                "resolution changes require a restart. Enable Live resolution changes below to "
-                "change them without restarting (post-processing then stays at 1080p, which is "
-                "slower).",
-                "При выводе не 1080p вся игра рисуется в разрешении пресета (патч при запуске): "
-                "это быстрее всего на Steam Deck и слабых GPU. Смена пресета или разрешения "
-                "вывода — после перезапуска. Пункт «Смена разрешения на лету» ниже включает "
-                "смену без перезапуска (постобработка тогда остаётся в 1080p, медленнее)."));
+            Hint("При выводе не 1080p вся игра рисуется в разрешении пресета (патч при запуске): "
+                 "это быстрее всего на Steam Deck и слабых GPU. Смена пресета или разрешения "
+                 "вывода — после перезапуска. Пункт «Смена разрешения на лету» ниже включает "
+                 "смену без перезапуска (постобработка тогда остаётся в 1080p, медленнее).");
         } else {
-            Hint(BbSettings::MenuText(
-                "BB_RENDER_RES fixes the scene size at startup. Remove this explicit environment "
-                "variable to change resolution and presets without restarting the game.",
-                "BB_RENDER_RES фиксирует размер сцены при запуске. Уберите эту явную переменную "
-                "для смены разрешения и пресетов без перезапуска игры."));
+            Hint("BB_RENDER_RES фиксирует размер сцены при запуске. Уберите эту явную переменную "
+                 "для смены разрешения и пресетов без перезапуска игры.");
         }
     } else {
-        Hint(BbSettings::MenuText(
-            "Native AA: the upscaler acts as anti-aliasing. Other presets reduce the scene render "
-            "resolution relative to the output. The UI renders at output resolution. "
-            "The preset applies from the next frame without restarting the game.",
-            "Native AA: апскейлер работает как сглаживание. Остальные пресеты уменьшают разрешение "
-            "отрисовки сцены относительно вывода. Интерфейс рисуется в разрешении вывода. "
-            "Пресет применяется со следующего кадра без перезапуска игры."));
+        Hint("Native AA: FSR работает как сглаживание. Остальные пресеты уменьшают разрешение "
+             "отрисовки сцены относительно вывода. Интерфейс рисуется в разрешении вывода. "
+             "Пресет применяется со следующего кадра без перезапуска игры.");
     }
-    Checkbox(BbSettings::MenuText("Sharpening (RCAS)", "Резкость (RCAS)"), s.sharpen);
+    Checkbox("Резкость (RCAS)", s.sharpen);
     ImGui::BeginDisabled(!s.sharpen);
-    Slider(BbSettings::MenuText("Sharpness", "Сила резкости"), s.sharpness, 0.0f, 2.0f);
-    Hint(BbSettings::MenuText(
-        "Up to 1: the upscaler's own sharpening (RCAS). Above 1 adds another RCAS pass. "
-        "Ctrl+click the slider to enter an exact value.",
-        "До 1 — резкость самого апскейлера (RCAS). Выше 1 добавляется ещё один проход RCAS. "
-        "Ctrl+клик по ползунку — ввести точное значение."));
+    Slider("Сила резкости", s.sharpness, 0.0f, 2.0f);
+    Hint("До 1 — резкость самого апскейлера (RCAS). Выше 1 добавляется ещё один проход RCAS. "
+         "Ctrl+клик по ползунку — ввести точное значение.");
     ImGui::EndDisabled();
-    Checkbox(BbSettings::MenuText("Subpixel jitter", "Субпиксельный сдвиг (jitter)"), s.jitter);
-    Hint(BbSettings::MenuText(
-        "Each frame shifts the scene by a fraction of a pixel, letting the upscaler reconstruct "
-        "more detail from multiple frames. Without it, only history-based anti-aliasing remains.",
-        "Каждый кадр сцена сдвигается на долю пикселя, и апскейлер собирает из нескольких "
-        "кадров больше деталей. Без него получается только сглаживание по истории."));
+    Checkbox("Субпиксельный сдвиг (jitter)", s.jitter);
+    Hint("Каждый кадр сцена сдвигается на долю пикселя, и апскейлер собирает из нескольких "
+         "кадров больше деталей. Без него получается только сглаживание по истории.");
 
-    ImGui::SeparatorText(BbSettings::MenuText("Reactive mask", "Маска реактивности"));
+    ImGui::SeparatorText("Маска реактивности");
     ImGui::BeginDisabled(taa);
-    Checkbox(BbSettings::MenuText("Enable mask", "Включить маску"), s.reactive);
-    Hint(BbSettings::IsFsr4(s.upscaler)
-             ? BbSettings::MenuText(
-                   "Marks transparent effects (haze, light, water, particles). FSR 4 takes no "
-                   "mask itself: its output is blended with the current frame there, so the "
-                   "effects do not drag previous frames along.",
-                   "Помечает прозрачные эффекты (дымку, свет, воду, частицы). FSR 4 сам маску не "
-                   "принимает: там его результат смешивается с текущим кадром, и эффекты не "
-                   "тянут за собой прошлые кадры.")
-             : BbSettings::MenuText(
-                   "Marks transparent effects (particles, haze) so the upscaler relies less on "
-                   "previous frames. Reduces trails behind effects, but shimmering returns "
-                   "underneath them.",
-                   "Помечает прозрачные эффекты (частицы, дымку), чтобы апскейлер меньше "
-                   "опирался на прошлые кадры. Меньше шлейфов за эффектами, но под ними "
-                   "возвращается дрожание."));
+    Checkbox("Включить маску", s.reactive);
+    Hint("Помечает прозрачные эффекты (частицы, дымку), чтобы апскейлер меньше опирался на "
+         "прошлые кадры. Меньше шлейфов за эффектами, но под ними возвращается дрожание.");
     ImGui::BeginDisabled(!s.reactive);
-    Slider(BbSettings::MenuText("Scale", "Масштаб"), s.reactive_scale, 0.0f, 4.0f);
-    Slider(BbSettings::MenuText("Threshold", "Порог"), s.reactive_threshold, 0.0f, 1.0f);
-    Slider(BbSettings::MenuText("Maximum", "Максимум"), s.reactive_max, 0.0f, 1.0f);
+    Slider("Масштаб", s.reactive_scale, 0.0f, 4.0f);
+    Slider("Порог", s.reactive_threshold, 0.0f, 1.0f);
+    Slider("Максимум", s.reactive_max, 0.0f, 1.0f);
     bool show_mask = s.debug_view == BbSettings::DebugReactive;
-    if (ImGui::Checkbox(BbSettings::MenuText("Show mask (debug)", "Показать маску (отладка)"),
-                        &show_mask)) {
+    if (ImGui::Checkbox("Показать маску (отладка)", &show_mask)) {
         s.debug_view = show_mask ? BbSettings::DebugReactive : BbSettings::DebugNone;
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
-    Checkbox(BbSettings::MenuText("Character motion vectors", "Векторы движения персонажей"),
-             s.object_motion);
-    Hint(BbSettings::MenuText(
-        "Accurate vectors for animated objects: clothing and weapons break up less "
-        "during movement. The static scene does not get an additional pass. "
-        "Changes apply after restarting the game.",
-        "Точные векторы для анимированных объектов: одежда и оружие меньше рассыпаются "
-        "при движении. Статичная сцена не получает дополнительный проход. "
-        "Изменение применяется после перезапуска игры."));
+    Checkbox("Векторы движения персонажей", s.object_motion);
+    Hint("Точные векторы для анимированных объектов: одежда и оружие меньше рассыпаются "
+         "при движении. Статичная сцена не получает дополнительный проход. "
+         "Изменение применяется после перезапуска игры.");
     bool show_motion = s.debug_view == BbSettings::DebugMotion;
-    if (ImGui::Checkbox(BbSettings::MenuText("Show motion vectors (debug)",
-                                             "Показать векторы движения (отладка)"),
-                        &show_motion)) {
+    if (ImGui::Checkbox("Показать векторы движения (отладка)", &show_motion)) {
         s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
     }
-    Hint(BbSettings::MenuText(
-        "Red/green: horizontal/vertical motion (8 pixels = full brightness). "
-        "Blue: the pixel received an accurate object vector, not just camera motion. "
-        "The upscaler treats a moving object with no blue or red/green as "
-        "stationary, causing trails.",
-        "Красный/зелёный: движение по горизонтали/вертикали (8 пикселей = полная яркость). "
-        "Синий: пиксель получил точный вектор объекта, а не только движение камеры. "
-        "Движущийся предмет без синего и без красного/зелёного апскейлер считает "
-        "неподвижным, отсюда шлейф."));
+    Hint("Красный/зелёный: движение по горизонтали/вертикали (8 пикселей = полная яркость). "
+         "Синий: пиксель получил точный вектор объекта, а не только движение камеры. "
+         "Движущийся предмет без синего и без красного/зелёного апскейлер считает "
+         "неподвижным, отсюда шлейф.");
     ImGui::EndDisabled(); // upscaler off
 
-    ImGui::SeparatorText(BbSettings::MenuText("Output resolution", "Разрешение вывода"));
+    ImGui::SeparatorText("Разрешение вывода");
     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
     int output = s.output_res;
-    if (ImGui::BeginCombo(BbSettings::MenuText("Output resolution", "Разрешение вывода"),
-                          outputs[output])) {
+    if (ImGui::BeginCombo("Разрешение вывода", outputs[output])) {
         for (int i = 0; i < BbSettings::OutputCount; ++i) {
             if (ImGui::Selectable(outputs[i], i == output)) {
                 Store(s.output_res, i, true);
@@ -446,27 +340,16 @@ void Menu() {
         ImGui::EndCombo();
     }
     if (BbSettings::FixedRenderSession()) {
-        Hint(BbSettings::MenuText(
-            "Size of the final frame and UI. The preset sets the scene size relative to "
-            "the output: 4K Performance = 1920x1080. Applies after restarting the game.",
-            "Размер готового кадра и интерфейса. Пресет задаёт размер сцены относительно "
-            "вывода: 4K Performance = 1920x1080. Применяется после перезапуска игры."));
+        Hint("Размер готового кадра и интерфейса. Пресет задаёт размер сцены относительно "
+             "вывода: 4K Performance = 1920x1080. Применяется после перезапуска игры.");
     } else {
-        Hint(BbSettings::MenuText(
-            "The final frame and UI size changes at the next frame boundary. "
-            "The preset sets the scene size relative to the output: 4K Performance = 1920x1080. "
-            "Changing the size resets the upscaler's history and may cause a brief pause.",
-            "Размер готового кадра и интерфейса меняется на границе следующего кадра. "
-            "Пресет задаёт размер сцены относительно вывода: 4K Performance = 1920x1080. "
-            "Смена размера сбрасывает историю апскейлера и может вызвать короткую паузу."));
+        Hint("Размер готового кадра и интерфейса меняется на границе следующего кадра. "
+             "Пресет задаёт размер сцены относительно вывода: 4K Performance = 1920x1080. "
+             "Смена размера сбрасывает историю FSR и может вызвать короткую паузу.");
     }
-    const char* live_modes[] = {BbSettings::MenuText("Auto (based on GPU)", "Авто (по видеокарте)"),
-                                BbSettings::MenuText("Off (faster)", "Выключена (быстрее)"),
-                                BbSettings::MenuText("On", "Включена")};
+    static const char* live_modes[] = {"Авто (по видеокарте)", "Выключена (быстрее)", "Включена"};
     int live = s.live_resolution + 1;
-    if (ImGui::BeginCombo(
-            BbSettings::MenuText("Live resolution changes", "Смена разрешения на лету"),
-            live_modes[live])) {
+    if (ImGui::BeginCombo("Смена разрешения на лету", live_modes[live])) {
         for (int i = 0; i < 3; ++i) {
             if (ImGui::Selectable(live_modes[i], i == live)) {
                 Store(s.live_resolution, i - 1, true);
@@ -474,28 +357,18 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
-    Hint(BbSettings::MenuText(
-        "On: output resolution and preset change without restarting, but game post-processing "
-        "stays at 1080p, which is noticeably slower on Steam Deck and older GPUs. "
-        "Off: everything renders at the preset resolution, and changes require a restart. Auto "
-        "enables this on powerful discrete GPUs. Applies after restarting the game.",
-        "Включена: разрешение вывода и пресет меняются без перезапуска, но постобработка игры "
-        "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
-        "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
-        "её на мощных дискретных видеокартах. Применяется после перезапуска игры."));
-    ImGui::SeparatorText(BbSettings::MenuText("Game effects (restart required)",
-                                              "Эффекты игры (после перезапуска)"));
-    const char* lods[] = {BbSettings::MenuText("Highest (-2)", "Максимальная (-2)"),
-                          BbSettings::MenuText("Game default", "Как в игре"),
-                          BbSettings::MenuText("Lower (1)", "Ниже (1)"),
-                          BbSettings::MenuText("Lowest (2)", "Минимальная (2)")};
+    Hint("Включена: разрешение вывода и пресет меняются без перезапуска, но постобработка игры "
+         "остаётся в 1080p — на Steam Deck и старых видеокартах это заметно медленнее. "
+         "Выключена: всё рисуется в разрешении пресета, смена — через перезапуск. Авто включает "
+         "её на мощных дискретных видеокартах. Применяется после перезапуска игры.");
+    ImGui::SeparatorText("Эффекты игры (после перезапуска)");
+    static const char* lods[] = {"Максимальная (-2)", "Как в игре", "Ниже (1)", "Минимальная (2)"};
     static constexpr int lod_values[] = {-2, 0, 1, 2};
     int lod_index = 1;
     for (int i = 0; i < 4; ++i) {
         if (lod_values[i] == s.model_lod) lod_index = i;
     }
-    if (ImGui::BeginCombo(BbSettings::MenuText("Model detail", "Детализация моделей"),
-                          lods[lod_index])) {
+    if (ImGui::BeginCombo("Детализация моделей", lods[lod_index])) {
         for (int i = 0; i < 4; ++i) {
             if (ImGui::Selectable(lods[i], i == lod_index)) {
                 Store(s.model_lod, lod_values[i], true);
@@ -504,183 +377,140 @@ void Menu() {
         ImGui::EndCombo();
     }
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
-        const auto& effect = BbSettings::Effects[e];
-        Checkbox(BbSettings::MenuText(effect.label, effect.label_ru), s.effects[e]);
-        if (std::string_view(effect.key) == "debug_camera") {
-            Hint(BbSettings::MenuText("Hold Cross and press L3 (keyboard: Space + Z).",
-                                      "Удерживайте Cross и нажмите L3 (клавиатура: Space + Z)."));
-        } else if (std::string_view(effect.key) == "debug_menu") {
-            Hint(BbSettings::MenuText(
-                "Left side of the touchpad (Tab); right side: Backspace. Needs the adhoc folder "
-                "from Nexus mod #253 (the fonts in adhoc/font).",
-                "Левая сторона тачпада (Tab), правая — Backspace. Нужна папка adhoc из мода "
-                "Nexus #253 (шрифты в adhoc/font)."));
-        }
+        Checkbox(BbSettings::Effects[e].label, s.effects[e]);
     }
-    Hint(BbSettings::MenuText(
-        "Effects are enabled and disabled by game patches at startup (patches/Bloodborne.xml). "
-        "Motion blur and shadows from dynamic lights place a significant load on the GPU.",
-        "Эффекты включаются и выключаются патчами игры при запуске (patches/Bloodborne.xml). "
-        "Размытие в движении и тени от динамических источников заметно нагружают GPU."));
+    Hint("Эффекты включаются и выключаются патчами игры при запуске (patches/Bloodborne.xml). "
+         "Размытие в движении и тени от динамических источников заметно нагружают GPU.");
+    Hint("Свободная камера: удерживайте Cross и нажимайте L3 (клавиатура: Space + Z). "
+         "Debug menu: левый touchpad / Tab. Нужны DbgFont14h.ccm и DbgFont14h.tpf "
+         "в dvdroot_ps4/font из мода Nexus #253. Правый touchpad: Backspace.");
 
-    bool restart =
-        s.object_motion != s.startup_object_motion || s.model_lod != s.startup_model_lod ||
-        s.live_resolution != s.startup_live_resolution || BbSettings::ResolutionNeedsRestart();
+    bool restart = s.object_motion != s.startup_object_motion ||
+                   s.model_lod != s.startup_model_lod ||
+                   s.live_resolution != s.startup_live_resolution ||
+                   BbSettings::ResolutionNeedsRestart();
     for (int e = 0; e < BbSettings::EffectCount; ++e) {
         restart |= s.effects[e] != s.startup_effects[e];
     }
     if (restart) {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
-                           BbSettings::MenuText("Changes apply after restarting the game",
-                                                "Изменения применятся после перезапуска игры"));
-        if (ImGui::Button(
-                BbSettings::MenuText("Apply and restart game", "Применить и перезапустить игру"))) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "Изменения применятся после перезапуска игры");
+        if (ImGui::Button("Применить и перезапустить игру")) {
             BbSettings::Save();
             runtime_restart();
         }
     }
 
-    ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));
-    Checkbox(BbSettings::MenuText("FPS counter in corner", "Счётчик FPS в углу"), s.show_fps);
+    ImGui::SeparatorText("Прочее");
+    Checkbox("Счётчик FPS в углу", s.show_fps);
 
     ImGui::Spacing();
-    if (ImGui::Button(BbSettings::MenuText("Close", "Закрыть"))) {
+    if (ImGui::Button("Закрыть")) {
         keep_open = false;
     }
-    // Issues #74, #116: leaving the game from the pad (this menu opens with L3+R3). A second
-    // press confirms; the window thread then closes like the window's own close button.
-    static bool quit_armed;
     ImGui::SameLine();
-    if (ImGui::Button(quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
-                                 : BbSettings::MenuText("Quit game", "Выйти из игры"))) {
-        if (quit_armed) {
-            SDL_Event quit{};
-            quit.type = SDL_EVENT_QUIT;
-            SDL_PushEvent(&quit);
-        }
-        quit_armed = !quit_armed;
-    }
-    if (quit_armed && !ImGui::IsItemFocused() && !ImGui::IsItemHovered()) {
-        quit_armed = false;
-    }
-    ImGui::TextDisabled("%s", BbSettings::MenuText("Settings are saved to bbport.ini",
-                                             "Настройки сохраняются в bbport.ini"));
+    ImGui::TextDisabled("Настройки сохраняются в bbport.ini");
     ImGui::End();
     if (!keep_open) {
         SetOpen(false);
     }
 }
 
+// The game's text dialog: what is typed, and how to finish (keyboard or controller).
+void TextEntryBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.42f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.32f, 0.0f),
+                                        ImVec2(viewport->WorkSize.x * 0.8f, FLT_MAX));
+    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::Begin("##text_entry", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", text_entry_prompt.c_str());
+    ImGui::Separator();
+    ImGui::SetWindowFontScale(1.4f);
+    ImGui::Text("%s_", text_entry_text.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Separator();
+    ImGui::TextDisabled("Keyboard: type, Backspace to erase, Enter = OK, Esc = cancel");
+    ImGui::TextDisabled("Controller: Cross (A) = OK, Circle (B) = cancel");
+    ImGui::End();
+}
+
+// The game's save/load slot list: one entry per save, the selected one highlighted.
+void SaveListBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(viewport->WorkSize.x * 0.46f, viewport->WorkSize.y * 0.62f),
+                             ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::Begin("##save_list", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", list_title.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Separator();
+    const float footer = ImGui::GetTextLineHeightWithSpacing() * 2.2f;
+    ImGui::BeginChild("##items", ImVec2(0.0f, -footer));
+    for (int i = 0; i < static_cast<int>(list_items.size()); ++i) {
+        ImGui::PushID(i);
+        const bool selected = i == list_selected;
+        if (ImGui::Selectable(list_items[i].c_str(), selected,
+                              ImGuiSelectableFlags_AllowDoubleClick)) {
+            list_selected = i;
+            if (ImGui::IsMouseDoubleClicked(0)) {
+                list_result = i;
+            }
+        }
+        if (selected && list_scroll) {
+            ImGui::SetScrollHereY(0.5f);
+        }
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    list_scroll = false;
+    ImGui::EndChild();
+    ImGui::Separator();
+    if (list_confirm >= 0) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+                           "Apagar este save?   Enter / X (A): sim    Esc / O (B): nao");
+    } else {
+        ImGui::TextDisabled("Setas / direcional: escolher    Enter / X (A): confirmar    "
+                            "Esc / O (B): voltar    Del / Triangulo (Y): apagar");
+    }
+    ImGui::End();
+}
+
 void FpsCounter() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const float pad = 12.0f * base_scale;
-    ImGui::SetNextWindowPos(
-        ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad, viewport->WorkPos.y + pad),
-        ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad,
+                                   viewport->WorkPos.y + pad),
+                            ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.5f);
     ImGui::Begin("##fps", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
     const auto& s = BbSettings::Get();
-    ImGui::Text(BbSettings::MenuText("%.0f FPS  %.1f ms  %s", "%.0f FPS  %.1f мс  %s"),
-                frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f, frame_ms_avg,
-                s.upscaler == BbSettings::UpscalerFsr3     ? "FSR 3.1"
-                : s.upscaler == BbSettings::UpscalerFsr4   ? "FSR 4"
+    ImGui::Text("%.0f FPS  %.1f мс  %s", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
+                frame_ms_avg,
+                s.upscaler == BbSettings::UpscalerFsr3   ? "FSR 3.1"
+                : s.upscaler == BbSettings::UpscalerFsr4 ? "FSR 4"
                 : s.upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
-                : s.upscaler == BbSettings::UpscalerTaa    ? "TAA"
-                : s.upscaler == BbSettings::UpscalerDlss   ? "DLSS"
-                                                           : "");
+                : s.upscaler == BbSettings::UpscalerTaa ? "TAA"
+                : s.upscaler == BbSettings::UpscalerDlss ? "DLSS"
+                                                         : "");
     ImGui::End();
-}
-
-void TextPrompt() {
-    std::string title, text;
-    {
-        std::scoped_lock lock{prompt_mutex};
-        title = prompt_title;
-        text = prompt_text;
-    }
-    const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
-                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowBgAlpha(0.9f);
-    ImGui::Begin("##textprompt", nullptr,
-                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
-                     ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::TextUnformatted(title.c_str());
-    ImGui::Separator();
-    ImGui::Text("%s_", text.c_str());
-    ImGui::Separator();
-    ImGui::TextUnformatted("Keyboard: type, Backspace = delete, Enter = OK, Esc = cancel");
-    ImGui::End();
-}
-
-/// BB_MENU_KEYS_FILE=<file> (scripted tests): tokens toggle up down left right enter back l1 r1,
-/// consumed when the file appears (it is removed), one key press per frame.
-void ScriptedKeys() {
-    static const char* path = std::getenv("BB_MENU_KEYS_FILE");
-    static std::chrono::steady_clock::time_point last_check{};
-    static std::vector<std::string> queue;
-    static bool release = false;
-    static ImGuiKey held = ImGuiKey_None;
-    if (!path) {
-        return;
-    }
-    ImGuiIO& io = ImGui::GetIO();
-    if (release) {
-        io.AddKeyEvent(held, false);
-        release = false;
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (queue.empty() && now - last_check > std::chrono::milliseconds(100)) {
-        last_check = now;
-        if (FILE* f = std::fopen(path, "r")) {
-            char token[32];
-            while (std::fscanf(f, "%31s", token) == 1) {
-                queue.emplace_back(token);
-            }
-            std::fclose(f);
-            std::remove(path);
-        }
-    }
-    if (queue.empty()) {
-        return;
-    }
-    const std::string token = queue.front();
-    queue.erase(queue.begin());
-    if (token == "toggle") {
-        SetOpen(!menu_open);
-        return;
-    }
-    held = token == "up" ? ImGuiKey_GamepadDpadUp : token == "down" ? ImGuiKey_GamepadDpadDown
-         : token == "left" ? ImGuiKey_GamepadDpadLeft : token == "right" ? ImGuiKey_GamepadDpadRight
-         : token == "enter" ? ImGuiKey_GamepadFaceDown : token == "l1" ? ImGuiKey_GamepadL1
-         : token == "r1" ? ImGuiKey_GamepadR1 : token == "kdown" ? ImGuiKey_DownArrow
-         : token == "kup" ? ImGuiKey_UpArrow : ImGuiKey_None;
-    if (token == "back") {
-        SetOpen(false);
-        return;
-    }
-    if (held != ImGuiKey_None) {
-        io.AddKeyEvent(held, true);
-        release = true;
-    }
 }
 
 } // namespace
-
-void SetTextPrompt(bool active, const std::string& prompt, const std::string& text) {
-    {
-        std::scoped_lock lock{prompt_mutex};
-        prompt_title = prompt;
-        prompt_text = text;
-    }
-    prompt_active = active;
-}
 
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
     std::scoped_lock lock{imgui_mutex};
@@ -763,12 +593,130 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
+    if (list_active && !menu_open && list_result == -1) {
+        const int count = static_cast<int>(list_items.size());
+        const auto move = [&](int delta) {
+            list_confirm = -1;
+            if (count) {
+                list_selected = (list_selected + delta + count) % count;
+                list_scroll = true;
+            }
+        };
+        switch (event.type) {
+        case SDL_EVENT_KEY_DOWN:
+            switch (event.key.key) {
+            case SDLK_UP:
+            case SDLK_W:
+                move(-1);
+                break;
+            case SDLK_DOWN:
+            case SDLK_S:
+                move(1);
+                break;
+            case SDLK_RETURN:
+            case SDLK_KP_ENTER:
+            case SDLK_SPACE:
+                if (!event.key.repeat && list_confirm >= 0) {
+                    list_result = -100 - list_confirm; // delete it (PollSaveList)
+                    list_confirm = -1;
+                } else if (!event.key.repeat && count) {
+                    list_result = list_selected;
+                }
+                break;
+            case SDLK_ESCAPE:
+            case SDLK_BACKSPACE:
+                if (!event.key.repeat) {
+                    if (list_confirm >= 0) {
+                        list_confirm = -1;
+                    } else {
+                        list_result = -2;
+                    }
+                }
+                break;
+            case SDLK_DELETE:
+                if (!event.key.repeat && list_selected >= list_first_deletable &&
+                    list_selected < count) {
+                    list_confirm = list_selected;
+                }
+                break;
+            default:
+                break;
+            }
+            return true;
+        case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+            switch (event.gbutton.button) {
+            case SDL_GAMEPAD_BUTTON_DPAD_UP:
+                move(-1);
+                break;
+            case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+                move(1);
+                break;
+            case SDL_GAMEPAD_BUTTON_SOUTH:
+                if (list_confirm >= 0) {
+                    list_result = -100 - list_confirm;
+                    list_confirm = -1;
+                } else if (count) {
+                    list_result = list_selected;
+                }
+                break;
+            case SDL_GAMEPAD_BUTTON_EAST:
+                if (list_confirm >= 0) {
+                    list_confirm = -1;
+                } else {
+                    list_result = -2;
+                }
+                break;
+            case SDL_GAMEPAD_BUTTON_NORTH:
+                if (list_selected >= list_first_deletable && list_selected < count) {
+                    list_confirm = list_selected;
+                }
+                break;
+            default:
+                break;
+            }
+            return true;
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            return true;
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            if (event.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
+                const bool down = event.gaxis.value > 20000, up = event.gaxis.value < -20000;
+                if (down && !list_stick_down) {
+                    move(1);
+                }
+                if (up && !list_stick_up) {
+                    move(-1);
+                }
+                list_stick_down = down;
+                list_stick_up = up;
+            }
+            return true;
+        case SDL_EVENT_MOUSE_MOTION: {
+            const float density = PixelDensity(event.motion.windowID);
+            io.AddMousePosEvent(event.motion.x * density, event.motion.y * density);
+            return true;
+        }
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (event.button.button == SDL_BUTTON_LEFT) {
+                io.AddMouseButtonEvent(0, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+            }
+            return true;
+        case SDL_EVENT_MOUSE_WHEEL:
+            io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
+            return true;
+        default:
+            break;
+        }
+    }
     const bool is_open = menu_open;
     switch (event.type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
-        if (down && !event.key.repeat &&
+        if (down && !event.key.repeat && MenuAllowed() &&
             (event.key.key == SDLK_INSERT || (is_open && event.key.key == SDLK_ESCAPE))) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
@@ -793,7 +741,7 @@ bool HandleEvent(const SDL_Event& event) {
         } else if (button == SDL_GAMEPAD_BUTTON_RIGHT_STICK) {
             r3_down = down;
         }
-        if (down && l3_down && r3_down) {
+        if (down && l3_down && r3_down && MenuAllowed()) {
             SetOpen(!is_open);
             return true;
         }
@@ -848,30 +796,66 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || prompt_active || BbSettings::Get().show_fps);
-}
-
-bool MenuOpen() {
-    return menu_open;
+    return initialized &&
+           (menu_open || text_entry_active || list_active || BbSettings::Get().show_fps);
 }
 
 bool CapturesInput() {
-    // The text dialog too: keys typed into it (Backspace is the touchpad) stay out of the game.
-    return menu_open || prompt_active;
+    return menu_open || text_entry_active || list_active;
+}
+
+bool OpenSaveList(const std::string& title, const std::vector<std::string>& items, int focus,
+                  int first_deletable) {
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized) {
+        return false; // nothing could show it
+    }
+    list_title = title;
+    list_items = items;
+    list_selected = items.empty() ? 0 : std::clamp(focus, 0, static_cast<int>(items.size()) - 1);
+    list_result = -1;
+    list_confirm = -1;
+    list_first_deletable = first_deletable < 0 ? static_cast<int>(items.size()) : first_deletable;
+    list_scroll = true;
+    list_active = true;
+    ImGui::GetIO().MouseDrawCursor = true;
+    return true;
+}
+
+int PollSaveList() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!list_active || list_result == -1) {
+        return -1;
+    }
+    list_active = false;
+    if (initialized) {
+        ImGui::GetIO().MouseDrawCursor = menu_open.load();
+    }
+    return list_result;
+}
+
+void CloseSaveList() {
+    std::scoped_lock lock{imgui_mutex};
+    list_active = false;
+    if (initialized) {
+        ImGui::GetIO().MouseDrawCursor = menu_open.load();
+    }
+}
+
+void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
+    std::scoped_lock lock{imgui_mutex};
+    text_entry_active = active;
+    text_entry_prompt = prompt;
+    text_entry_text = text;
 }
 
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
-
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
     last_present = now;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
-    }
-    if (std::getenv("BB_MENU_KEYS_FILE") && initialized) {
-        std::scoped_lock lock{imgui_mutex};
-        ScriptedKeys();
     }
     if (!Visible()) {
         return;
@@ -897,8 +881,11 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
     }
-    if (prompt_active && !menu_open) {
-        TextPrompt();
+    if (text_entry_active) {
+        TextEntryBox();
+    }
+    if (list_active && !menu_open) {
+        SaveListBox();
     }
     ImGui::Render();
 

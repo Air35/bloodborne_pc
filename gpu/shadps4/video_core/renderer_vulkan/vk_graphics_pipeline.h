@@ -43,7 +43,6 @@ struct GraphicsPipelineKey {
     u8 depth_samples;
     std::array<u8, AmdGpu::NUM_COLOR_BUFFERS> color_samples;
     u32 mrt_mask;
-    u32 motion_vectors = 0;
     struct {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;
@@ -89,12 +88,12 @@ public:
                      vk::PipelineCache pipeline_cache,
                      std::span<const Shader::Info*, MaxShaderStages> stages,
                      std::span<const Shader::RuntimeInfo, MaxShaderStages> runtime_infos,
-                     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader,
+                     const Shader::Gcn::FetchShaderData* fetch_shader,
                      std::span<const vk::ShaderModule> modules, SerializationSupport& sdata,
                      bool preloading);
     ~GraphicsPipeline();
 
-    const std::optional<const Shader::Gcn::FetchShaderData>& GetFetchShader() const noexcept {
+    const Shader::Gcn::FetchShaderData& GetFetchShader() const noexcept {
         return fetch_shader;
     }
 
@@ -103,21 +102,18 @@ public:
     }
 
     /// Gets the attributes and bindings for vertex inputs.
-    /// bbport: `sharps`, when given, are the V#s of the fetch shader's attributes as the GPU
-    /// command thread read them (in the draw packet): the V# tables they come from may have been
-    /// rewritten by a later constant engine dump by the time the recording thread gets here.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
                          VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT>& divisors,
                          VertexInputs<AmdGpu::Buffer>& guest_buffers, u32 step_rate_0,
-                         u32 step_rate_1, std::span<const AmdGpu::Buffer> sharps = {}) const;
+                         u32 step_rate_1) const;
 
 private:
     void BuildDescSetLayout(bool preloading);
 
 private:
     GraphicsPipelineKey key;
-    std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    Shader::Gcn::FetchShaderData fetch_shader{};
 };
 
 struct ClipDistanceShaderKey {

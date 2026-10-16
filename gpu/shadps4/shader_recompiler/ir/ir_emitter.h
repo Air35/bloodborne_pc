@@ -44,6 +44,7 @@ public:
 
     void Barrier();
     void WorkgroupMemoryBarrier();
+    void SubgroupBarrier();
     void DeviceMemoryBarrier();
 
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
@@ -370,6 +371,7 @@ public:
                                            TextureInstInfo info);
 
     [[nodiscard]] Value ImageHandle(const Value& tsharp_low, const Value& tsharp_high);
+    [[nodiscard]] Value ImageArrayHandle(const U32& handle, const U32& element);
 
     [[nodiscard]] Value ImageSampleRaw(const Value& handle, const Value& sampler_handle,
                                        const Value& address1, const Value& address2,
@@ -410,7 +412,10 @@ public:
     void ImageWrite(const Value& handle, const Value& coords, const U32& lod,
                     const U32& multisampling, const Value& color, TextureInstInfo info);
 
-    [[nodiscard]] F32 CubeFaceIndex(const Value& cube_coords);
+    [[nodiscard]] F32 CubeFaceIndex(const Value& x, const Value& y, const Value& z);
+    [[nodiscard]] F32 CubeFaceCoordS(const Value& x, const Value& y, const Value& z);
+    [[nodiscard]] F32 CubeFaceCoordT(const Value& x, const Value& y, const Value& z);
+    [[nodiscard]] F32 CubeFaceMajorAxis(const Value& x, const Value& y, const Value& z);
 
     void EmitVertex();
     void EmitPrimitive();

@@ -5,17 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
-#include <cpuid.h>
 #include "runtime.h"
-#include "cpu_check.h"
-#include "isa_rewrite.h"
-#include "title_profile.h"
 #include "gpu/bbgpu.h"
+#include "gpu/sotc/sotc_patches.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h>
+#include <wchar.h>
+#include <mmsystem.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -25,7 +25,6 @@
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <execinfo.h>
-#include <pthread.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #endif
@@ -44,51 +43,6 @@ static int gpu_enabled;
 int vulkan_smoke(void);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
-
-/* sotc: imports the GPU library serves (registered by bbgpu_init); names are NID#library. */
-static int gpu_library_import(const char *name) {
-    static const char *const libraries[]={"#libSceGnmDriver","#libSceVideoOut"};
-    const size_t length=strlen(name);
-    for (size_t i=0;i<sizeof(libraries)/sizeof(*libraries);++i) {
-        const size_t suffix=strlen(libraries[i]);
-        if (length>suffix && !strcmp(name+length-suffix,libraries[i])) return 1;
-    }
-    return 0;
-}
-/* sotc: the game's code was compiled for the PS4's CPU (AMD Jaguar) and runs as it is: AVX, BMI1
- * (andn/bextr/blsr/tzcnt), MOVBE, LZCNT and POPCNT, thousands of each in eboot.bin, and SSE4a in
- * a few functions. A CPU without one stops at the first with SIGILL, and lzcnt/tzcnt even run as
- * bsr/bsf there, with other results. cpu_check.c classifies the host by CPUID bit; the sets it
- * lacks are rewritten by isa_rewrite.c from a table (SOTC_ISA_MODE, docs/10, ADR-0010). Said
- * before the game starts; BB_SKIP_CPU_CHECK=1 skips all of it (tests on hosts that lack sets).
- * Sets isa_missing/isa_sets; returns 0, or 20 after a STOP line. */
-static unsigned isa_missing, isa_sets;
-static char isa_missing_names[96], isa_sets_names[96];
-static IsaTable *isa_table;
-static int cpu_setup(void) {
-    const char *skip = getenv("BB_SKIP_CPU_CHECK");
-    if (skip && !strcmp(skip, "1")) return 0;
-    const CpuFeatureWords words = cpu_feature_words();
-    char fatal[96];
-    if (cpu_missing_fatal(words, fatal, sizeof fatal)) {
-        printf("STOP: this CPU lacks instruction sets the game's code uses and no rewrite can supply: %s "
-               "(an Intel Sandy Bridge 2011 or newer with AVX, or an AMD with AVX, is needed)\n", fatal);
-        return 20;
-    }
-    isa_missing = cpu_missing_rewritable(words, isa_missing_names, sizeof isa_missing_names);
-    IsaPolicy policy;
-    const char *text = getenv("SOTC_ISA_MODE");
-    if (isa_policy_parse(text, &policy)) {
-        printf("STOP: SOTC_ISA_MODE=%s is not auto, native, rewrite or rewrite:<list of movbe,bmi1,lzcnt,f16c,sse4a>\n", text);
-        return 20;
-    }
-    if (isa_policy_resolve(&policy, isa_missing, &isa_sets)) {
-        printf("STOP: this CPU lacks %s and SOTC_ISA_MODE=native does not rewrite them\n", isa_missing_names);
-        return 20;
-    }
-    cpu_set_names(isa_sets, isa_sets_names, sizeof isa_sets_names);
-    return 0;
-}
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
     if (fread(b, 1, 8, f) != 8) fail("truncated boot file");
@@ -97,11 +51,41 @@ static uint64_t read64(FILE *f) {
     return n;
 }
 static size_t round_page(size_t size) { return (size + page_size - 1) & ~(page_size - 1); }
+#ifdef _WIN32
+/* sotc: the PS4 maps the executable at 0x400000, and Shadow of the Colossus packs pointers
+ * to its static data into 31 bits (bit 31 selects a heap-relative form). Windows already
+ * uses 0x400000 before main, so, as shadPS4 does, the image goes to the first free range
+ * above it, which must end below 2 GiB. It is claimed first thing in main, before the C
+ * runtime, the drivers or anything else allocate there. */
+#define EBOOT_MIN UINT64_C(0x400000)
+#define EBOOT_LIMIT UINT64_C(0x80000000)
+#define EBOOT_RESERVATION (UINT64_C(256) << 20)
+static void *eboot_reservation;
+static void reserve_eboot_range(void) {
+    for (uintptr_t at=EBOOT_MIN; at+EBOOT_RESERVATION<=EBOOT_LIMIT;) {
+        MEMORY_BASIC_INFORMATION m;
+        if (!VirtualQuery((void *)at,&m,sizeof(m))) return;
+        uintptr_t start=((uintptr_t)m.BaseAddress+0xffff)&~(uintptr_t)0xffff, end=(uintptr_t)m.BaseAddress+m.RegionSize;
+        if (m.State==MEM_FREE && end>start && end-start>=EBOOT_RESERVATION) {
+            eboot_reservation=VirtualAlloc((void *)start,EBOOT_RESERVATION,MEM_RESERVE,PAGE_NOACCESS);
+            if (eboot_reservation) return;
+        }
+        at=end;
+    }
+}
+/* The image (eboot, linked modules, patch trampolines) below 2 GiB. */
+static void *allocate_image(size_t size) {
+    if (!eboot_reservation) fail("no free 256 MiB range below 2 GiB for the eboot");
+    if (size > EBOOT_RESERVATION) fail("the image does not fit the eboot reservation");
+    void *p=VirtualAlloc(eboot_reservation, size, MEM_COMMIT, PAGE_READWRITE);
+    if (!p) fail("cannot commit the eboot range");
+    printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need); loader at %p\n",p,(void *)GetModuleHandleA(NULL));
+    return p;
+}
+#endif
 static void *allocate(size_t size) {
-#ifndef _WIN32
     void *low=runtime_low_map(size,PROT_READ|PROT_WRITE);
     if (low) return low;
-#endif
 #ifdef _WIN32
     void *p = VirtualAlloc(NULL, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!p) fail("VirtualAlloc failed");
@@ -149,10 +133,532 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+/* sotc: with the user's own libSceNgs2/libSceUlt linked (link_modules.py --sys-modules) their
+ * native code replaces the runtime's silent audio stand-ins. */
+static int prefer_native(const char *name, int bound) {
+    if (!bound) return 0;
+    const char *symbol=runtime_import_name(name);
+    return !strncmp(symbol,"sceNgs2",7) || !strncmp(symbol,"sceUlt",6);
+}
+#ifdef _WIN32
+static void describe_address(char *out, size_t size, uintptr_t address) {
+    HMODULE module=NULL;
+    char name[MAX_PATH]="?";
+    if (image && address-(uintptr_t)image<0x20000000) { snprintf(out,size,"guest offset 0x%" PRIxPTR,address-(uintptr_t)image); return; }
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)address,&module) && module) {
+        GetModuleFileNameA(module,name,sizeof(name));
+        const char *base=strrchr(name,'\\');
+        snprintf(out,size,"%s+0x%" PRIxPTR,base ? base+1 : name,address-(uintptr_t)module);
+        return;
+    }
+    snprintf(out,size,"%p",(void *)address);
+}
+/* sotc: BB_STACKS_TRIGGER=<file>: when the file appears it is removed and every other thread is
+ * suspended in turn and reported (name, rip, frame-pointer chain) to stderr: hangs without a
+ * debugger. Guest code keeps frame pointers. */
+static int read_word(uintptr_t address, uintptr_t *value) {
+    SIZE_T n=0;
+    return ReadProcessMemory(GetCurrentProcess(),(const void *)address,value,sizeof(*value),&n) && n==sizeof(*value);
+}
+static void dump_thread_stacks(void) {
+    typedef HRESULT (WINAPI *GetDescription)(HANDLE,PWSTR *);
+    static GetDescription get_description;
+    if (!get_description) get_description=(GetDescription)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    if (snapshot==INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 entry={.dwSize=sizeof(entry)};
+    DWORD self=GetCurrentThreadId(), pid=GetCurrentProcessId();
+    fprintf(stderr,"STACKS: begin\n");
+    for (BOOL more=Thread32First(snapshot,&entry); more; more=Thread32Next(snapshot,&entry)) {
+        if (entry.th32OwnerProcessID!=pid || entry.th32ThreadID==self) continue;
+        HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_LIMITED_INFORMATION,FALSE,entry.th32ThreadID);
+        if (!thread) continue;
+        char name[96]="";
+        PWSTR wide=NULL;
+        if (get_description && SUCCEEDED(get_description(thread,&wide)) && wide) {
+            WideCharToMultiByte(CP_UTF8,0,wide,-1,name,sizeof(name),NULL,NULL);
+            LocalFree(wide);
+        }
+        if (SuspendThread(thread)!=(DWORD)-1) {
+            CONTEXT c={.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER};
+            if (GetThreadContext(thread,&c)) {
+                char where[MAX_PATH+64];
+                describe_address(where,sizeof(where),(uintptr_t)c.Rip);
+                fprintf(stderr,"thread %lu '%s': rip %s rsp=%016llx\n",entry.th32ThreadID,name,where,c.Rsp);
+                uintptr_t rbp=(uintptr_t)c.Rbp, frame[2];
+                for (int depth=0;depth<24 && rbp;++depth) {
+                    if (!read_word(rbp,&frame[0]) || !read_word(rbp+8,&frame[1]) || !frame[1]) break;
+                    describe_address(where,sizeof(where),frame[1]);
+                    fprintf(stderr,"    #%d %s\n",depth,where);
+                    if (frame[0]<=rbp) break;
+                    rbp=frame[0];
+                }
+                /* Guest and loader return addresses near the top of the stack (frames without
+                 * rbp); loader ones as exe offsets for llvm-addr2line (ImageBase 0x140000000). */
+                int found=0, host=0;
+                const uintptr_t exe=(uintptr_t)GetModuleHandleA(NULL);
+                for (uintptr_t at=(uintptr_t)c.Rsp; at<(uintptr_t)c.Rsp+0x3000 && found<14+host; at+=8) {
+                    uintptr_t value;
+                    if (!read_word(at,&value)) break;
+                    if (image && value-(uintptr_t)image<0x4000000) {
+                        fprintf(stderr,"    [rsp+0x%llx] guest 0x%llx\n",(unsigned long long)(at-c.Rsp),
+                                (unsigned long long)(value-(uintptr_t)image));
+                        ++found;
+                    } else if (host<24 && value-exe>0x1000 && value-exe<0x4000000) {
+                        fprintf(stderr,"    [rsp+0x%llx] exe 0x%llx\n",(unsigned long long)(at-c.Rsp),
+                                (unsigned long long)(value-exe+0x140000000ull));
+                        ++host;
+                    }
+                }
+            }
+            ResumeThread(thread);
+        }
+        CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    fprintf(stderr,"STACKS: end\n");
+    fflush(stderr);
+}
+/* sotc: SOTC_PROFILE=<thread name part>: samples that thread every ~1 ms (SuspendThread +
+ * GetThreadContext) from SOTC_PROFILE_DELAY (default 20) s for SOTC_PROFILE_SECONDS (default 15)
+ * s, then prints the hottest instructions (leaf) and the hottest frames anywhere on the
+ * frame-pointer chain (inclusive). exe offsets: llvm-symbolizer on out/gpu/bb-probe.exe. */
+#define PROFILE_SLOTS 65536
+typedef struct { uintptr_t address; unsigned leaf, inclusive; } ProfileSlot;
+static ProfileSlot *profile_slots;
+static void profile_add(uintptr_t address, int leaf) {
+    size_t i=(address*0x9E3779B97F4A7C15ull)>>48;
+    for (size_t n=0;n<PROFILE_SLOTS;++n,i=(i+1)&(PROFILE_SLOTS-1)) {
+        ProfileSlot *s=&profile_slots[i];
+        if (!s->address) s->address=address;
+        if (s->address==address) { if (leaf) ++s->leaf; ++s->inclusive; return; }
+    }
+}
+/* (system leaf, first own caller) pairs. */
+typedef struct { uintptr_t leaf, caller; unsigned count; } ProfilePair;
+static ProfilePair profile_pairs[4096];
+static void profile_pair(uintptr_t exe, uintptr_t leaf, uintptr_t caller) {
+    (void)exe;
+    for (int i=0;i<4096;++i) {
+        ProfilePair *p=&profile_pairs[i];
+        if (!p->count) { p->leaf=leaf; p->caller=caller; }
+        if (p->leaf==leaf && p->caller==caller) { ++p->count; return; }
+    }
+}
+static int profile_by_pair(const void *a, const void *b) {
+    return (int)((const ProfilePair *)b)->count-(int)((const ProfilePair *)a)->count;
+}
+static int profile_by_leaf(const void *a, const void *b) {
+    return (int)((const ProfileSlot *)b)->leaf-(int)((const ProfileSlot *)a)->leaf;
+}
+static int profile_by_inclusive(const void *a, const void *b) {
+    return (int)((const ProfileSlot *)b)->inclusive-(int)((const ProfileSlot *)a)->inclusive;
+}
+static DWORD WINAPI profiler(void *name) {
+    typedef HRESULT (WINAPI *Describe)(HANDLE, PWSTR *);
+    Describe describe=(Describe)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+    const char *delay=getenv("SOTC_PROFILE_DELAY"), *seconds=getenv("SOTC_PROFILE_SECONDS");
+    Sleep((delay ? atoi(delay) : 20)*1000);
+    wchar_t wanted[128];
+    MultiByteToWideChar(CP_UTF8,0,(const char *)name,-1,wanted,128);
+    DWORD target=0;
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    THREADENTRY32 te={.dwSize=sizeof(te)};
+    for (BOOL ok=Thread32First(snapshot,&te); ok && !target; ok=Thread32Next(snapshot,&te)) {
+        if (te.th32OwnerProcessID!=GetCurrentProcessId()) continue;
+        HANDLE t=OpenThread(THREAD_QUERY_LIMITED_INFORMATION,FALSE,te.th32ThreadID);
+        PWSTR text=NULL;
+        if (t && describe && SUCCEEDED(describe(t,&text)) && text) {
+            if (wcsstr(text,wanted)) target=te.th32ThreadID;
+            LocalFree(text);
+        }
+        if (t) CloseHandle(t);
+    }
+    CloseHandle(snapshot);
+    if (!target) { fprintf(stderr,"SOTC profile: no thread named like %s\n",(const char *)name); return 0; }
+    HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_INFORMATION,FALSE,target);
+    profile_slots=calloc(PROFILE_SLOTS,sizeof(*profile_slots));
+    if (!thread || !profile_slots) return 0;
+    const ULONGLONG end=GetTickCount64()+(ULONGLONG)(seconds ? atoi(seconds) : 15)*1000;
+    unsigned samples=0;
+    timeBeginPeriod(1);
+    while (GetTickCount64()<end) {
+        if (SuspendThread(thread)!=(DWORD)-1) {
+            CONTEXT c={.ContextFlags=CONTEXT_CONTROL|CONTEXT_INTEGER};
+            if (GetThreadContext(thread,&c)) {
+                ++samples;
+                profile_add((uintptr_t)c.Rip,1);
+                const uintptr_t leaf=(uintptr_t)c.Rip;
+                int first_own=1;
+                /* Callers through the unwind tables (.pdata): system DLLs keep no frame pointers. */
+                for (int depth=0; depth<32; ++depth) {
+                    DWORD64 base=0;
+                    PRUNTIME_FUNCTION fn=RtlLookupFunctionEntry(c.Rip,&base,NULL);
+                    if (fn) {
+                        PVOID handler_data=NULL; DWORD64 establisher=0;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,c.Rip,fn,&c,&handler_data,&establisher,NULL);
+                    } else {
+                        uintptr_t ret;
+                        if (!read_word((uintptr_t)c.Rsp,&ret)) break;
+                        c.Rip=ret; c.Rsp+=8;
+                    }
+                    if (!c.Rip) break;
+                    profile_add((uintptr_t)c.Rip,0);
+                    /* The first frame in the loader/GPU library that leads to a system leaf:
+                     * who waits, locks or calls the driver. */
+                    if (first_own && (uintptr_t)c.Rip-(uintptr_t)GetModuleHandleA(NULL)<0x4000000 &&
+                        leaf-(uintptr_t)GetModuleHandleA(NULL)>=0x4000000) {
+                        first_own=0;
+                        profile_pair((uintptr_t)GetModuleHandleA(NULL),leaf,(uintptr_t)c.Rip);
+                    }
+                }
+            }
+            ResumeThread(thread);
+        }
+        Sleep(1);
+    }
+    timeEndPeriod(1);
+    char where[MAX_PATH+64];
+    fprintf(stderr,"SOTC profile of %s: %u samples\n",(const char *)name,samples);
+    /* SOTC_PROFILE_OUT=<file>: every sampled address (module offset, leaf, inclusive), for
+     * per-function totals offline (tools/profile_sym.py --functions). */
+    if (getenv("SOTC_PROFILE_OUT")) {
+        FILE *out=fopen(getenv("SOTC_PROFILE_OUT"),"w");
+        for (size_t i=0; out && i<PROFILE_SLOTS; ++i) {
+            if (!profile_slots[i].address) continue;
+            describe_address(where,sizeof(where),profile_slots[i].address);
+            fprintf(out,"%s %u %u\n",where,profile_slots[i].leaf,profile_slots[i].inclusive);
+        }
+        if (out) { fprintf(out,"samples %u\n",samples); fclose(out); }
+    }
+    qsort(profile_slots,PROFILE_SLOTS,sizeof(*profile_slots),profile_by_leaf);
+    fprintf(stderr,"  leaf:\n");
+    for (int i=0;i<40 && profile_slots[i].leaf;++i) {
+        describe_address(where,sizeof(where),profile_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*profile_slots[i].leaf/samples,where);
+    }
+    qsort(profile_pairs,4096,sizeof(*profile_pairs),profile_by_pair);
+    fprintf(stderr,"  system leaf <- first own caller:\n");
+    for (int i=0;i<30 && profile_pairs[i].count;++i) {
+        char caller[MAX_PATH+64];
+        describe_address(where,sizeof(where),profile_pairs[i].leaf);
+        describe_address(caller,sizeof(caller),profile_pairs[i].caller);
+        fprintf(stderr,"  %5.1f%% %s <- %s\n",100.0*profile_pairs[i].count/samples,where,caller);
+    }
+    qsort(profile_slots,PROFILE_SLOTS,sizeof(*profile_slots),profile_by_inclusive);
+    fprintf(stderr,"  inclusive:\n");
+    for (int i=0;i<60 && profile_slots[i].inclusive;++i) {
+        describe_address(where,sizeof(where),profile_slots[i].address);
+        fprintf(stderr,"  %5.1f%% %s\n",100.0*profile_slots[i].inclusive/samples,where);
+    }
+    fflush(stderr);
+    return 0;
+}
+static DWORD WINAPI stacks_watcher(void *path) {
+    for (;;) {
+        Sleep(500);
+        if (!remove((const char *)path)) dump_thread_stacks();
+    }
+    return 0;
+}
+static int fatal_reported;
+static LONG fatal_exception(EXCEPTION_POINTERS *info) {
+    if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    const CONTEXT *c=info->ContextRecord;
+    char where[MAX_PATH+64];
+    describe_address(where,sizeof(where),(uintptr_t)c->Rip);
+    if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
+        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu)\n",
+                record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
+                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
+    else
+        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
+    fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
+            c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    if (gpu_enabled) bbgpu_dump_guest_writes(info);
+    /* rbp chain (guest and host code keep frame pointers). */
+    uintptr_t rbp=(uintptr_t)c->Rbp;
+    for (int depth=0; depth<24 && rbp; ++depth) {
+        uintptr_t frame[2];
+        SIZE_T got=0;
+        if (!ReadProcessMemory(GetCurrentProcess(),(void *)rbp,frame,sizeof(frame),&got) || got!=sizeof(frame) || frame[0]<=rbp) break;
+        describe_address(where,sizeof(where),frame[1]);
+        fprintf(stderr,"  #%d %s\n",depth,where);
+        rbp=frame[0];
+    }
+    fflush(NULL);
+    TerminateProcess(GetCurrentProcess(),3);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+/* sotc: with precise readbacks GPU-written pages are read-protected. A loader or GPU helper
+ * thread (draw preparation, recording, copies) reading one must not request a readback: the
+ * command processor serving it waits for those very threads. The page is opened for the one
+ * faulting instruction (trap flag) and its protection restored on the single-step trap. Those
+ * threads need the CPU-side bytes only; GPU results reach the guest through its own faults. */
+static _Thread_local uintptr_t step_page;
+static _Thread_local DWORD step_protect;
+static int helper_read_fault(EXCEPTION_POINTERS *info) {
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    if (record->ExceptionInformation[0]!=0 || step_page || runtime_thread_is_guest() ||
+        bbgpu_is_gpu_side_thread() || bbgpu_readbacks_mode()!=2) return 0;
+    const uintptr_t page=(uintptr_t)record->ExceptionInformation[1] & ~(uintptr_t)4095;
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery((void *)page,&m,sizeof(m)) || m.State!=MEM_COMMIT || m.Protect!=PAGE_NOACCESS) return 0;
+    DWORD old;
+    if (!VirtualProtect((void *)page,4096,PAGE_READONLY,&old)) return 0;
+    step_page=page; step_protect=old;
+    info->ContextRecord->EFlags|=0x100;
+    return 1;
+}
+static int helper_single_step(EXCEPTION_POINTERS *info) {
+    if (!step_page) return 0;
+    MEMORY_BASIC_INFORMATION m;
+    DWORD old;
+    /* Only if nobody (the tracker) changed the page meanwhile. */
+    if (VirtualQuery((void *)step_page,&m,sizeof(m)) && m.Protect==PAGE_READONLY)
+        VirtualProtect((void *)step_page,4096,step_protect,&old);
+    step_page=0;
+    info->ContextRecord->EFlags&=~(DWORD)0x100;
+    return 1;
+}
+/* sotc: the BPE heap of Shadow of the Colossus (EU 1.01). GPU writes of dispatches on stale
+ * descriptors land in freed heap blocks and readbacks then overwrite the allocator's metadata
+ * (access violations in eboot+0x48xxx/0x49xxx). The GPU side keeps that metadata
+ * (video_core/buffer_cache/bpe_heap_guard.cpp, from Pink-shadPS4) but needs the heap object: a
+ * breakpoint on the heap's free function (eboot+0x495e0) records its first argument for the
+ * first calls, then is removed. SOTC_HEAP_GUARD=0 leaves it off. */
+#define HEAP_FREE_OFFSET 0x495e0
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address);
+#define HEAP_HOOK_CALLS 2000
+static unsigned char heap_hook_original;
+static volatile LONG heap_hook_calls, heap_hook_done;
+static _Thread_local int heap_hook_rearm;
+static struct { uintptr_t heap; LONG count; } heap_seen[8];
+static volatile uintptr_t heap_chosen;
+static void heap_hook_write(unsigned char value) {
+    DWORD old;
+    unsigned char *at=image+HEAP_FREE_OFFSET;
+    if (VirtualProtect(at,1,PAGE_EXECUTE_READWRITE,&old)) { *at=value; VirtualProtect(at,1,old,&old); FlushInstructionCache(GetCurrentProcess(),at,1); }
+}
+static void install_heap_hook(void) {
+    static const unsigned char expected[8]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56};
+    const char *v=getenv("SOTC_HEAP_GUARD");
+    if ((v && v[0]=='0') || memcmp(image+HEAP_FREE_OFFSET,expected,sizeof(expected))) return;
+    heap_hook_original=image[HEAP_FREE_OFFSET];
+    image[HEAP_FREE_OFFSET]=0xCC; /* the image is still writable here */
+}
+static void choose_heap(void) {
+    uintptr_t best=0; LONG best_count=0;
+    for (int i=0;i<8;++i) {
+        uint64_t size=0;
+        const unsigned char *backing=heap_seen[i].heap ? runtime_memory_backing_pointer(heap_seen[i].heap+0x30) : NULL;
+        if (backing) memcpy(&size,backing,8);
+        else if (heap_seen[i].heap-(uintptr_t)image<0x20000000) memcpy(&size,(const void *)(heap_seen[i].heap+0x30),8); /* a global of the eboot */
+        if (heap_seen[i].heap && size>=0x1000000 && size<0x100000000ull && heap_seen[i].count>best_count) {
+            best=heap_seen[i].heap; best_count=heap_seen[i].count;
+        }
+    }
+    heap_chosen=best;
+    fprintf(stderr,"Runtime: BPE heap guard on heap %p (%ld of %d frees)\n",(void *)best,best_count,HEAP_HOOK_CALLS);
+    for (int i=0;i<8 && heap_seen[i].heap;++i) {
+        uint64_t words[0x10]={0};
+        const unsigned char *backing=runtime_memory_backing_pointer(heap_seen[i].heap);
+        if (backing) memcpy(words,backing,sizeof(words));
+        else if (heap_seen[i].heap-(uintptr_t)image<0x20000000) memcpy(words,(const void *)heap_seen[i].heap,sizeof(words));
+        fprintf(stderr,"  heap %p: %ld frees; +0x28 %#llx +0x30 %#llx +0x38 %#llx +0x40 %#llx\n",(void *)heap_seen[i].heap,
+                heap_seen[i].count,(unsigned long long)words[5],(unsigned long long)words[6],(unsigned long long)words[7],
+                (unsigned long long)words[8]);
+    }
+}
+uintptr_t runtime_sotc_heap(void) { return heap_chosen; }
+static int heap_hook_trap(EXCEPTION_POINTERS *info) {
+    CONTEXT *c=info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode==EXCEPTION_SINGLE_STEP) {
+        if (!heap_hook_rearm) return 0;
+        heap_hook_rearm=0;
+        if (!heap_hook_done) heap_hook_write(0xCC);
+        c->EFlags&=~(DWORD)0x100;
+        return 1;
+    }
+    if (!image || c->Rip!=(DWORD64)(uintptr_t)(image+HEAP_FREE_OFFSET)) return 0;
+    if (image[HEAP_FREE_OFFSET]!=0xCC) return 1; /* another thread restored it: just run it */
+    const uintptr_t heap=(uintptr_t)c->Rdi;
+    for (int i=0;i<8;++i) {
+        if (heap_seen[i].heap==heap) { InterlockedIncrement(&heap_seen[i].count); break; }
+        if (!heap_seen[i].heap && !InterlockedCompareExchangePointer((void *volatile *)&heap_seen[i].heap,(void *)heap,NULL)) {
+            InterlockedIncrement(&heap_seen[i].count); break;
+        }
+    }
+    heap_hook_write(heap_hook_original);
+    if (InterlockedIncrement(&heap_hook_calls)>=HEAP_HOOK_CALLS) {
+        if (!InterlockedExchange(&heap_hook_done,1)) choose_heap();
+    } else {
+        heap_hook_rearm=1;
+        c->EFlags|=0x100; /* put the breakpoint back after this instruction */
+    }
+    return 1;
+}
+static LONG vectored_fault_impl(EXCEPTION_POINTERS *info);
+/* sotc (from the shadPS4 SotC fork, signals.cpp): Shadow of the Colossus runs its jobs on fibers
+ * with 16-64 KiB stacks packed back to back without guard pages. The exception handler runs on
+ * whatever stack faulted, and the GPU page-tracking path needs far more: it overflowed into the
+ * neighbouring stack or the process died without any report. A fault on a stack that is not the
+ * thread's own runs the handler on a per-thread 512 KiB stack; the TEB bounds point at it
+ * meanwhile so stack probes and nested faults see a consistent stack. */
+LONG call_on_stack(EXCEPTION_POINTERS *info, LONG (*fn)(EXCEPTION_POINTERS *), void *top);
+__asm__(".text\n.p2align 4\n.globl call_on_stack\ncall_on_stack:\n"
+        " push %rbp\n mov %rsp,%rbp\n mov %r8,%rsp\n sub $32,%rsp\n call *%rdx\n"
+        " mov %rbp,%rsp\n pop %rbp\n ret\n");
+#define ALT_STACK_SIZE (512u * 1024u)
+static _Thread_local unsigned char *alt_stack;
+/* BB_FAULT_RING=<file>: every exception is recorded in a file-backed ring so the last ones
+ * survive a process the kernel kills without dispatching (diagnostics). */
+struct fault_entry { uint64_t tick, tid, code, addr, rip, rsp, region, below; }; /* region/below: TEB stack limit/base */
+static struct fault_entry *fault_ring;
+static volatile LONG fault_ring_next;
+static void fault_ring_open(const char *path) {
+    HANDLE file=CreateFileA(path,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ,NULL,CREATE_ALWAYS,0,NULL);
+    if (file==INVALID_HANDLE_VALUE) return;
+    HANDLE map=CreateFileMappingA(file,NULL,PAGE_READWRITE,0,8192*sizeof(struct fault_entry),NULL);
+    if (map) fault_ring=MapViewOfFile(map,FILE_MAP_WRITE,0,0,0);
+}
+static void fault_ring_add(const EXCEPTION_POINTERS *info) {
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    struct fault_entry *e=&fault_ring[(InterlockedIncrement(&fault_ring_next)-1)&8191];
+    const uintptr_t rsp=(uintptr_t)info->ContextRecord->Rsp;
+    const NT_TIB *tib=(const NT_TIB *)NtCurrentTeb();
+    e->tick=GetTickCount64(); e->tid=GetCurrentThreadId(); e->code=record->ExceptionCode;
+    e->addr=record->NumberParameters>=2 ? record->ExceptionInformation[1] : 0;
+    e->rip=info->ContextRecord->Rip; e->rsp=rsp;
+    e->region=(uintptr_t)tib->StackLimit; e->below=(uintptr_t)tib->StackBase;
+}
+static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
+    NT_TIB *tib=(NT_TIB *)NtCurrentTeb();
+    const uintptr_t sp=(uintptr_t)__builtin_frame_address(0);
+    if (fault_ring) fault_ring_add(info);
+    if (sp>=(uintptr_t)tib->StackLimit && sp<(uintptr_t)tib->StackBase) return vectored_fault_impl(info);
+    if (!alt_stack) alt_stack=VirtualAlloc(NULL,ALT_STACK_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+    if (!alt_stack) return vectored_fault_impl(info);
+    void *const base=tib->StackBase, *const limit=tib->StackLimit;
+    tib->StackBase=alt_stack+ALT_STACK_SIZE;
+    tib->StackLimit=alt_stack;
+    const LONG result=call_on_stack(info,vectored_fault_impl,alt_stack+ALT_STACK_SIZE);
+    tib->StackBase=base;
+    tib->StackLimit=limit;
+    return result;
+}
+static LONG vectored_fault_impl(EXCEPTION_POINTERS *info) {
+    const EXCEPTION_RECORD *record=info->ExceptionRecord;
+    DWORD code=record->ExceptionCode;
+    if ((code==EXCEPTION_BREAKPOINT || code==EXCEPTION_SINGLE_STEP) && heap_hook_trap(info)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code==EXCEPTION_SINGLE_STEP && helper_single_step(info)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2 && gpu_enabled && helper_read_fault(info))
+        return EXCEPTION_CONTINUE_EXECUTION;
+    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2) {
+        /* GPU page tracking (write-protected guest pages) is resolved first. */
+        if (gpu_enabled && bbgpu_handle_fault(info,(void *)record->ExceptionInformation[1])) return EXCEPTION_CONTINUE_EXECUTION;
+        if (runtime_fault_recover) {
+            /* A speculative guest memory read (GPU draw preparation) faulted: the thread resumes
+             * in bb_longjmp, outside the exception dispatcher, back at its recovery point. */
+            unsigned long long *buffer=*runtime_fault_recover;
+            runtime_fault_recover=NULL;
+            CONTEXT *c=info->ContextRecord;
+            c->Rsp=((c->Rsp-128)&~(DWORD64)15)-40;
+            c->Rcx=(DWORD64)(uintptr_t)buffer;
+            c->Rdx=1;
+            c->Rip=(DWORD64)(uintptr_t)bb_longjmp;
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    /* sotc: an SSE4a site the load-time patchers could not rewrite is interpreted. */
+    if (code==EXCEPTION_ILLEGAL_INSTRUCTION && image && sotc_handle_illegal(info)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (code==EXCEPTION_ACCESS_VIOLATION || code==EXCEPTION_ILLEGAL_INSTRUCTION || code==EXCEPTION_PRIV_INSTRUCTION ||
+        code==EXCEPTION_STACK_OVERFLOW || code==EXCEPTION_INT_DIVIDE_BY_ZERO || code==EXCEPTION_DATATYPE_MISALIGNMENT) {
+        /* Faults in guest code, the loader or the runtime end the process with a report; drivers
+         * and system libraries may handle their own exceptions. */
+        uintptr_t rip=(uintptr_t)info->ContextRecord->Rip;
+        HMODULE self=GetModuleHandleA(NULL), module=NULL;
+        int ours=(image && rip-(uintptr_t)image<0x20000000) ||
+                 (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)rip,&module) && module==self) ||
+                 !module;
+        if (ours) return fatal_exception(info);
+    }
+    /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
+    if (code==0xC0000008 /* STATUS_INVALID_HANDLE */) return fatal_exception(info);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
+/* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
+ * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
+uint32_t runtime_thread_tcb_offset(void);
+static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
+    static const unsigned char load[]={0x65,0x48,0x8b,0x04,0x25,0,0,0,0};
+    uint32_t displacement=runtime_thread_tcb_offset();
+    uint64_t patched=0;
+    for (uint64_t s=0;s<count;++s) {
+        if (!(segments[s].flags&1) || segments[s].size<sizeof(load)) continue;
+        unsigned char *at=image+segments[s].address, *end=at+segments[s].size-sizeof(load);
+        for (; at<=end; ++at)
+            if (at[0]==0x65 && !memcmp(at,load,sizeof(load))) { memcpy(at+5,&displacement,4); ++patched; at+=sizeof(load)-1; }
+    }
+    return patched;
+}
+#endif
+/* sotc: SSE4a and red-zone patches of the eboot (gpu/sotc), described by scripts/sotc_cpu.py. */
+#define SOTC_TRAMPOLINE_SIZE (UINT64_C(16) << 20)
+static void apply_sotc_cpu_patches(const char *path, const Segment *segments, uint64_t count, uint64_t size) {
+    FILE *f=fopen(path,"rb");
+    char magic[8];
+    if (!f || fread(magic,1,8,f)!=8 || memcmp(magic,"SOTCCPU1",8)) fail("bad --sotc-cpu file (run scripts/sotc_cpu.py)");
+    uint64_t eh=read64(f), eh_size=read64(f), functions=read64(f), offsets[16];
+    if (functions>16) fail("too many red-zone functions");
+    for (uint64_t i=0;i<functions;++i) offsets[i]=read64(f);
+    fclose(f);
+    uint64_t eboot_end=module_count ? modules[0].base : size;
+    if (eh_size && (eh>=eboot_end || eh_size>eboot_end-eh)) fail("eh_frame_hdr outside the eboot");
+    SotcCodeSegment code[16]; uint32_t n=0;
+    for (uint64_t s=0;s<count && n<16;++s)
+        if ((segments[s].flags&1) && segments[s].address<eboot_end)
+            code[n++]=(SotcCodeSegment){segments[s].address,segments[s].size};
+    SotcPatchRequest request={image,eboot_end,image+round_page(size),SOTC_TRAMPOLINE_SIZE,eh,eh_size,
+                              code,n,offsets,(uint32_t)functions};
+    SotcPatchResult result;
+    if (sotc_patch_eboot(&request,&result)) fail("CPU patches: cannot decode the eboot function table");
+    printf("CPU patches: SSE4a %s, %" PRIu64 " functions, %" PRIu64 " short SSE4a relocated, "
+           "red zone: %" PRIu64 " functions / %" PRIu64 " instructions\n",
+           result.needs_sse4a ? "emulated" : "native", result.function_starts, result.short_sse4a,
+           result.red_zone_functions, result.red_zone_instructions);
+}
+/* sotc: extra engine command line (cvars such as +r_motionBlurEnable=0), described by
+ * scripts/sotc_modes.py: SOTCCMD1, the image offset of the `lea rsi,[rip+x]` that loads the
+ * string the game appends to its command line ("+VSyncWindow=10%"), then the new text. The text
+ * is placed at the end of the trampoline area (loader memory right after the image, within the
+ * lea's reach) instead of over strings of the game. */
+static void apply_sotc_cmdline(const char *path, uint64_t size) {
+    FILE *f=fopen(path,"rb");
+    char magic[8];
+    if (!f || fread(magic,1,8,f)!=8 || memcmp(magic,"SOTCCMD1",8)) fail("bad --sotc-cmdline file (run scripts/sotc_modes.py)");
+    uint64_t lea=read64(f);
+    char text[16384];
+    size_t length=fread(text,1,sizeof(text)-1,f);
+    fclose(f);
+    text[length]=0;
+    unsigned char *at=image+lea;
+    if (lea+7>size || at[0]!=0x48 || at[1]!=0x8d || at[2]!=0x35) fail("--sotc-cmdline: no lea rsi at the given offset");
+    unsigned char *place=image+round_page(size)+SOTC_TRAMPOLINE_SIZE-sizeof(text);
+    memcpy(place,text,length+1);
+    const int64_t disp=(int64_t)(place-(at+7));
+    if (disp<INT32_MIN || disp>INT32_MAX) fail("--sotc-cmdline: text out of reach");
+    const int32_t disp32=(int32_t)disp;
+    memcpy(at+3,&disp32,4);
+    printf("Engine command line: %s\n",text);
+}
 #ifndef _WIN32
+/* sotc (Linux): the BPE heap guard finds the heap through a Windows-only breakpoint; until the
+ * SIGTRAP side exists the guard stays off here (docs/plans/2026-10-15-a0b-uniao-sotc-pc.md). */
+uintptr_t runtime_sotc_heap(void) { return 0; }
 static void fault(int sig, siginfo_t *info, void *context) {
-    /* sotc: an int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
-    if (sig == SIGTRAP && isa_table && isa_rewrite_handle_sigtrap(isa_table, context)) return;
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
@@ -170,13 +676,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
     Dl_info where;
-    /* sotc: inside the stub of a rewritten site, the emulation of that instruction faulted. */
-    const int isa_site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
-    if (isa_site >= 0)
-        snprintf(line, sizeof(line), "Guest fault (signal %d) while emulating ISA site 0x%llx (%s), address %p\n",
-                 sig, (unsigned long long)isa_table->sites[isa_site].offset,
-                 isa_kind_name(isa_table->sites[isa_site].kind), info->si_addr);
-    else if (rip - (uintptr_t)image < 0x10000000)
+    if (rip - (uintptr_t)image < 0x10000000)
         snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p\n",
                  sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr);
     else if (dladdr((void *)rip, &where) && where.dli_fname)
@@ -186,26 +686,6 @@ static void fault(int sig, siginfo_t *info, void *context) {
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
-    /* Outside the image and any shared object (generated code, a freed mapping): the mapping
-     * from /proc/self/maps, and the thread. */
-    if (rip - (uintptr_t)image >= 0x10000000 && !(dladdr((void *)rip, &where) && where.dli_fname)) {
-        char thread[32] = "?";
-        pthread_getname_np(pthread_self(), thread, sizeof(thread));
-        snprintf(line, sizeof(line), "  thread %s; mapping of RIP: ", thread);
-        { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
-        FILE *maps = fopen("/proc/self/maps", "r");
-        int found = 0;
-        while (maps && fgets(line, sizeof(line), maps)) {
-            unsigned long from, to;
-            if (sscanf(line, "%lx-%lx", &from, &to) == 2 && rip >= from && rip < to) {
-                ssize_t written_=write(2, line, strlen(line)); (void)written_;
-                found = 1;
-                break;
-            }
-        }
-        if (maps) fclose(maps);
-        if (!found) { ssize_t written_=write(2, "none\n", 5); (void)written_; }
-    }
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];
     int depth = backtrace(frames, 32);
@@ -217,10 +697,10 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
-    if (isa_table) { isa_rewrite_report(isa_table, stderr); fflush(stderr); } /* sotc: hot ISA sites */
     _exit(128 + sig);
 }
 #endif
+#ifndef _WIN32
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
 static uintptr_t exe_base;
@@ -266,6 +746,7 @@ static void watchdog(int sig, siginfo_t *info, void *context) {
     usleep(100000);
     _exit(128 + sig);
 }
+#endif
 /* param.sfo lookup: string or integer value of key, 0 when absent. */
 static int sfo_value(const char *path, const char *key, char *text, size_t text_size, uint32_t *number) {
     FILE *f=fopen(path,"rb");
@@ -334,15 +815,27 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
-volatile int runtime_restarting;
 void runtime_restart(void) {
     fflush(NULL);
+#ifdef _WIN32
+    /* run.py sets BB_RESTART_COMMAND: the launch command line, started again (new patches). */
+    const char *command=getenv("BB_RESTART_COMMAND");
+    puts("Runtime: restarting through run.py");
+    if (!command || !*command) { fputs("runtime_restart: BB_RESTART_COMMAND is not set\n",stderr); _exit(1); }
+    char *line=_strdup(command);
+    /* Same output handles: a launcher reading the game's log keeps reading the new launch. */
+    STARTUPINFOA startup={.cb=sizeof(startup),.dwFlags=STARTF_USESTDHANDLES,
+                          .hStdInput=GetStdHandle(STD_INPUT_HANDLE),.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE),
+                          .hStdError=GetStdHandle(STD_ERROR_HANDLE)};
+    PROCESS_INFORMATION process;
+    if (!line || !CreateProcessA(NULL,line,NULL,NULL,TRUE,0,NULL,NULL,&startup,&process)) {
+        fprintf(stderr,"runtime_restart: CreateProcess failed (%lu)\n",GetLastError()); _exit(1);
+    }
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    /* The new launch waits for this process's GPU device to go away (run.py --after). */
+    TerminateProcess(GetCurrentProcess(),0);
+#else
     puts("Runtime: restarting through run.sh");
-    /* The GPU threads still run until exec: their Vulkan calls fail once the device fd is
-     * closed below, and an assertion there must not end the process (exit 23) before exec. */
-    runtime_restarting = 1;
-    __sync_synchronize();
-#ifndef _WIN32
     syscall(SYS_close_range, 3u, ~0u, 0u);
     execlp("bash", "bash", "run.sh", (char *)NULL);
     perror("runtime_restart: exec");
@@ -352,6 +845,9 @@ void runtime_restart(void) {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    reserve_eboot_range();
+#endif
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
@@ -359,36 +855,30 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
-    if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {
-        /* sotc: what check-env and run.sh ask before building a table (docs/10 §7). */
-        const int rc = cpu_setup();
-        if (rc) return rc;
-        printf(isa_missing ? "CPU: missing %s\n" : "CPU: complete\n", isa_missing_names);
-        printf("ISA: rewrite=%s\n", isa_sets ? isa_sets_names : "none");
-        return 0;
-    }
-    int cpu_only = 0, strict_imports = 0, check_imports = 0;
+#ifdef _WIN32
+    /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
+     * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
+    runtime_memory_reserve();
+    runtime_thread_tcb_offset();
+#endif
+    int cpu_only = 0, strict_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *isa_file=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL, *sotc_cmdline=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
+        else if (!strcmp(argv[i], "--sotc-cpu") && i+1<argc) sotc_cpu=argv[++i];
+        else if (!strcmp(argv[i], "--sotc-cmdline") && i+1<argc) sotc_cmdline=argv[++i];
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
-        else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
-        else if (!strcmp(argv[i], "--isa-rewrite") && i+1<argc) isa_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--check-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
         return 1;
-    }
-    if (!check_imports) { /* sotc: --check-imports runs no guest code */
-        const int rc = cpu_setup();
-        if (rc) return rc;
     }
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
@@ -409,23 +899,28 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
-        char serial[16]="", title[128]="", version[16]="";
-        sfo_value(sfo,"TITLE_ID",serial,sizeof(serial),NULL);
-        sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
-        sfo_value(sfo,"APP_VER",version,sizeof(version),NULL);
-        /* sotc: the loader names the title once; everything specific to it is a profile (ADR-0016). */
-        title_profile_apply(serial,id,runtime_file_user_dir());
-        runtime_net_configure(app0,serial,title,version);
     }
     bbgpu_register_kernel();
 #ifdef _WIN32
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
+    AddVectoredExceptionHandler(1, vectored_fault);
+    if (getenv("BB_FAULT_RING")) fault_ring_open(getenv("BB_FAULT_RING"));
+    if (getenv("BB_STACKS_TRIGGER")) CreateThread(NULL,0,stacks_watcher,(void *)getenv("BB_STACKS_TRIGGER"),0,NULL);
+    if (getenv("SOTC_PROFILE")) CreateThread(NULL,0,profiler,(void *)getenv("SOTC_PROFILE"),0,NULL);
+    SetUnhandledExceptionFilter(unhandled_fault);
+    if (getenv("BB_STRICT_HANDLES")) {
+        PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
+        strict.RaiseExceptionOnInvalidHandleReference=1;
+        strict.HandleExceptionsPermanentlyEnabled=1;
+        if (!SetProcessMitigationPolicy(ProcessStrictHandleCheckPolicy,&strict,sizeof(strict)))
+            fprintf(stderr,"BB_STRICT_HANDLES: policy not set (%lu)\n",GetLastError());
+    }
+    (void)timeout_seconds; /* no watchdog on Windows */
 #else
     page_size = (size_t)sysconf(_SC_PAGESIZE);
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
-    sigaction(SIGTRAP, &sa, NULL); /* sotc: int3 ISA sites */
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
@@ -532,25 +1027,16 @@ int main(int argc, char **argv) {
             if (!executable) fail("native function is not executable");
         }
     }
-    /* sotc: the stubs of the ISA rewrite follow the image in the same low mapping (rel32 jmps reach). */
-    if (isa_sets) {
-        isa_table = isa_file ? isa_table_load(isa_file) : NULL;
-        if (!isa_table) {
-            printf("STOP: this CPU needs %s rewritten and no valid rewrite table was given (--isa-rewrite)\n", isa_sets_names);
-            return 20;
-        }
-    }
-    const size_t stub_area = isa_table ? round_page(isa_stub_area_size(isa_table)) : 0;
-    image = allocate(round_page(size) + stub_area);
-    unsigned char *stubs = image + round_page(size);
+    /* sotc: the CPU patch trampolines follow the image (rel32 jumps reach them). */
+#ifdef _WIN32
+    image = allocate_image(round_page(size) + SOTC_TRAMPOLINE_SIZE);
+#else
+    image = allocate(round_page(size) + SOTC_TRAMPOLINE_SIZE);
+#endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
-    if (isa_table && isa_table_matches(isa_table, image, size)) {
-        printf("STOP: this CPU needs %s rewritten and the rewrite table does not match this image\n", isa_sets_names);
-        return 20;
-    }
     if (!cpu_only) {
-        char title[128]="PS4 game", serial[16]="UNKNOWN", sfo[4096]; /* sotc: neutral fallback (ADR-0016) */
+        char title[128]="Bloodborne", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0 ? app0 : ".");
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
@@ -558,7 +1044,21 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        /* sotc: the window opens at the output resolution (SOTC_OUTPUT_RES=WxH). */
+        int window_w=1920, window_h=1080;
+        const char *output_res=getenv("SOTC_OUTPUT_RES");
+        if (output_res && sscanf(output_res,"%dx%d",&window_w,&window_h)!=2) { window_w=1920; window_h=1080; }
+#ifdef _WIN32
+        /* A window never larger than 90% of the screen: the frame keeps the output size and is
+         * scaled into it (fullscreen uses the whole screen anyway). */
+        const int screen_w=GetSystemMetrics(SM_CXSCREEN), screen_h=GetSystemMetrics(SM_CYSCREEN);
+        if (screen_w>0 && screen_h>0 && (window_w>screen_w*9/10 || window_h>screen_h*9/10)) {
+            const double scale_w=screen_w*0.9/window_w, scale_h=screen_h*0.9/window_h;
+            const double scale=scale_w<scale_h ? scale_w : scale_h;
+            window_w=(int)(window_w*scale); window_h=(int)(window_h*scale);
+        }
+#endif
+        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,window_w,window_h};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
@@ -581,7 +1081,8 @@ int main(int argc, char **argv) {
                         : relocs[i].kind == 1 ? (uintptr_t)(traps + 32 * relocs[i].value)
                         : (uintptr_t)image + relocs[i].value;
         if (relocs[i].kind) {
-            uintptr_t resolved = runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
+            uintptr_t resolved = prefer_native(names[relocs[i].value], native_libc && bindings[relocs[i].value])
+                                 ? 0 : runtime_resolve(names[relocs[i].value], relocs[i].kind == 2);
             if (resolved) value = resolved + relocs[i].addend;
             else if (native_libc && bindings[relocs[i].value]) {
                 uint64_t address=bindings[relocs[i].value];
@@ -591,45 +1092,31 @@ int main(int argc, char **argv) {
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
-    if (check_imports) {
-        /* sotc: lists every import the game would stop at, without running it. From gow3 91b6e61
-         * src/probe.c:888-903. GnmDriver/VideoOut are registered only by bbgpu_init (it opens the
-         * window), so with --cpu-only they are reported apart instead of as missing. */
-        unsigned char *checked=calloc(import_count ? import_count : 1,1);
-        if (!checked) fail("allocation failed");
-        uint64_t missing=0, gpu_left=0;
-        for (uint64_t i=0;i<nr;++i) {
-            uint64_t index=relocs[i].value;
-            if (!relocs[i].kind || checked[index]) continue;
-            checked[index]=1;
-            if (runtime_resolve(names[index],relocs[i].kind==2) || (native_libc && bindings[index])) continue;
-            if (!gpu_enabled && gpu_library_import(names[index])) {
-                printf("GPU (not checked without the GPU library): %s\n",names[index]);
-                ++gpu_left;
-                continue;
-            }
-            printf("MISSING: %s (%s)\n",names[index],runtime_import_name(names[index]));
-            ++missing;
+    /* sotc: BB_LIST_IMPORTS=1 prints how every import is served, then exits. */
+    if (getenv("BB_LIST_IMPORTS")) {
+        unsigned served[3]={0};
+        for (uint64_t i=0;i<import_count;++i) {
+            int data=0;
+            for (uint64_t r=0;r<nr;++r) if (relocs[r].kind && relocs[r].value==i) { data=relocs[r].kind==2; break; }
+            int how=!prefer_native(names[i],native_libc && bindings[i]) && runtime_resolve(names[i],data) ? 0 : native_libc && bindings[i] ? 1 : 2;
+            ++served[how];
+            printf("IMPORT %-7s %-28s %s\n",how==0 ? "runtime" : how==1 ? "native" : "MISSING",names[i],runtime_import_name(names[i]));
         }
-        printf("Imports: %" PRIu64 " missing, %" PRIu64 " left to the GPU library\n",missing,gpu_left);
+        printf("IMPORTS: %u runtime, %u native, %u missing\n",served[0],served[1],served[2]);
         fflush(NULL);
-        _exit(missing ? 1 : 0); /* no destructors: GPU threads may be running */
+        _exit(0);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
-    if (!cpu_only) bbgpu_patch_image(image, size);
-    if (isa_table) { /* sotc: after the patches (a patched site is skipped), before the pages are protected */
-        const IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
-        if (r.unsupported_needed) {
-            printf("STOP: this CPU needs %s rewritten and %u sites use encodings the rewrite cannot emulate\n",
-                   isa_sets_names, r.unsupported_needed);
-            fflush(NULL);
-            _exit(20); /* no destructors: GPU threads are running */
-        }
-        printf("ISA: rewriting %s%s%s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
-               isa_sets_names, isa_missing ? "; CPU lacks " : "; forced by SOTC_ISA_MODE", isa_missing_names,
-               r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
-        protect(stubs, stub_area, 5);
-    }
+#ifdef _WIN32
+    printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#endif
+    if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
+    if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
+#ifdef _WIN32
+    /* sotc: the BPE heap breakpoint is handled by the Windows exception filter only; the Linux
+     * SIGTRAP side is pending (docs/plans/2026-10-15-a0b-uniao-sotc-pc.md). */
+    if (sotc_cpu) install_heap_hook();
+#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
@@ -639,6 +1126,7 @@ int main(int argc, char **argv) {
             executable_entry = 1;
     }
     if (!executable_entry) fail("entry is not executable");
+    protect(image + round_page(size), SOTC_TRAMPOLINE_SIZE, 5);
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {

@@ -5,8 +5,6 @@
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
 #include <assert.h>
-#include <setjmp.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -35,31 +33,31 @@ static void *main_identity;
 static void *tls_worker(void *unused) {
     (void)unused;
     const uint64_t index[]={2,0};
-    unsigned char *p=GET(TlsAddress,"vNe1w4diLCs#libkernel")(index);
+    unsigned char *p=GET(TlsAddress,"vNe1w4diLCs")(index);
     assert(p[0]==42 && p[1]==17 && p[31]==0);
     p[0]=99;
-    assert(GET(ThreadSelf,"aI+OeCz8xrQ#libkernel")()!=main_identity);
+    assert(GET(ThreadSelf,"aI+OeCz8xrQ")()!=main_identity);
     return NULL;
 }
 static void libc_support(void) {
     static const unsigned char initial[]={42,17};
     runtime_set_libc_tls(initial,sizeof(initial),32);
     const uint64_t index[]={2,0}, last[]={2,31};
-    TlsAddress tls=GET(TlsAddress,"vNe1w4diLCs#libkernel");
+    TlsAddress tls=GET(TlsAddress,"vNe1w4diLCs");
     unsigned char *p=tls(index);
     assert(p[0]==42 && p[1]==17 && p[2]==0 && p[31]==0);
     assert(tls(last)==p+31 && tls(index)==p);
     p[0]=23;
-    main_identity=GET(ThreadSelf,"aI+OeCz8xrQ#libkernel")();
+    main_identity=GET(ThreadSelf,"aI+OeCz8xrQ")();
     pthread_t worker;
     assert(pthread_create(&worker,NULL,tls_worker,NULL)==0);
     assert(pthread_join(worker,NULL)==0);
     assert(p[0]==23 && initial[0]==42);
     void *attr=NULL;
-    AttrInit init=GET(AttrInit,"nsYoNRywwNg#libkernel");
-    ThreadGetAttr get=GET(ThreadGetAttr,"x1X76arYMxU#libkernel");
-    ThreadAffinity affinity=GET(ThreadAffinity,"8+s5BzZjxSg#libkernel");
-    HandleOp destroy=GET(HandleOp,"62KCwEMmzcM#libkernel");
+    AttrInit init=GET(AttrInit,"nsYoNRywwNg");
+    ThreadGetAttr get=GET(ThreadGetAttr,"x1X76arYMxU");
+    ThreadAffinity affinity=GET(ThreadAffinity,"8+s5BzZjxSg");
+    HandleOp destroy=GET(HandleOp,"62KCwEMmzcM");
     uint64_t mask=0;
     assert((uint32_t)init(NULL)==0x80020016);
     assert(init(&attr)==0 && get(main_identity,&attr)==0);
@@ -70,12 +68,12 @@ static void libc_support(void) {
     assert((uint32_t)affinity(&attr,&mask)==0x80020016);
     uint64_t param[8]={64};
     runtime_set_procparam(param);
-    assert(GET(ThreadSelf,"959qrazPIrg#libkernel")()==param);
+    assert(GET(ThreadSelf,"959qrazPIrg")()==param);
     typedef void (ABI *SetHeap)(void **);
     void *heap[10]={0};
-    GET(SetHeap,"p5EcQeEeJAE#libkernel")(heap);
+    GET(SetHeap,"p5EcQeEeJAE")(heap);
     assert(runtime_application_heap_api()==heap);
-    GET(SetHeap,"p5EcQeEeJAE#libkernel")(NULL);
+    GET(SetHeap,"p5EcQeEeJAE")(NULL);
     assert(runtime_application_heap_api()==NULL);
     runtime_set_procparam(NULL);
 }
@@ -87,8 +85,8 @@ static ABI void with_arg(void *p) { order[count++]=(int)(uintptr_t)p; }
 static ABI void add_handler(void) { order[count++]=4; assert(register_plain(first)==0); }
 
 static void exit_handlers(void) {
-    register_plain=GET(Register,"8G2LB+A3rzg#libc");
-    RegisterCxa cxa=GET(RegisterCxa,"tsvEmnenz48#libc");
+    register_plain=GET(Register,"8G2LB+A3rzg");
+    RegisterCxa cxa=GET(RegisterCxa,"tsvEmnenz48");
     assert(register_plain && cxa);
     assert(register_plain(first)==0);
     assert(cxa(with_arg,(void *)3,(void *)11)==0);
@@ -111,8 +109,8 @@ static void exit_handlers(void) {
 }
 static void guards(void) {
     uint64_t state=0;
-    Acquire acquire=GET(Acquire,"3GPpjQdAMTw#libc");
-    Guard release=GET(Guard,"9rAeANT2tyE#libc"), abort_guard=GET(Guard,"2emaaluWzUw#libc");
+    Acquire acquire=GET(Acquire,"3GPpjQdAMTw");
+    Guard release=GET(Guard,"9rAeANT2tyE"), abort_guard=GET(Guard,"2emaaluWzUw");
     assert(acquire(&state)==1 && state==(UINT64_C(1)<<32));
     abort_guard(&state); assert(state==0);
     assert(acquire(&state)==1);
@@ -120,12 +118,12 @@ static void guards(void) {
     assert(acquire(&state)==0);
 }
 static void mutexes(void) {
-    AttrInit attr_init=GET(AttrInit,"F8bUHwAG284#libkernel");
-    AttrType type=GET(AttrType,"iMp8QpE+XO4#libkernel");
-    HandleOp attr_destroy=GET(HandleOp,"smWEktiyyG0#libkernel");
-    MutexInit init=GET(MutexInit,"cmo1RIYva9o#libkernel");
-    HandleOp lock=GET(HandleOp,"9UK1vLZQft4#libkernel"), unlock=GET(HandleOp,"tn3VlD0hG60#libkernel");
-    HandleOp trylock=GET(HandleOp,"upoVrzMHFeE#libkernel"), destroy=GET(HandleOp,"2Of0f+3mhhE#libkernel");
+    AttrInit attr_init=GET(AttrInit,"F8bUHwAG284");
+    AttrType type=GET(AttrType,"iMp8QpE+XO4");
+    HandleOp attr_destroy=GET(HandleOp,"smWEktiyyG0");
+    MutexInit init=GET(MutexInit,"cmo1RIYva9o");
+    HandleOp lock=GET(HandleOp,"9UK1vLZQft4"), unlock=GET(HandleOp,"tn3VlD0hG60");
+    HandleOp trylock=GET(HandleOp,"upoVrzMHFeE"), destroy=GET(HandleOp,"2Of0f+3mhhE");
     void *attr=NULL, *mutex=NULL;
     assert((uint32_t)attr_init(NULL)==0x80020016);
     assert(attr_init(&attr)==0);
@@ -143,15 +141,15 @@ static void mutexes(void) {
     assert(unlock(&mutex)==0 && destroy(&mutex)==0);
 }
 static void posix_mutexes(void) {
-    AttrInit init=GET(AttrInit,"dQHWEsJtoE4#libkernel");
-    AttrType type=GET(AttrType,"mDmgMOGVUqg#libkernel");
-    HandleOp destroy_attr=GET(HandleOp,"HF7lK46xzjY#libkernel");
+    AttrInit init=GET(AttrInit,"dQHWEsJtoE4");
+    AttrType type=GET(AttrType,"mDmgMOGVUqg");
+    HandleOp destroy_attr=GET(HandleOp,"HF7lK46xzjY");
     typedef int32_t (ABI *PosixInit)(void **,void **);
-    PosixInit mutex_init=GET(PosixInit,"ttHNfU+qDBU#libkernel");
-    HandleOp lock=GET(HandleOp,"7H0iTOciTLo#libkernel");
-    HandleOp unlock=GET(HandleOp,"2Z+PpY6CaJg#libkernel");
-    HandleOp trylock=GET(HandleOp,"K-jXhbt2gn4#libkernel");
-    HandleOp destroy=GET(HandleOp,"ltCfaGr2JGE#libkernel");
+    PosixInit mutex_init=GET(PosixInit,"ttHNfU+qDBU");
+    HandleOp lock=GET(HandleOp,"7H0iTOciTLo");
+    HandleOp unlock=GET(HandleOp,"2Z+PpY6CaJg");
+    HandleOp trylock=GET(HandleOp,"K-jXhbt2gn4");
+    HandleOp destroy=GET(HandleOp,"ltCfaGr2JGE");
     void *a=NULL,*m=NULL;
     assert(init(NULL)==22 && init(&a)==0);
     assert(type(&a,99)==22 && type(&a,2)==0);
@@ -161,11 +159,11 @@ static void posix_mutexes(void) {
     m=NULL;
     assert(lock(&m)==0 && lock(&m)==11 && trylock(&m)==16);
     assert(unlock(&m)==0 && destroy(&m)==0);
-    assert(!runtime_resolve("dQHWEsJtoE4#libc",0));
+    assert(!runtime_resolve("dQHWEsJtoE4",0));
 }
 static void wall_time(void) {
     typedef int (ABI *GetTime)(int64_t *,int32_t *);
-    GetTime get=GET(GetTime,"n88vx3C5nW8#libkernel");
+    GetTime get=GET(GetTime,"n88vx3C5nW8");
     struct { int64_t value[2]; uint64_t canary; } t={{0,0},0xabcdef};
     struct { int32_t value[2]; uint32_t canary; } z={{0,0},0x123456};
     time_t before=time(NULL);
@@ -175,13 +173,13 @@ static void wall_time(void) {
     assert(t.value[1]>=0 && t.value[1]<1000000);
     assert(t.canary==0xabcdef && z.canary==0x123456);
     assert(get(NULL,NULL)==0 && get(NULL,z.value)==0);
-    assert(!runtime_resolve("n88vx3C5nW8#libc",0));
+    assert(!runtime_resolve("n88vx3C5nW8",0));
 }
 static void direct_memory(void) {
-    Allocate alloc=GET(Allocate,"rTXw65xmLIA#libkernel");
-    Map map=GET(Map,"L-Q3LEjIbgA#libkernel");
-    Unmap unmap=GET(Unmap,"cQke9UuBQOk#libkernel");
-    Release release=GET(Release,"MBuItvba6z8#libkernel");
+    Allocate alloc=GET(Allocate,"rTXw65xmLIA");
+    Map map=GET(Map,"L-Q3LEjIbgA");
+    Unmap unmap=GET(Unmap,"cQke9UuBQOk");
+    Release release=GET(Release,"MBuItvba6z8");
     int64_t a=-1,b=-1,c=-1;
     const uint64_t pool=536870912, length=16384;
     assert((uint32_t)alloc(0,pool,1,0,0,&a)==0x80020016 && a==-1);
@@ -204,84 +202,19 @@ static void direct_memory(void) {
     assert(*(uint64_t *)x==0); /* released allocation does not leak previous data */
     assert(release(a,length)==0); /* release also unmaps owned mapping */
 }
-/* Write traps (runtime_memory_trap): a page stays read-only while any reason holds it, the game's
- * own mprotect keeps them, and a new mapping starts without them. */
-void runtime_memory_trap(uintptr_t address, uint64_t size, unsigned reason, int on);
-unsigned runtime_memory_trap_reasons(uintptr_t address);
-static sigjmp_buf trap_jump;
-static void trap_fault(int sig) { (void)sig; siglongjmp(trap_jump,1); }
-static int write_faults(volatile unsigned char *p) {
-    struct sigaction action={0}, old;
-    action.sa_handler=trap_fault;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGSEGV,&action,&old);
-    int faulted=0;
-    if (sigsetjmp(trap_jump,1)) faulted=1;
-    else *p=0x5a;
-    sigaction(SIGSEGV,&old,NULL);
-    return faulted;
-}
-static int read_faults(volatile unsigned char *p) {
-    struct sigaction action={0}, old;
-    action.sa_handler=trap_fault;
-    sigemptyset(&action.sa_mask);
-    sigaction(SIGSEGV,&action,&old);
-    int faulted=0;
-    if (sigsetjmp(trap_jump,1)) faulted=1;
-    else (void)*p;
-    sigaction(SIGSEGV,&old,NULL);
-    return faulted;
-}
-typedef int32_t (ABI *Protect)(const void *, uint64_t, int);
-static void write_traps(void) {
-    Allocate alloc=GET(Allocate,"rTXw65xmLIA#libkernel");
-    Map map=GET(Map,"L-Q3LEjIbgA#libkernel");
-    Unmap unmap=GET(Unmap,"cQke9UuBQOk#libkernel");
-    Release release=GET(Release,"MBuItvba6z8#libkernel");
-    Protect protect=GET(Protect,"vSMAm3cxYTY#libkernel");
-    const uint64_t pool=536870912, length=16384;
-    int64_t a=-1;
-    void *x=NULL;
-    assert(alloc(0,pool,length,0,0,&a)==0 && map(&x,length,3,0,a,0)==0);
-    unsigned char *p=x;
-    const uintptr_t page=(uintptr_t)p;
-    runtime_memory_trap(page,4096,1,1);
-    runtime_memory_trap(page,4096,2,1);
-    assert(runtime_memory_trap_reasons(page)==3 && runtime_memory_trap_reasons(page+4096)==0);
-    assert(write_faults(p) && !write_faults(p+4096));
-    runtime_memory_trap(page,4096,1,0); /* one owner lifts its trap: the other's holds */
-    assert(runtime_memory_trap_reasons(page)==2 && write_faults(p));
-    assert(protect(x,length,3)==0 && write_faults(p)); /* the game's mprotect keeps it */
-    runtime_memory_trap(page,4096,2,0);
-    assert(runtime_memory_trap_reasons(page)==0 && !write_faults(p) && p[0]==0x5a);
-    runtime_memory_trap(page,4096,2,1);
-    runtime_memory_trap(page,4096,16,1); /* from 16 up reads fault too */
-    assert(read_faults(p) && write_faults(p) && !read_faults(p+4096));
-    assert(protect(x,length,3)==0 && read_faults(p));
-    runtime_memory_trap(page,4096,16,0); /* back to the write trap left */
-    assert(!read_faults(p) && write_faults(p));
-    runtime_memory_trap(page,4096,2,0);
-    assert(!write_faults(p));
-    runtime_memory_trap(page,length,2,1);
-    assert(unmap(x,length)==0 && runtime_memory_trap_reasons(page)==0); /* gone with the mapping */
-    x=NULL;
-    assert(map(&x,length,3,0,a,0)==0 && !write_faults(x));
-    assert(unmap(x,length)==0 && release(a,length)==0);
-    puts("PASS: write and read traps by reason, kept across mprotect, forgotten on unmap");
-}
 static void memory_primitives(void) {
     typedef void *(ABI *Set)(void *,int,size_t);
     typedef void *(ABI *Copy)(void *,const void *,size_t);
     typedef int (ABI *Compare)(const void *,const void *,size_t);
     char a[16],b[16];
-    assert(GET(Set,"8zTFvBIAIN8#libc")(a,0x5a,sizeof(a))==a);
-    assert(GET(Copy,"Q3VBxCXhUHs#libc")(b,a,sizeof(a))==b);
-    assert(GET(Compare,"DfivPArhucg#libc")(a,b,sizeof(a))==0);
+    assert(GET(Set,"8zTFvBIAIN8")(a,0x5a,sizeof(a))==a);
+    assert(GET(Copy,"Q3VBxCXhUHs")(b,a,sizeof(a))==b);
+    assert(GET(Compare,"DfivPArhucg")(a,b,sizeof(a))==0);
     memcpy(a,"abcdef",7);
-    GET(Copy,"+P6FRGH4LfA#libc")(a+1,a,6);
+    GET(Copy,"+P6FRGH4LfA")(a+1,a,6);
     assert(memcmp(a,"aabcdef",7)==0);
     typedef size_t (ABI *Length)(const char *);
-    Length length=GET(Length,"j4ViWNHEgww#libc");
+    Length length=GET(Length,"j4ViWNHEgww");
     assert(length("")==0 && length("abc\0def")==3 && length("\xff\x80")==2);
 }
 
@@ -289,14 +222,14 @@ static HandleOp rw_read, rw_write, rw_tryread, rw_trywrite, rw_unlock, rw_destro
 typedef struct { int64_t seconds, nanoseconds; } TestTime;
 typedef int32_t (ABI *TimedLock)(void **, const TestTime *);
 static void rw_setup(void) {
-    rw_read=GET(HandleOp,"Ox9i0c7L5w0#libkernel"); rw_write=GET(HandleOp,"mqdNorrB+gI#libkernel");
-    rw_tryread=GET(HandleOp,"XD3mDeybCnk#libkernel"); rw_trywrite=GET(HandleOp,"bIHoZCTomsI#libkernel");
-    rw_unlock=GET(HandleOp,"+L98PIbGttk#libkernel"); rw_destroy=GET(HandleOp,"BB+kb08Tl9A#libkernel");
+    rw_read=GET(HandleOp,"Ox9i0c7L5w0"); rw_write=GET(HandleOp,"mqdNorrB+gI");
+    rw_tryread=GET(HandleOp,"XD3mDeybCnk"); rw_trywrite=GET(HandleOp,"bIHoZCTomsI");
+    rw_unlock=GET(HandleOp,"+L98PIbGttk"); rw_destroy=GET(HandleOp,"BB+kb08Tl9A");
     assert(rw_read && rw_write && rw_tryread && rw_trywrite && rw_unlock && rw_destroy);
 }
 static void rw_lifecycle(void) {
     rw_setup();
-    MutexInit init=GET(MutexInit,"6ULAa0fq4jA#libkernel");
+    MutexInit init=GET(MutexInit,"6ULAa0fq4jA");
     void *lock;
     assert((uint32_t)init(NULL,NULL,NULL)==0x80020016);
     assert(init(&lock,NULL,"rw-test")==0);
@@ -378,7 +311,7 @@ static void rw_concurrency(void) {
 }
 static void rw_timeouts(void) {
     rw_setup();
-    TimedLock read_timed=GET(TimedLock,"iPtZRWICjrM#libkernel"), write_timed=GET(TimedLock,"adh--6nIqTk#libkernel");
+    TimedLock read_timed=GET(TimedLock,"iPtZRWICjrM"), write_timed=GET(TimedLock,"adh--6nIqTk");
     RwFixture f={0}; fixture_init(&f);
     pthread_t writer; assert(pthread_create(&writer,NULL,holding_writer,&f)==0);
     barrier(&f.ready);
@@ -392,52 +325,32 @@ static void rw_timeouts(void) {
     assert(rw_unlock(&f.lock)==0);
     fixture_destroy(&f);
 }
-/* Imports are spelled NID#library (link_modules.py), the same for every game; libScePosix shares
- * libkernel's contracts. The eboot's own letters (#p#J in Bloodborne) must no longer match. */
-static void import_scope(void) {
-    uintptr_t tls=runtime_resolve("vNe1w4diLCs#libkernel",0);
-    assert(tls && runtime_resolve("vNe1w4diLCs#libScePosix",0)==tls);
-    assert(runtime_resolve("vNe1w4diLCs#p#J",0)==0);
-    uintptr_t sleep=runtime_resolve("1jfXLRVzisc#libkernel",0); /* by-name table (sceKernelUsleep) */
-    assert(sleep && runtime_resolve("1jfXLRVzisc#libScePosix",0)==sleep);
-    assert(runtime_resolve("1jfXLRVzisc#libc",0)==0);
-    assert(!strcmp(runtime_import_name("1jfXLRVzisc#libScePosix"),"sceKernelUsleep"));
-    /* By-name tables also serve NIDs the original game never imported (absent from
-     * import_names.inc): the NID is computed from the table's name (sceKernelGetTscFrequency). */
-    char nid[12];
-    runtime_nid("sceKernelGetTscFrequency",nid);
-    assert(!strcmp(nid,"1j3S3n-tTW4"));
-    runtime_nid("sceKernelUsleep",nid);
-    assert(!strcmp(nid,"1jfXLRVzisc"));
-    assert(runtime_resolve("1j3S3n-tTW4#libkernel",0));
-    assert(runtime_resolve("1j3S3n-tTW4",0)==0); /* a name without its library never resolves */
-}
 int main(int argc,char **argv) {
-    runtime_start(0); assert(runtime_resolve("bzQExy189ZI#libc",0)==0);
+    runtime_start(0); assert(runtime_resolve("bzQExy189ZI",0)==0);
     runtime_start(1);
-    assert(runtime_resolve("bzQExy189ZI#wrong#module",0)==0);
+    assert(runtime_resolve("bzQExy189ZI",0)==0);
     assert(runtime_resolve("unknown",0)==0);
-    assert(runtime_resolve("8zTFvBIAIN8#libc",1)==0);
-    assert(runtime_resolve("f7uOxY9mM1U#libkernel",0)==0);
-    uint64_t *canary=(uint64_t *)runtime_resolve("f7uOxY9mM1U#libkernel",1);
+    assert(runtime_resolve("8zTFvBIAIN8",1)==0);
+    assert(runtime_resolve("f7uOxY9mM1U",0)==0);
+    uint64_t *canary=(uint64_t *)runtime_resolve("f7uOxY9mM1U",1);
     assert(canary && *canary && !(*canary & 255));
     if (argc>1 && !strcmp(argv[1],"--guard-recursion")) {
-        uint64_t guard=0; Acquire acquire=GET(Acquire,"3GPpjQdAMTw#libc");
+        uint64_t guard=0; Acquire acquire=GET(Acquire,"3GPpjQdAMTw");
         acquire(&guard); acquire(&guard); return 99;
     }
     if (argc>1 && !strcmp(argv[1],"--bad-tls")) {
         static const char data[4]={0};
         runtime_set_libc_tls(data,4,8);
         const uint64_t index[]={2,8};
-        GET(TlsAddress,"vNe1w4diLCs#libkernel")(index); return 99;
+        GET(TlsAddress,"vNe1w4diLCs")(index); return 99;
     }
     if (argc>1 && !strcmp(argv[1],"--stack-failure")) {
-        GET(GuestCallback,"Ou3iL1abvng#libkernel")(); return 99;
+        GET(GuestCallback,"Ou3iL1abvng")(); return 99;
     }
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
-    import_scope(); libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); write_traps(); memory_primitives();
+    libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
     rw_lifecycle(); rw_concurrency(); rw_timeouts();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;

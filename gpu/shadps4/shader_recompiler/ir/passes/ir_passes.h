@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_set>
+#include <vector>
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
@@ -18,13 +20,16 @@ void SsaRewritePass(IR::Program& program);
 void SsaRepairPass(IR::Program& program);
 void PhiSimplificationPass(IR::Program& program);
 void InverseBallotEliminationPass(IR::Program& program);
+/// Blocks outside divergent control flow; uniform_insts are treated as workgroup-uniform.
+std::vector<IR::Block*> FindWave64UniformBlocks(
+    const IR::Program& program, const std::unordered_set<const IR::Inst*>* uniform_insts = nullptr);
+bool Wave64UniformBranchesEnabled();
+void SetWave64UniformBranchesDefault(bool enabled);
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile);
 void LowerHardwareIntrinsics(IR::Program& program);
 void LowerPhisToRegsPass(IR::Program& program);
 void DeadCodeEliminationPass(IR::Program& program);
-/// bbport: exact integers from interpolated float varyings on GPUs without manual interpolation.
-void InterpolatedIntegerPass(IR::Program& program);
 void ConstantPropagationPass(IR::BlockList& program);
 void FlattenExtendedUserdataPass(IR::Program& program);
 void ReadLaneEliminationPass(IR::Program& program);

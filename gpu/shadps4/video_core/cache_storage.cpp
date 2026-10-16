@@ -110,7 +110,11 @@ void DataBase::Open() {
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
         }
     } else {
-        cache_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
+        // sotc: shaders compiled with and without direct memory access differ, and the cache keys
+        // do not tell them apart: the launcher's DMA switch gets its own cache folder.
+        cache_path = GetUserPath(PathType::CacheDir) /
+                     (std::string{game_info.GameSerial()} +
+                      (EmulatorSettings.IsDirectMemoryAccessEnabled() ? "" : "_nodma"));
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
@@ -151,24 +155,20 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                     LOG_ERROR(Render, "Failed to add {} to the archive", path.string().c_str());
                 }
             } else {
-                // bbport: written under a temporary name and renamed into place, so a crash or a
-                // power loss mid-write leaves the old file or none, never a cut-short one that
-                // the next start reads as a damaged entry (issue #28).
                 using namespace Common::FS;
-                auto temp = path;
-                temp += ".tmp";
-                bool written = false;
+                // sotc: written whole or not at all. The game process is often ended (launcher
+                // Stop, a crash) while blobs are being written, and a truncated blob from the
+                // last session is read back at the next start.
+                auto temporary = path;
+                temporary += ".tmp";
                 {
-                    const auto file = IOFile{temp, FileAccessMode::Create};
-                    written = file.IsOpen() && file.Write(v) == v.size();
+                    const auto file = IOFile{temporary, FileAccessMode::Create};
+                    file.Write(v);
                 }
-                std::error_code ec;
-                if (written) {
-                    std::filesystem::rename(temp, path, ec);
-                }
-                if (!written || ec) {
-                    LOG_ERROR(Render, "Failed to write {}", path.string());
-                    std::filesystem::remove(temp, ec);
+                std::error_code error;
+                std::filesystem::rename(temporary, path, error);
+                if (error) {
+                    std::filesystem::remove(temporary, error);
                 }
             }
         }};
@@ -273,20 +273,6 @@ void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u
             }
         }
     }
-}
-
-void DataBase::Clear() {
-    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
-        return;
-    }
-    std::error_code ec;
-    u64 removed = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(cache_path, ec)) {
-        if (entry.is_regular_file(ec) && std::filesystem::remove(entry.path(), ec)) {
-            ++removed;
-        }
-    }
-    LOG_WARNING(Render, "Pipeline cache cleared ({} files): it is rebuilt for this build", removed);
 }
 
 void DataBase::FinishPreload() {

@@ -106,6 +106,10 @@ void IREmitter::Barrier() {
     Inst(Opcode::Barrier);
 }
 
+void IREmitter::SubgroupBarrier() {
+    Inst(Opcode::SubgroupBarrier);
+}
+
 void IREmitter::WorkgroupMemoryBarrier() {
     Inst(Opcode::WorkgroupMemoryBarrier);
 }
@@ -2108,6 +2112,10 @@ Value IREmitter::ImageAtomicCmpSwap(const Value& handle, const Value& coords, co
     return Inst(Opcode::ImageAtomicCmpSwap32, Flags{info}, handle, coords, value, cmp_value);
 }
 
+Value IREmitter::ImageArrayHandle(const U32& handle, const U32& element) {
+    return Inst(Opcode::ImageArrayHandle, handle, element);
+}
+
 Value IREmitter::ImageHandle(const Value& tsharp_low, const Value& tsharp_high) {
     return Inst(Opcode::ImageHandle, tsharp_low, tsharp_high);
 }
@@ -2178,8 +2186,20 @@ void IREmitter::ImageWrite(const Value& handle, const Value& coords, const U32& 
     Inst(Opcode::ImageWrite, Flags{info}, handle, coords, lod, multisampling, color);
 }
 
-[[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& cube_coords) {
-    return Inst<F32>(Opcode::CubeFaceIndex, cube_coords);
+[[nodiscard]] F32 IREmitter::CubeFaceIndex(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceIndex, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceCoordS(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceCoordS, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceCoordT(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceCoordT, x, y, z);
+}
+
+[[nodiscard]] F32 IREmitter::CubeFaceMajorAxis(const Value& x, const Value& y, const Value& z) {
+    return Inst<F32>(Opcode::CubeFaceMajorAxis, x, y, z);
 }
 
 // Debug print maps to SPIRV's NonSemantic DebugPrintf instruction

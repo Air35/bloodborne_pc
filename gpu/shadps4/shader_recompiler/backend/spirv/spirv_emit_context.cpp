@@ -72,7 +72,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                          Bindings& binding_)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
       profile{profile_}, hw_stage{info.hw_stage}, sw_stage{info.sw_stage}, binding{binding_} {
-    if (info.uses_dma || info.uses_paged_buffers || VertexMotion()) {
+    if (info.uses_dma) {
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     } else {
         SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -312,7 +312,9 @@ void EmitContext::DefineInputs() {
     if (info.uses_lane_id) {
         subgroup_local_invocation_id = DefineVariable(
             U32[1], spv::BuiltIn::SubgroupLocalInvocationId, spv::StorageClass::Input);
-        Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        if (sw_stage != SwStage::Vertex) {
+            Decorate(subgroup_local_invocation_id, spv::Decoration::Flat);
+        }
     }
     if (info.loads.GetAny(IR::Attribute::SubgroupLtMask)) {
         subgroup_lt_mask =
@@ -332,26 +334,27 @@ void EmitContext::DefineInputs() {
                 DefineVariable(U32[1], spv::BuiltIn::BaseInstance, spv::StorageClass::Input);
         }
 
-        const auto fetch_shader = Gcn::ParseFetchShader(info);
-        if (!fetch_shader) {
+        Shader::Gcn::FetchShaderData fetch_shader;
+        if (!Gcn::ParseFetchShader(info, fetch_shader)) {
             break;
         }
-        for (const auto& attrib : fetch_shader->attributes) {
-            ASSERT(attrib.semantic < IR::NumParams);
+        ASSERT(fetch_shader.attributes.size() <= IR::NumParams);
+        for (u32 semantic = 0; semantic < fetch_shader.attributes.size(); ++semantic) {
+            const auto& attrib = fetch_shader.attributes[semantic];
             const auto sharp = attrib.GetSharp(info);
             const Id type{GetAttributeType(*this, sharp.GetNumberFmt())[4]};
-            Id id{DefineInput(type, attrib.semantic)};
+            Id id{DefineInput(type, semantic)};
             if (attrib.GetStepRate() != Gcn::VertexAttribute::InstanceIdType::None) {
-                Name(id, fmt::format("vs_instance_attr{}", attrib.semantic));
+                Name(id, fmt::format("vs_instance_attr{}", semantic));
             } else {
-                Name(id, fmt::format("vs_in_attr{}", attrib.semantic));
+                Name(id, fmt::format("vs_in_attr{}", semantic));
             }
-            input_params[attrib.semantic] = GetAttributeInfo(sharp.GetNumberFmt(), id, 4, false);
+            input_params[semantic] = GetAttributeInfo(sharp.GetNumberFmt(), id, 4, false);
         }
         break;
     }
     case SwStage::Fragment: {
-        if (FragmentMotion() || info.loads.GetAny(IR::Attribute::FragCoord) ||
+        if (info.loads.GetAny(IR::Attribute::FragCoord) ||
             (info.loads.GetAny(IR::Attribute::BaryCoordPullModel) &&
              !profile.supports_amd_shader_explicit_vertex_parameter)) {
             frag_coord = DefineVariable(F32[4], spv::BuiltIn::FragCoord, spv::StorageClass::Input);
@@ -407,9 +410,11 @@ void EmitContext::DefineInputs() {
             if (profile.supports_amd_shader_explicit_vertex_parameter) {
                 bary_coord_smooth_sample = DefineVariable(
                     F32[2], spv::BuiltIn::BaryCoordSmoothSampleAMD, spv::StorageClass::Input);
-            } else if (profile.supports_fragment_shader_barycentric && !ValidId(bary_coord)) {
-                bary_coord =
-                    DefineVariable(F32[3], spv::BuiltIn::BaryCoordKHR, spv::StorageClass::Input);
+            } else if (profile.supports_fragment_shader_barycentric) {
+                if (!ValidId(bary_coord)) {
+                    bary_coord = DefineVariable(F32[3], spv::BuiltIn::BaryCoordKHR,
+                                                spv::StorageClass::Input);
+                }
                 // we would need sample_index to interpolate the bary_coord later
                 if (!ValidId(sample_index)) {
                     sample_index =
@@ -644,12 +649,6 @@ void EmitContext::DefineOutputs() {
                 ++num_attrs;
             }
 
-            if (VertexMotion()) {
-                motion_out_cur = DefineOutput(F32[4], MotionVectors::CurrentLocation);
-                motion_out_prev = DefineOutput(F32[4], MotionVectors::PreviousLocation);
-                Name(motion_out_cur, "motion_cur");
-                Name(motion_out_prev, "motion_prev");
-            }
             if (needs_clip_distance_emulation) {
                 clip_distances = Id{DefineOutput(F32[MaxEmulatedClipDistances], 0)};
                 output_params[num_attrs] = GetAttributeInfo(
@@ -743,12 +742,6 @@ void EmitContext::DefineOutputs() {
             frag_outputs[i] = GetAttributeInfo(num_format, id, num_components, true);
             ++num_render_targets;
         }
-        if (FragmentMotion() && !Sirit::ValidId(frag_outputs[MotionVectors::Output].id)) {
-            motion_frag_out = DefineOutput(F32[4], MotionVectors::Output);
-            motion_in_cur = DefineInput(F32[4], MotionVectors::CurrentLocation);
-            motion_in_prev = DefineInput(F32[4], MotionVectors::PreviousLocation);
-            Name(motion_frag_out, "motion_vector");
-        }
         // Dual source blending allows at most 2 render targets, one for each source.
         // Fewer targets are allowed but the missing blending source values will be
         // undefined.
@@ -774,18 +767,13 @@ void EmitContext::DefineOutputs() {
 
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
-    const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2], U32[1], U32[1]),
-                              "AuxData")};
+    const Id struct_type{
+        Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[2]), "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
     MemberName(struct_type, PushData::YOffsetIndex, "yoffset");
     MemberName(struct_type, PushData::XScaleIndex, "xscale");
     MemberName(struct_type, PushData::YScaleIndex, "yscale");
-    MemberName(struct_type, PushData::UdRegsIndex + 0, "ud_regs0");
-    MemberName(struct_type, PushData::UdRegsIndex + 1, "ud_regs1");
-    MemberName(struct_type, PushData::UdRegsIndex + 2, "ud_regs2");
-    MemberName(struct_type, PushData::UdRegsIndex + 3, "ud_regs3");
     MemberName(struct_type, PushData::BufOffsetIndex + 0, "buf_offsets0");
     MemberName(struct_type, PushData::BufOffsetIndex + 1, "buf_offsets1");
     MemberName(struct_type, PushData::BufOffsetIndex + 2, "buf_offsets2");
@@ -793,17 +781,9 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::YOffsetIndex, spv::Decoration::Offset, 4U);
     MemberDecorate(struct_type, PushData::XScaleIndex, spv::Decoration::Offset, 8U);
     MemberDecorate(struct_type, PushData::YScaleIndex, spv::Decoration::Offset, 12U);
-    MemberDecorate(struct_type, PushData::UdRegsIndex + 0, spv::Decoration::Offset, 16U);
-    MemberDecorate(struct_type, PushData::UdRegsIndex + 1, spv::Decoration::Offset, 32U);
-    MemberDecorate(struct_type, PushData::UdRegsIndex + 2, spv::Decoration::Offset, 48U);
-    MemberDecorate(struct_type, PushData::UdRegsIndex + 3, spv::Decoration::Offset, 64U);
-    MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 80U);
-    MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 96U);
-    MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 112U);
-    MemberName(struct_type, PushData::MotionParamIndex, "motion_param");
-    MemberDecorate(struct_type, PushData::MotionParamIndex, spv::Decoration::Offset, 120U);
-    MemberName(struct_type, PushData::SceneSizeIndex, "scene_size");
-    MemberDecorate(struct_type, PushData::SceneSizeIndex, spv::Decoration::Offset, 124U);
+    MemberDecorate(struct_type, PushData::BufOffsetIndex + 0, spv::Decoration::Offset, 16U);
+    MemberDecorate(struct_type, PushData::BufOffsetIndex + 1, spv::Decoration::Offset, 32U);
+    MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 48U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
@@ -883,15 +863,6 @@ void EmitContext::DefineBuffers() {
 
         // Define aliases depending on the shader usage.
         auto& spv_buffer = buffers.emplace_back(binding.buffer++, desc.buffer_type);
-        // bbport BB_LAYER_MEMORY: its descriptor holds the page table record (read as U32).
-        spv_buffer.paged = desc.buffer_type == BufferType::Guest &&
-                           IsPagedBuffer(profile.paged_buffers, buf_sharp);
-        if (spv_buffer.paged) {
-            spv_buffer.Alias(PointerType::U32) =
-                DefineBuffer(false, false, 2, desc.buffer_type, U32[1]);
-            ++binding.unified;
-            continue;
-        }
         if (True(desc.used_types & IR::Type::U64)) {
             spv_buffer.Alias(PointerType::U64) =
                 DefineBuffer(desc.is_written, is_coherent, 3, desc.buffer_type, U64);
@@ -1000,12 +971,11 @@ Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const u32 sampled = desc.is_written ? 2 : 1;
     switch (type) {
     case AmdGpu::ImageType::Color1D:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, false, false, sampled, format);
-    case AmdGpu::ImageType::Color1DArray:
-        return ctx.TypeImage(sampled_type, spv::Dim::Dim1D, false, true, false, sampled, format);
     case AmdGpu::ImageType::Color2D:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, false, sampled, format);
+    case AmdGpu::ImageType::Color1DArray:
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Cube:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, true, false, sampled, format);
     case AmdGpu::ImageType::Color2DMsaa:
         return ctx.TypeImage(sampled_type, spv::Dim::Dim2D, false, false, true, sampled, format);
@@ -1030,7 +1000,8 @@ void EmitContext::DefineImagesAndSamplers() {
 
         const u32 num_bindings = image_desc.NumBindings(info);
         Id pointee_type = image_type;
-        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex) {
+        if (mip_fallback_mode == MipStorageFallbackMode::DynamicIndex ||
+            image_desc.array_size != 0) {
             pointee_type = TypeArray(pointee_type, ConstU32(num_bindings));
         }
 
@@ -1049,6 +1020,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .is_integer = is_integer,
             .is_storage = is_storage,
             .mip_fallback_mode = mip_fallback_mode,
+            .array_size = image_desc.array_size,
         });
         interfaces.push_back(id);
     }
@@ -1325,55 +1297,6 @@ void EmitContext::DefineFunctions() {
         LOG_DEBUG(Render_Recompiler, "Shader {:#x} uses dynamic ReadConst", info.pgm_hash);
         read_const_dynamic = DefineReadConst(true);
     }
-}
-
-
-Id EmitContext::PhysicalPointer(Id pointee) {
-    auto [it, added] = physical_pointer_types.try_emplace(pointee.value);
-    if (added) {
-        it->second = TypePointer(spv::StorageClass::PhysicalStorageBuffer, pointee);
-    }
-    return it->second;
-}
-
-EmitContext::PagedAccess EmitContext::PagedPointer(const BufferDefinition& buffer, Id byte_offset,
-                                                   u32 access_bytes, Id pointee, bool guest_write) {
-    // The record: {guest address lo, hi, size, write-through, trash address lo, hi,
-    //              guest page-table start (entries), reserved}.
-    const auto [record, record_pointer] = buffer.Alias(PointerType::U32);
-    const auto word = [&](u32 i) {
-        return OpLoad(U32[1], OpAccessChain(record_pointer, record, u32_zero_value, ConstU32(i)));
-    };
-    const auto wide = [&](Id lo, Id hi) {
-        return OpBitwiseOr(U64, OpUConvert(U64, lo),
-                           OpShiftLeftLogical(U64, OpUConvert(U64, hi), ConstU32(32U)));
-    };
-    const Id base = wide(word(0), word(1));
-    const Id size = word(2);
-    const Id trash = wide(word(4), word(5));
-    // Within the buffer: offset < size and offset + access <= size (PS4 range checking: reads
-    // outside give zero, writes outside are dropped).
-    // Subtraction avoids accepting a wrapped offset + access_bytes at the 4 GiB boundary.
-    Id in_range = OpLogicalAnd(
-        U1[1], OpULessThanEqual(U1[1], ConstU32(access_bytes), size),
-        OpULessThanEqual(U1[1], byte_offset, OpISub(U32[1], size, ConstU32(access_bytes))));
-    if (guest_write) {
-        in_range = OpLogicalAnd(U1[1], in_range, OpINotEqual(U1[1], word(3), u32_zero_value));
-    }
-    const Id address = OpIAdd(U64, base, OpUConvert(U64, byte_offset));
-    const u32 shift = profile.sparse_page_shift;
-    const Id page =
-        OpUConvert(U32[1], OpShiftRightLogical(U64, address, Constant(U64, u64{shift})));
-    const auto [table, table_pointer] = buffers[bda_pagetable_index].Alias(PointerType::U64);
-    const Id table_index = guest_write ? OpIAdd(U32[1], page, word(6)) : page;
-    // Reject the access before indexing too: a wrapped/out-of-range offset can address a page
-    // beyond the table, even though the final pointer would select trash.
-    const Id safe_index = OpSelect(U32[1], in_range, table_index, u32_zero_value);
-    const Id entry = OpLoad(U64, OpAccessChain(table_pointer, table, u32_zero_value, safe_index));
-    const Id guard = OpLogicalAnd(U1[1], in_range, OpINotEqual(U1[1], entry, u64_zero_value));
-    const Id in_page = OpBitwiseAnd(U64, address, Constant(U64, (u64{1} << shift) - 1));
-    const Id target = OpSelect(U64, guard, OpIAdd(U64, entry, in_page), trash);
-    return {OpConvertUToPtr(PhysicalPointer(pointee), target), guard};
 }
 
 } // namespace Shader::Backend::SPIRV

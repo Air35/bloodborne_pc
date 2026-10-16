@@ -1,4 +1,5 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -7,63 +8,42 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
+#include "video_core/renderdoc.h"
 
 namespace Frontend {
 
+// sotc: the mouse as a PC camera. A click in the window captures it (relative mode, hidden
+// cursor); Esc or losing focus releases it. runtime_pad.c takes the motion as the right stick
+// and the buttons through its bindings (mouse.<input>=). SOTC_MOUSE=0 leaves the mouse alone.
 namespace {
-
-// Issue #69: the monitor the window (and fullscreen) goes to. BB_DISPLAY: its number in SDL's
-// order (1, 2, ...; bb-gpu-capabilities --displays lists them) or a part of its name; without it
-// SDL's primary display. The monitors are logged so a report says which one was taken.
-SDL_DisplayID ChooseDisplay() {
-    const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
-    const char* wanted = std::getenv("BB_DISPLAY");
-    int count = 0;
-    SDL_DisplayID* ids = SDL_GetDisplays(&count);
-    SDL_DisplayID chosen = 0;
-    if (wanted && *wanted) {
-        char* end = nullptr;
-        const long number = std::strtol(wanted, &end, 10);
-        if (end && *end == '\0') {
-            if (number >= 1 && number <= count) {
-                chosen = ids[number - 1];
-            }
-        } else {
-            for (int i = 0; i < count && !chosen; ++i) {
-                const char* name = SDL_GetDisplayName(ids[i]);
-                if (name && strcasestr(name, wanted)) {
-                    chosen = ids[i];
-                }
-            }
-        }
-    }
-    const SDL_DisplayID display = chosen ? chosen : primary;
-    for (int i = 0; i < count; ++i) {
-        const char* name = SDL_GetDisplayName(ids[i]);
-        const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(ids[i]);
-        std::printf("Display %d: %s %dx%d%s%s\n", i + 1, name ? name : "?", mode ? mode->w : 0,
-                    mode ? mode->h : 0, ids[i] == primary ? " (primary)" : "",
-                    ids[i] == display ? " <- the game's (BB_DISPLAY)" : "");
-    }
-    if (wanted && *wanted && !chosen) {
-        std::printf("Display: BB_DISPLAY=%s matches none, the primary one is used\n", wanted);
-    }
-    SDL_free(ids);
-    return display;
+std::atomic<float> g_mouse_dx{0}, g_mouse_dy{0};
+std::atomic<u32> g_mouse_buttons{0};
+std::atomic<bool> g_mouse_captured{false};
+bool MouseEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("SOTC_MOUSE");
+        return !v || v[0] != '0';
+    }();
+    return enabled;
 }
-
+void AddMotion(std::atomic<float>& total, float delta) {
+    float old = total.load(std::memory_order_relaxed);
+    while (!total.compare_exchange_weak(old, old + delta, std::memory_order_relaxed)) {
+    }
+}
 } // namespace
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
+    // sotc: the click that brings the window to the front also reaches the game (mouse capture).
+    SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
     SDL_PropertiesID props = SDL_CreateProperties();
     SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, title);
-    const SDL_DisplayID display = ChooseDisplay();
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED_DISPLAY(display));
-    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width_);
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
@@ -77,6 +57,12 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
+#ifdef _WIN32
+    if (driver && !std::strcmp(driver, "windows")) {
+        window_info.type = WindowSystemType::Windows;
+        window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+    } else
+#endif
     // sotc: the mapping lives in video_driver.h (tested); offscreen/dummy give a Headless window
     // with no native handles (the surface is a VK_EXT_headless_surface).
     if (!ClassifyVideoDriver(driver, window_info.type)) {
@@ -114,44 +100,11 @@ int WindowSDL::PollTextInput(std::string& out) {
     return text_state;
 }
 
-void WindowSDL::TakeMouse(double& dx, double& dy, int& up, int& down) {
-    std::scoped_lock lock{mouse_mutex};
-    dx = mouse_dx;
-    dy = mouse_dy;
-    up = wheel_up;
-    down = wheel_down;
-    mouse_dx = mouse_dy = 0;
-    wheel_up = wheel_down = 0;
-}
-
-// Mouse look: relative mode while the window holds the mouse (runtime_pad.c turns its motion into
-// the right stick). Motion from before is dropped, so taking the mouse does not turn the camera.
-void WindowSDL::CaptureMouse(bool capture) {
-    if (capture == mouse_captured.load(std::memory_order_relaxed)) {
-        return;
-    }
-    if (!SDL_SetWindowRelativeMouseMode(window, capture) && capture) {
-        std::printf("Mouse look: relative mouse mode failed: %s\n", SDL_GetError());
-        return;
-    }
-    {
-        std::scoped_lock lock{mouse_mutex};
-        mouse_dx = mouse_dy = 0;
-        wheel_up = wheel_down = 0;
-    }
-    mouse_captured.store(capture, std::memory_order_relaxed);
-    static bool told;
-    if (capture && !told) {
-        told = true;
-        std::printf("Mouse look: on (F1 releases the mouse, a click takes it again)\n");
-    }
-}
-
 void WindowSDL::UpdateTextTitle() {
     const std::string title = text_active ? base_title + " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)"
                                           : base_title;
     SDL_SetWindowTitle(window, title.c_str());
-    BbOverlay::SetTextPrompt(text_active, text_prompt, text);
+    BbOverlay::SetTextEntry(text_active, text_prompt, text);
 }
 
 bool WindowSDL::PollEvents() {
@@ -169,14 +122,6 @@ bool WindowSDL::PollEvents() {
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_EVENT_MOUSE_MOTION) {
-            last_mouse_motion_ms = SDL_GetTicks();
-            if (mouse_captured.load(std::memory_order_relaxed)) {
-                std::scoped_lock lock{mouse_mutex};
-                mouse_dx += event.motion.xrel;
-                mouse_dy += event.motion.yrel;
-            }
-        }
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
             std::scoped_lock lock{text_mutex};
             if (event.type == SDL_EVENT_TEXT_INPUT) {
@@ -193,29 +138,59 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
+        // The controller finishes the text dialog too: Cross (A) accepts, Circle (B) cancels.
+        if (text_active && event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+            (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ||
+             event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)) {
+            std::scoped_lock lock{text_mutex};
+            text_state = event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : 2;
+            text_active = false;
+            SDL_StopTextInput(window);
+            UpdateTextTitle();
+            continue;
+        }
         if (BbOverlay::HandleEvent(event)) {
             continue;
         }
-        // Mouse look: a click in the game takes the mouse (that click is not passed on as a
-        // button: runtime_pad.c reads the buttons only while it is held); F1 and leaving the
-        // window let it go.
-        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && !mouse_captured.load(std::memory_order_relaxed) &&
-            mouse_look.load(std::memory_order_relaxed) && !BbOverlay::MenuOpen()) {
-            CaptureMouse(true);
-            continue;
+        if (std::getenv("SOTC_MOUSE_DEBUG") &&
+            (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_MOTION ||
+             event.type == SDL_EVENT_WINDOW_FOCUS_GAINED || event.type == SDL_EVENT_WINDOW_FOCUS_LOST)) {
+            static int shown = 0;
+            if (shown++ < 20) {
+                std::fprintf(stderr, "SOTC mouse debug: event 0x%x\n", event.type);
+            }
         }
-        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.key == SDLK_F1 &&
-            mouse_captured.load(std::memory_order_relaxed)) {
-            CaptureMouse(false);
-            continue;
+        if (MouseEnabled()) {
+            const auto capture = [this](bool on) {
+                SDL_SetWindowRelativeMouseMode(window, on);
+                g_mouse_captured = on;
+                g_mouse_buttons = 0;
+                g_mouse_dx = 0;
+                g_mouse_dy = 0;
+                std::fprintf(stderr, "Runtime: mouse %s\n",
+                             on ? "captured for the camera (Esc releases it)" : "released");
+            };
+            if (!g_mouse_captured && (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+                                      event.type == SDL_EVENT_WINDOW_FOCUS_GAINED)) {
+                capture(true); // a click (or coming back to the game) captures the mouse
+                continue;
+            }
+            if (g_mouse_captured) {
+                if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                    AddMotion(g_mouse_dx, event.motion.xrel);
+                    AddMotion(g_mouse_dy, event.motion.yrel);
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
+                    g_mouse_buttons |= 1u << event.button.button;
+                } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                    g_mouse_buttons &= ~(1u << event.button.button);
+                } else if ((event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) ||
+                           event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+                    capture(false);
+                }
+            }
         }
-        if (event.type == SDL_EVENT_MOUSE_WHEEL && mouse_captured.load(std::memory_order_relaxed)) {
-            const float notches = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
-            std::scoped_lock lock{mouse_mutex};
-            (notches > 0 ? wheel_up : wheel_down) += notches != 0 ? 1 : 0;
-        }
-        if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
-            CaptureMouse(false);
+        if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F12 && !event.key.repeat) {
+            VideoCore::TriggerCapture(); // only does something when running under RenderDoc
         }
         switch (event.type) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -234,25 +209,16 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
-    // The menu, the name dialog and mouse_look=0 want the cursor.
-    if (mouse_captured.load(std::memory_order_relaxed) &&
-        (BbOverlay::MenuOpen() || text_active || !mouse_look.load(std::memory_order_relaxed))) {
-        CaptureMouse(false);
-    }
-    UpdateCursor();
     return is_open;
 }
 
-// Issue #3: the OS cursor over the game. Hidden in fullscreen, and in a window after 3 s without
-// moving the mouse; always shown while the settings menu is open.
-void WindowSDL::UpdateCursor() {
-    const bool fullscreen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
-    const bool hide = !BbOverlay::MenuOpen() &&
-                      (fullscreen || SDL_GetTicks() - last_mouse_motion_ms > 3000);
-    if (hide != cursor_hidden) {
-        cursor_hidden = hide;
-        hide ? SDL_HideCursor() : SDL_ShowCursor();
-    }
-}
-
 } // namespace Frontend
+
+// sotc: motion since the last call, the held buttons (bit = SDL button number); 0 while the
+// mouse is not captured.
+extern "C" int bbgpu_mouse_take(float* dx, float* dy, unsigned* buttons) {
+    *dx = Frontend::g_mouse_dx.exchange(0, std::memory_order_relaxed);
+    *dy = Frontend::g_mouse_dy.exchange(0, std::memory_order_relaxed);
+    *buttons = Frontend::g_mouse_buttons.load(std::memory_order_relaxed);
+    return Frontend::g_mouse_captured.load(std::memory_order_relaxed) ? 1 : 0;
+}

@@ -22,23 +22,29 @@ int bbgpu_init(const BbGpuConfig *config);
 uintptr_t bbgpu_resolve(const char *scoped_nid);
 /* Called first by the loader's SIGSEGV handler: 1 when a GPU page-tracking fault was handled. */
 int bbgpu_handle_fault(void *ucontext, void *address);
+/* sotc: the GPU command thread or the draw recording thread (faults handled inline). */
+int bbgpu_is_gpu_side_thread(void);
+/* sotc: guest fiber stacks; the page tracker keeps them accessible while registered. */
+void bbgpu_register_guest_stack(uintptr_t address, uint64_t size);
+void bbgpu_register_guest_stack_end(uintptr_t address, uint64_t size);
+/* sotc: readbacks mode (0 disabled, 1 relaxed, 2 precise). */
+int bbgpu_readbacks_mode(void);
 /* BB_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void bbgpu_dump_guest_writes(void *ucontext);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
  * no window exists; poll returns 0 typing, 1 confirmed, 2 cancelled (UTF-8 text). */
 int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
+/* sotc: save/load slot list; poll: -1 open, -2 cancelled, -100 - i: delete item i, else the
+ * chosen item. Items from first_deletable on can be deleted (-1: none). */
+int bbgpu_save_list_open(const char *title, const char *const *items, int count, int focus,
+                         int first_deletable);
+int bbgpu_save_list_poll(void);
+void bbgpu_save_list_close(void);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
+/* sotc: mouse motion since the last call and held buttons (bit = SDL button); 0 when not captured. */
+int bbgpu_mouse_take(float *dx, float *dy, unsigned *buttons);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
-/* Mouse look (runtime_pad.c): the window takes the mouse when it is clicked (relative mode) and
- * lets it go on F1, losing focus or the menu opening. take: motion (pixels) and wheel notches
- * since the last call, reset; captured: 1 while the window holds it; enable: mouse_look=0 in
- * bbport.ini keeps the window from taking it. */
-void bbgpu_mouse_take(double *dx, double *dy, int *wheel_up, int *wheel_down);
-int bbgpu_mouse_captured(void);
-void bbgpu_mouse_look_enable(int enabled);
-/* Patches the loaded image before the game runs (image still writable): libGnm entry hooks. */
-void bbgpu_patch_image(unsigned char *image, uint64_t size);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

@@ -14,10 +14,7 @@ from pathlib import Path
 
 EBOOT_BASE=0x400000
 # BB_FPS presets: patch names from patches/Bloodborne.xml (app version 01.09).
-# Above 60 FPS the sprint fix always goes with the frame rate patch: without it sprinting drops to
-# half speed (the game's wall detector measured distance per frame, a 30 FPS rule).
-FPS_PRESETS={'30':[],'60':['60 FPS++'],'90':['90 FPS++','Sprint Fix (High FPS)'],
-             'uncap':['Uncap FPS++','Sprint Fix (High FPS)']}
+FPS_PRESETS={'30':[],'60':['60 FPS++'],'90':['90 FPS++'],'uncap':['Uncap FPS++']}
 # Upscaler presets (bbport.ini "preset", the in-game menu): output / render size ratio. The game
 # then renders at 1920x1080 / ratio and the port's temporal upscaler restores the output size.
 OUTPUT_SIZE=(1920,1080)
@@ -39,96 +36,43 @@ EFFECTS={
     'skip_intro':(None,'Skip Intro'),
     'debug_camera':(None,'Restore Debug Camera'),
     'debug_menu':(None,'Restore Debug Menu (READ NOTES)'),
+    # Cheats and gameplay tweaks (launcher "Cheats" page).
+    'cheat_no_death':(None,'Player No Dead (Read note)'),
+    'cheat_stealth':(None,'Player Stealth (Read note)'),
+    'cheat_silent':(None,'Player Silent (Read note)'),
+    'cheat_rally_no_decay':(None,'No Rally Decay'),
+    'cheat_enemy_control':(None,'Enemy Control'),
+    'tweak_no_rally':(None,'Disable Rally (HP Regain)'),
+    'tweak_camera_distance':(None,'Increased camera distance'),
+    'tweak_no_camera_rotation':(None,'Disable Camera Auto Rotation via Movement'),
+    'tweak_easy_run':(None,'Sensitive Analog Input (easier to run)'),
+    'tweak_ragdoll':(None,'DS1-like physics'),
 }
-# Intel CPUs: the game's tone mapping turns black (DLC areas most; reported as darker than on the
-# PS4): the game code runs natively, and Intel's approximate float instructions differ from the
-# PS4's AMD CPU, so a block the game gates on a computed flag never runs. The community fix runs
-# it always; on by default on Intel. BB_INTEL_TONEMAP_FIX=0/1 forces it off or on.
-INTEL_TONEMAP='Intel Black Tonemap Fix'
-
-
-def intel_cpu(cpuinfo='/proc/cpuinfo'):
-    try:
-        with open(cpuinfo) as f:
-            return any(line.startswith('vendor_id') and 'GenuineIntel' in line for line in f)
-    except OSError:
-        return False
-
-
-# The title's PLAY ONLINE / PLAY OFFLINE dialog: the port has no PSN, the game goes straight to the
-# main menu offline. On by default (the launcher's switch); BB_SKIP_NETWORK_CHOICE=0 shows it.
-SKIP_NETWORK_CHOICE='Skip Online/Offline Choice'
-
-
-def skip_network_choice(env=os.environ):
-    return env.get('BB_SKIP_NETWORK_CHOICE','1')!='0'
-
-
-def intel_tonemap_fix(env=os.environ, cpuinfo='/proc/cpuinfo'):
-    forced=env.get('BB_INTEL_TONEMAP_FIX')
-    return forced=='1' if forced in ('0','1') else intel_cpu(cpuinfo)
-
 # model_lod: -2 highest, 0 the game's, 1 lower, 2 lowest.
 MODEL_LOD={'-2':'Model LOD -2 (Highest)','1':'Model LOD 1 (Lower)','2':'Model LOD 2 (Lowest)'}
 
 
-DEBUG_MENU='Restore Debug Menu (READ NOTES)'
-# What the patched game reads for the debug menu (BB_FILE_TRACE=1), under dvdroot_ps4. The game asks
-# for lower-case names; the PS4's file system and the port's runtime ignore case.
-DEBUG_MENU_FONTS=('adhoc/font/DbgFont14h.ccm','adhoc/font/DbgFont14h.tpf')
-DEBUG_MENU_SHADERS=('adhoc/FontShader/debugFont_vs.vpo','adhoc/FontShader/debugFont_ps.ppo')
-
-
-def find_ignoring_case(root, relative):
-    """`root`/`relative`, each component matched ignoring case; None when absent."""
-    path=Path(root)
-    for part in relative.split('/'):
-        exact=path/part
-        if exact.exists():
-            path=exact
-            continue
-        try:
-            matches=[e for e in path.iterdir() if e.name.casefold()==part.casefold()]
-        except OSError:
-            return None
-        if not matches:
-            return None
-        path=matches[0]
-    return path
-
-
-def debug_menu_problem(game):
-    """Why the debug menu patch cannot work with this game folder, or None."""
-    dvdroot=Path(game)/'dvdroot_ps4'
-    missing=[]
-    for relative in DEBUG_MENU_FONTS:
-        found=find_ignoring_case(dvdroot,relative)
-        if not found or not found.is_file() or found.stat().st_size==0:
-            missing.append(relative)
-    if not missing:
+def game_app_version(game):
+    """APP_VER of the game folder's param.sfo ("01.09"), or None when it cannot be read."""
+    try:
+        from prepare import sfo
+        return sfo((Path(game) / 'sce_sys/param.sfo').read_bytes()).get('APP_VER')
+    except (OSError, ValueError, ImportError):
         return None
-    hint=''
-    if all(find_ignoring_case(dvdroot,'font/'+r.rsplit('/',1)[1]) for r in missing):
-        hint=' (they are in dvdroot_ps4/font: the game reads them from dvdroot_ps4/adhoc/font)'
-    return ('the debug menu needs the font files from https://www.nexusmods.com/bloodborne/mods/253 '
-            f'in dvdroot_ps4 of the game folder or of a mod: missing {", ".join(missing)}{hint}')
 
 
 def validate_patch_requirements(names, game):
-    """The patches to apply: raises for conflicts; drops the debug menu (with a message) when its
-    font files are missing, as the game crashes opening the menu without them."""
     if 'Restore Debug Camera' in names and 'Enemy Control' in names:
         raise ValueError('Restore Debug Camera conflicts with Enemy Control; enable only one')
-    if DEBUG_MENU in names:
-        problem=debug_menu_problem(game)
-        if problem:
-            print(f'Patches: debug menu off: {problem}',file=sys.stderr)
-            return [n for n in names if n!=DEBUG_MENU]
-        absent=[r for r in DEBUG_MENU_SHADERS if not find_ignoring_case(Path(game)/'dvdroot_ps4',r)]
-        if absent:
-            print(f'Patches: debug menu: {", ".join(absent)} not found (the mod\'s font shaders); '
-                  'the menu may not draw',file=sys.stderr)
-    return names
+    if 'Restore Debug Menu (READ NOTES)' in names:
+        font = game / 'dvdroot_ps4/font'
+        missing = [name for name in ('DbgFont14h.ccm', 'DbgFont14h.tpf')
+                   if not (font / name).is_file() or (font / name).stat().st_size == 0]
+        if missing:
+            raise ValueError('Debug menu needs non-empty font files in '
+                             f'{font}: {", ".join(missing)}. Install the fonts from '
+                             'https://www.nexusmods.com/bloodborne/mods/253 first; '
+                             'or disable debug_menu in bbport.ini')
 
 
 def effect_patches(settings):
@@ -137,6 +81,13 @@ def effect_patches(settings):
         if key not in settings: continue
         name=on if settings[key]=='1' else off
         if name: names.append(name)
+    # Enemy Control and the free camera use the same buttons: the free camera wins.
+    if 'Enemy Control' in names and 'Restore Debug Camera' in names:
+        names.remove('Enemy Control')
+        print('Patches: Enemy Control skipped (it conflicts with the free camera)')
+    # Rally that never decays means nothing without Rally.
+    if 'No Rally Decay' in names and 'Disable Rally (HP Regain)' in names:
+        names.remove('No Rally Decay')
     lod=MODEL_LOD.get(settings.get('model_lod','0'))
     if lod: names.append(lod)
     return names
@@ -149,7 +100,7 @@ UI_HEIGHT=0x0235855D-EBOOT_BASE
 def read_settings(path):
     settings={}
     if path.exists():
-        for line in path.read_text(encoding='utf-8').splitlines():
+        for line in path.read_text().splitlines():
             key,sep,value=line.partition('=')
             if sep and not line.startswith('#'): settings[key.strip()]=value.strip()
     return settings
@@ -257,9 +208,7 @@ def compile_patches(xml, names, app_version, segments):
 
 
 # Third-party patch files (shadPS4/GoldHEN XML) in the data directory's patches/ folder.
-# The retail releases (scripts/game_check.py SUPPORTED_TITLES): one 1.09 executable.
-BLOODBORNE_IDS={'CUSA00900','CUSA00207','CUSA00208','CUSA00299','CUSA01363',
-                'CUSA03179','CUSA03173','CUSA03014','CUSA03023'}
+BLOODBORNE_IDS={'CUSA00207','CUSA00208','CUSA00900','CUSA01363','CUSA03173','CUSA03023'}
 
 
 def external_patches(directory, app_version='01.09', exclude=Path(__file__).resolve().parent.parent/'patches/Bloodborne.xml'):
@@ -287,7 +236,7 @@ def external_selection(found, config):
     each file's isEnabled."""
     settings={}
     if config and Path(config).is_file():
-        settings=json.loads(Path(config).read_text(encoding='utf-8'))
+        settings=json.loads(Path(config).read_text())
     enabled,disabled=set(settings.get('enabled',[])),set(settings.get('disabled',[]))
     return [(key,path,meta) for key,path,meta in found
             if key in enabled or (key not in disabled and meta.get('isEnabled','false').lower()=='true')]
@@ -343,13 +292,18 @@ def main():
         size=render_size(settings)
         if size: print(f'{size[0]}x{size[1]}')
         return
+    # The patches are byte writes at the addresses of one game version: on another version they
+    # would corrupt code. Such a game runs unpatched (run.sh/run.py then choose 30 FPS).
+    version=game_app_version(a.game_dir)
+    if version and version!=a.app_version and not os.environ.get('BB_FORCE_PATCHES'):
+        blob=struct.pack('<8sQQ',b'BBPATCH2',EBOOT_BASE,0)
+        (a.out/'patches.bin').write_bytes(blob)
+        print(f'Patches: game version {version}, patches are for {a.app_version}: none applied '
+              '(30 FPS, no effect or resolution patches)')
+        return
     names=FPS_PRESETS[a.fps]+[n.strip() for n in a.extra.split(';') if n.strip()]
     names+=[n for n in effect_patches(read_settings(a.settings)) if n not in names]
-    if intel_tonemap_fix() and INTEL_TONEMAP not in names:
-        names.append(INTEL_TONEMAP)
-    if skip_network_choice() and SKIP_NETWORK_CHOICE not in names:
-        names.append(SKIP_NETWORK_CHOICE)
-    names=validate_patch_requirements(names,a.game_dir)
+    validate_patch_requirements(names,a.game_dir)
     segments=eboot_segments((a.out/'eboot.elf').read_bytes())
     writes=compile_patches(a.xml,names,a.app_version,segments)
     size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None

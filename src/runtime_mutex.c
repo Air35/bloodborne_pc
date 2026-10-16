@@ -4,12 +4,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
 typedef struct { int type; } GuestAttr;
-typedef struct { pthread_mutex_t native; } GuestMutex;
+/* sotc: owner and lock site are kept for hang reports (long waits are reported). */
+typedef struct { pthread_mutex_t native; unsigned long owner; void *site; unsigned depth; } GuestMutex;
+#ifdef _WIN32
+#include <windows.h>
+static unsigned long current_tid(void) { return GetCurrentThreadId(); }
+#else
+#include <unistd.h>
+static unsigned long current_tid(void) { return (unsigned long)gettid(); }
+#endif
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;
@@ -49,7 +56,7 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (!out || (attr && !*attr)) return orbis_error(EINVAL);
     int type = attr ? (*attr)->type : 1;
     if (type < 1 || type > 4) return orbis_error(EINVAL);
-    GuestMutex *mutex = malloc(sizeof(*mutex));
+    GuestMutex *mutex = calloc(1, sizeof(*mutex));
     if (!mutex) return orbis_error(ENOMEM);
     pthread_mutexattr_t native_attr;
     int e = pthread_mutexattr_init(&native_attr);
@@ -81,14 +88,22 @@ static int32_t ensure_mutex(GuestMutex **mutex) {
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
-    int r = pthread_mutex_trylock(&(*mutex)->native);
-    if (r == EBUSY) { /* contended: timed for the wait profile */
-        const uint64_t start = runtime_wait_clock();
-        r = pthread_mutex_lock(&(*mutex)->native);
-        runtime_wait_note(1, runtime_wait_clock() - start);
+    GuestMutex *m = *mutex;
+    int native = pthread_mutex_trylock(&m->native);
+    for (int waited = 0; native == EBUSY;) {
+        struct timespec slice;
+        clock_gettime(CLOCK_REALTIME, &slice);
+        slice.tv_sec += 5;
+        native = pthread_mutex_timedlock(&m->native, &slice);
+        if (native == ETIMEDOUT) {
+            native = EBUSY;
+            if (waited++ < 3)
+                fprintf(stderr, "Runtime: mutex %p waited %ds by thread %lu from %p; owner thread %lu locked from %p (depth %u)\n",
+                        (void *)m, waited * 5, current_tid(), __builtin_return_address(0), m->owner, m->site, m->depth);
+        }
     }
-    e = orbis_error(r);
-    if (!e) ++locks;
+    e = orbis_error(native);
+    if (!e) { ++locks; m->owner = current_tid(); m->site = __builtin_return_address(0); ++m->depth; }
     return e;
 }
 static ABI int32_t mutex_trylock(GuestMutex **mutex) {
@@ -101,8 +116,19 @@ static ABI int32_t mutex_trylock(GuestMutex **mutex) {
 static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     if (!mutex || (uintptr_t)*mutex == 2) return orbis_error(EINVAL);
     if ((uintptr_t)*mutex < 2) return orbis_error(EPERM);
-    int32_t e = orbis_error(pthread_mutex_unlock(&(*mutex)->native));
+    GuestMutex *m = *mutex;
+    unsigned depth = m->depth;
+    if (depth) --m->depth;
+    if (!m->depth) m->owner = 0;
+    int32_t e = orbis_error(pthread_mutex_unlock(&m->native));
+    if (e) m->depth = depth;
     if (!e) ++unlocks;
+    else {
+        static _Atomic unsigned failures;
+        if (failures++ < 8)
+            fprintf(stderr, "Runtime: mutex %p unlock failed 0x%x from %p\n", (void *)*mutex, (unsigned)e,
+                    __builtin_return_address(0));
+    }
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
@@ -167,20 +193,14 @@ static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
-    const uint64_t start = runtime_wait_clock();
-    const int e2 = pthread_cond_wait(&(*cond)->native, &(*mutex)->native);
-    runtime_wait_note(0, runtime_wait_clock() - start);
-    return orbis_error(e2);
+    return orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struct timespec *end) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
     ++waits;
-    const uint64_t start = runtime_wait_clock();
-    const int e2 = pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end);
-    runtime_wait_note(0, runtime_wait_clock() - start);
-    return timed_error(e2);
+    return timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
     struct timespec end;
@@ -221,62 +241,40 @@ static ABI int32_t posix_cond_timedwait(GuestCond **c, GuestMutex **m, const Gue
 static ABI int32_t posix_cond_signal(GuestCond **c) { return posix_result(cond_signal(c)); }
 static ABI int32_t posix_cond_broadcast(GuestCond **c) { return posix_result(cond_broadcast(c)); }
 uintptr_t runtime_mutex_resolve(const char *name) {
-    if (!strcmp(name,"0TyVk4MSLt0#libkernel")) return (uintptr_t)posix_cond_init;
-    if (!strcmp(name,"RXXqi4CtF8w#libkernel")) return (uintptr_t)posix_cond_destroy;
-    if (!strcmp(name,"Op8TBGY5KHg#libkernel")) return (uintptr_t)posix_cond_wait;
-    if (!strcmp(name,"27bAgiJmOh0#libkernel")) return (uintptr_t)posix_cond_timedwait;
-    if (!strcmp(name,"2MOy+rUfuhQ#libkernel")) return (uintptr_t)posix_cond_signal;
-    if (!strcmp(name,"mkx2fVhNMsg#libkernel")) return (uintptr_t)posix_cond_broadcast;
-    if (!strcmp(name,"2Tb92quprl0#libkernel")) return (uintptr_t)cond_init;
-    if (!strcmp(name,"g+PZd2hiacg#libkernel")) return (uintptr_t)cond_destroy;
-    if (!strcmp(name,"WKAXJ4XBPQ4#libkernel")) return (uintptr_t)cond_wait;
-    if (!strcmp(name,"BmMjYxmew1w#libkernel")) return (uintptr_t)cond_timedwait;
-    if (!strcmp(name,"kDh-NfxgMtE#libkernel")) return (uintptr_t)cond_signal;
-    if (!strcmp(name,"JGgj7Uvrl+A#libkernel")) return (uintptr_t)cond_broadcast;
-    if (!strcmp(name,"IafI2PxcPnQ#libkernel")) return (uintptr_t)mutex_timedlock;
-    if (!strcmp(name,"dQHWEsJtoE4#libkernel")) return (uintptr_t)posix_attr_init;
-    if (!strcmp(name,"mDmgMOGVUqg#libkernel")) return (uintptr_t)posix_attr_type;
-    if (!strcmp(name,"HF7lK46xzjY#libkernel")) return (uintptr_t)posix_attr_destroy;
-    if (!strcmp(name,"ttHNfU+qDBU#libkernel")) return (uintptr_t)posix_mutex_init;
-    if (!strcmp(name,"ltCfaGr2JGE#libkernel")) return (uintptr_t)posix_mutex_destroy;
-    if (!strcmp(name,"7H0iTOciTLo#libkernel")) return (uintptr_t)posix_mutex_lock;
-    if (!strcmp(name,"K-jXhbt2gn4#libkernel")) return (uintptr_t)posix_mutex_trylock;
-    if (!strcmp(name,"2Z+PpY6CaJg#libkernel")) return (uintptr_t)posix_mutex_unlock;
-    if (!strcmp(name, "F8bUHwAG284#libkernel")) return (uintptr_t)attr_init;
-    if (!strcmp(name, "iMp8QpE+XO4#libkernel")) return (uintptr_t)attr_type;
-    if (!strcmp(name, "smWEktiyyG0#libkernel")) return (uintptr_t)attr_destroy;
-    if (!strcmp(name, "1FGvU0i9saQ#libkernel")) return (uintptr_t)attr_protocol;
-    if (!strcmp(name, "cmo1RIYva9o#libkernel")) return (uintptr_t)mutex_init;
-    if (!strcmp(name, "9UK1vLZQft4#libkernel")) return (uintptr_t)mutex_lock;
-    if (!strcmp(name, "upoVrzMHFeE#libkernel")) return (uintptr_t)mutex_trylock;
-    if (!strcmp(name, "tn3VlD0hG60#libkernel")) return (uintptr_t)mutex_unlock;
-    if (!strcmp(name, "2Of0f+3mhhE#libkernel")) return (uintptr_t)mutex_destroy;
+    if (!strcmp(name,"0TyVk4MSLt0")) return (uintptr_t)posix_cond_init;
+    if (!strcmp(name,"RXXqi4CtF8w")) return (uintptr_t)posix_cond_destroy;
+    if (!strcmp(name,"Op8TBGY5KHg")) return (uintptr_t)posix_cond_wait;
+    if (!strcmp(name,"27bAgiJmOh0")) return (uintptr_t)posix_cond_timedwait;
+    if (!strcmp(name,"2MOy+rUfuhQ")) return (uintptr_t)posix_cond_signal;
+    if (!strcmp(name,"mkx2fVhNMsg")) return (uintptr_t)posix_cond_broadcast;
+    if (!strcmp(name,"2Tb92quprl0")) return (uintptr_t)cond_init;
+    if (!strcmp(name,"g+PZd2hiacg")) return (uintptr_t)cond_destroy;
+    if (!strcmp(name,"WKAXJ4XBPQ4")) return (uintptr_t)cond_wait;
+    if (!strcmp(name,"BmMjYxmew1w")) return (uintptr_t)cond_timedwait;
+    if (!strcmp(name,"kDh-NfxgMtE")) return (uintptr_t)cond_signal;
+    if (!strcmp(name,"JGgj7Uvrl+A")) return (uintptr_t)cond_broadcast;
+    if (!strcmp(name,"IafI2PxcPnQ")) return (uintptr_t)mutex_timedlock;
+    if (!strcmp(name,"dQHWEsJtoE4")) return (uintptr_t)posix_attr_init;
+    if (!strcmp(name,"mDmgMOGVUqg")) return (uintptr_t)posix_attr_type;
+    if (!strcmp(name,"HF7lK46xzjY")) return (uintptr_t)posix_attr_destroy;
+    if (!strcmp(name,"ttHNfU+qDBU")) return (uintptr_t)posix_mutex_init;
+    if (!strcmp(name,"ltCfaGr2JGE")) return (uintptr_t)posix_mutex_destroy;
+    if (!strcmp(name,"7H0iTOciTLo")) return (uintptr_t)posix_mutex_lock;
+    if (!strcmp(name,"K-jXhbt2gn4")) return (uintptr_t)posix_mutex_trylock;
+    if (!strcmp(name,"2Z+PpY6CaJg")) return (uintptr_t)posix_mutex_unlock;
+    if (!strcmp(name, "F8bUHwAG284")) return (uintptr_t)attr_init;
+    if (!strcmp(name, "iMp8QpE+XO4")) return (uintptr_t)attr_type;
+    if (!strcmp(name, "smWEktiyyG0")) return (uintptr_t)attr_destroy;
+    if (!strcmp(name, "1FGvU0i9saQ")) return (uintptr_t)attr_protocol;
+    if (!strcmp(name, "cmo1RIYva9o")) return (uintptr_t)mutex_init;
+    if (!strcmp(name, "9UK1vLZQft4")) return (uintptr_t)mutex_lock;
+    if (!strcmp(name, "upoVrzMHFeE")) return (uintptr_t)mutex_trylock;
+    if (!strcmp(name, "tn3VlD0hG60")) return (uintptr_t)mutex_unlock;
+    if (!strcmp(name, "2Of0f+3mhhE")) return (uintptr_t)mutex_destroy;
     return 0;
 }
 void runtime_mutex_report(void) {
     printf("Runtime: mutexes created=%zu, locks=%zu, unlocks=%zu\n", created, locks, unlocks);
     printf("Runtime: condition variables created=%zu, waits=%zu, wakeups=%zu\n", conds, waits, wakeups);
 }
-#else
-static ABI int32_t posix_cond_init(GuestCond **c, void **a) { return posix_result(cond_init(c, a, NULL)); }
-static ABI int32_t posix_cond_destroy(GuestCond **c) { return posix_result(cond_destroy(c)); }
-static ABI int32_t posix_cond_wait(GuestCond **c, GuestMutex **m) { return posix_result(cond_wait(c, m)); }
-static ABI int32_t posix_cond_timedwait(GuestCond **c, GuestMutex **m, const GuestTimespec *t) { return posix_result(cond_abs_timedwait(c, m, t)); }
-static ABI int32_t posix_cond_signal(GuestCond **c) { return posix_result(cond_signal(c)); }
-static ABI int32_t posix_cond_broadcast(GuestCond **c) { return posix_result(cond_broadcast(c)); }
-uintptr_t runtime_mutex_resolve(const char *name) {
-    if (!strcmp(name,"0TyVk4MSLt0#libkernel")) return (uintptr_t)posix_cond_init;
-    if (!strcmp(name,"RXXqi4CtF8w#libkernel")) return (uintptr_t)posix_cond_destroy;
-    if (!strcmp(name,"Op8TBGY5KHg#libkernel")) return (uintptr_t)posix_cond_wait;
-    if (!strcmp(name,"27bAgiJmOh0#libkernel")) return (uintptr_t)posix_cond_timedwait;
-    if (!strcmp(name,"2MOy+rUfuhQ#libkernel")) return (uintptr_t)posix_cond_signal;
-    if (!strcmp(name,"mkx2fVhNMsg#libkernel")) return (uintptr_t)posix_cond_broadcast;
-    if (!strcmp(name,"2Tb92quprl0#libkernel")) return (uintptr_t)cond_init;
-    if (!strcmp(name,"g+PZd2hiacg#libkernel")) return (uintptr_t)cond_destroy;
-    if (!strcmp(name,"WKAXJ4XBPQ4#libkernel")) return (uintptr_t)cond_wait;
-    if (!strcmp(name,"BmMjYxmew1w#libkernel")) return (uintptr_t)cond_timedwait;
-    if (!strcmp(name,"kDh-NfxgMtE#libkernel")) return (uintptr_t)cond_signal;
-    if (!strcmp(name,"JGgj7Uvrl+A#libkernel")) return (uintptr_t)cond_broadcast;
-    if (!strcmp(name,"IafI2PxcPnQ#libkernel")) return (uintptr_t)mutex_timedlock; (void)name; return 0; }
-void runtime_mutex_report(void) { puts("Runtime: Windows mutex backend not implemented"); }
-#endif
+

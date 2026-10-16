@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdio>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -12,8 +11,6 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
-#include "bbport_toggles.h"
-#include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -22,22 +19,6 @@
 namespace Vulkan {
 
 namespace {
-
-/// bbport BB_VRAM_LIMIT_MB=N (tests): the driver's VRAM budget taken as at most N MiB, at startup
-/// and while the game runs, so the texture collector and VRAM copies behave as on a smaller card
-/// (a 6 GB GTX 1660 Ti reports ~5600). Allocations themselves are not limited.
-u64 VramLimit() {
-    static const u64 limit = [] {
-        const char* env = std::getenv("BB_VRAM_LIMIT_MB");
-        const u64 mib = env && *env ? std::strtoull(env, nullptr, 10) : 0;
-        if (mib != 0) {
-            std::printf("GPU: VRAM budget limited to %llu MiB (BB_VRAM_LIMIT_MB)\n",
-                        (unsigned long long)mib);
-        }
-        return mib << 20;
-    }();
-    return limit;
-}
 
 std::vector<vk::PhysicalDevice> EnumeratePhysicalDevices(vk::UniqueInstance& instance) {
     auto [devices_result, devices] = instance->enumeratePhysicalDevices();
@@ -114,14 +95,8 @@ Instance::Instance(bool enable_validation, bool enable_crash_diagnostic)
 
 Instance::Instance(Frontend::WindowSDL& window, s32 physical_device_index,
                    bool enable_validation /*= false*/, bool enable_crash_diagnostic /*= false*/)
-    : Instance(window.GetWindowInfo(), physical_device_index, enable_validation, enable_crash_diagnostic) {}
-
-Instance::Instance(s32 index, bool validation)
-    : Instance(Frontend::WindowSystemInfo{}, index, validation, false) {}
-
-Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_device_index,
-                   bool enable_validation, bool enable_crash_diagnostic)
-    : instance{CreateInstance(window_info.type, enable_validation, enable_crash_diagnostic)},
+    : instance{CreateInstance(window.GetWindowInfo().type, enable_validation,
+                              enable_crash_diagnostic)},
       physical_devices{EnumeratePhysicalDevices(instance)} {
     if (enable_validation) {
         debug_callback = CreateDebugCallback(*instance);
@@ -226,6 +201,47 @@ std::string Instance::GetDriverVersionName() {
     return GetReadableVersion(version);
 }
 
+void Instance::ReportDeviceFault() const {
+    LOG_CRITICAL(Render_Vulkan, "Vulkan device lost");
+    if (!device_fault) {
+        LOG_CRITICAL(Render_Vulkan, "VK_EXT_device_fault unavailable, no fault details");
+        return;
+    }
+    const auto get_fault_info = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(*device, "vkGetDeviceFaultInfoEXT"));
+    if (!get_fault_info) {
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (get_fault_info(*device, &counts, nullptr) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "vkGetDeviceFaultInfoEXT (counts) failed");
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    std::vector<u8> vendor_binary(counts.vendorBinarySize);
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor.data(),
+        .pVendorBinaryData = vendor_binary.empty() ? nullptr : vendor_binary.data(),
+    };
+    if (get_fault_info(*device, &counts, &info) != VK_SUCCESS) {
+        LOG_CRITICAL(Render_Vulkan, "vkGetDeviceFaultInfoEXT failed");
+        return;
+    }
+    LOG_CRITICAL(Render_Vulkan, "Device fault: {}", info.description);
+    for (const auto& a : addresses) {
+        LOG_CRITICAL(Render_Vulkan, "  address type={} address={:#x} precision={:#x}",
+                     vk::to_string(static_cast<vk::DeviceFaultAddressTypeEXT>(a.addressType)),
+                     a.reportedAddress, a.addressPrecision);
+    }
+    for (const auto& v : vendor) {
+        LOG_CRITICAL(Render_Vulkan, "  vendor: {} code={:#x} data={:#x}", v.description,
+                     v.vendorFaultCode, v.vendorFaultData);
+    }
+}
+
 bool Instance::CreateDevice() {
     const vk::StructureChain feature_chain = physical_device.getFeatures2<
         vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceVulkan11Features,
@@ -236,9 +252,7 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderAtomicFloat2FeaturesEXT,
         vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR,
         vk::PhysicalDeviceImage2DViewOf3DFeaturesEXT, vk::PhysicalDeviceShaderClockFeaturesKHR,
-        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR,
-        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
-        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR, vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
+        vk::PhysicalDeviceFaultFeaturesEXT>();
     features = feature_chain.get().features;
 
     const vk::StructureChain properties_chain = physical_device.getProperties2<
@@ -256,7 +270,7 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    boost::container::static_vector<const char*, 64> enabled_extensions;
+    boost::container::static_vector<const char*, 32> enabled_extensions;
     const auto add_extension = [&](std::string_view extension) -> bool {
         const auto result =
             std::find_if(available_extensions.begin(), available_extensions.end(),
@@ -294,8 +308,6 @@ bool Instance::CreateDevice() {
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
-    // bbport: GPU breadcrumbs (vk_breadcrumbs.h).
-    buffer_marker = add_extension(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -317,7 +329,10 @@ bool Instance::CreateDevice() {
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
     vertex_input_dynamic_state = add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
-    list_restart = add_extension(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
+    // Games excessively leave restart enabled with lists when it isn't actually needed, and it
+    // slows down KosmicKrisp due to unrolling. Revisit if KosmicKrisp moves this to mesh shaders.
+    list_restart = driver_id != vk::DriverId::eMesaKosmickrisp &&
+                   add_extension(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
     if (list_restart) {
         list_restart_features =
             feature_chain.get<vk::PhysicalDevicePrimitiveTopologyListRestartFeaturesEXT>();
@@ -374,31 +389,6 @@ bool Instance::CreateDevice() {
     }
     image_view_min_lod = add_extension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
     supports_memory_budget = add_extension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
-    // bbport: guest direct memory allocated here and mapped by the runtime (BbGuestMemory).
-    guest_memory_export = add_extension(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
-                          add_extension(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME);
-    // bbport: or host memory imported into Vulkan (drivers whose dma-buf does not fit, NVIDIA).
-    host_memory_import = add_extension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
-    // bbport: FSR 4 v07 INT8 (vk_temporal_upscaler): quad derivatives in compute shaders.
-    compute_shader_derivatives = add_extension(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
-    // bbport: FSR 4.1.1 passes (dot2 of halves accumulated in float, as vkd3d-proton translates them).
-    mixed_float_dot_product =
-        feature_chain.get<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>()
-            .shaderMixedFloatDotProductFloat16AccFloat32 &&
-        add_extension(VK_VALVE_SHADER_MIXED_FLOAT_DOT_PRODUCT_EXTENSION_NAME);
-    // bbport: FSR 4.1.1's FP8 variant (RDNA4): FP8 cooperative matrices. Cooperative matrices
-    // alone (FP16) run it emulated, for testing (BB_FSR411_VARIANT=fp8emu).
-    cooperative_matrix =
-        feature_chain.get<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>().cooperativeMatrix &&
-        add_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
-    shader_float8 =
-        cooperative_matrix &&
-        feature_chain.get<vk::PhysicalDeviceShaderFloat8FeaturesEXT>().shaderFloat8CooperativeMatrix &&
-        add_extension(VK_EXT_SHADER_FLOAT8_EXTENSION_NAME);
-    if (compute_shader_derivatives) {
-        compute_shader_derivatives_features =
-            feature_chain.get<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
-    }
     shader_clock = add_extension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
     if (shader_clock) {
         shader_clock_features = feature_chain.get<vk::PhysicalDeviceShaderClockFeaturesKHR>();
@@ -407,6 +397,13 @@ bool Instance::CreateDevice() {
     }
     const bool calibrated_timestamps =
         TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
+    // Device fault reporting: lets us print the faulting address/type after a device loss.
+    device_fault = add_extension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+    if (device_fault) {
+        const auto fault_features = feature_chain.get<vk::PhysicalDeviceFaultFeaturesEXT>();
+        device_fault = fault_features.deviceFault;
+        device_fault_vendor_binary = fault_features.deviceFaultVendorBinary;
+    }
 
     const auto family_properties = physical_device.getQueueFamilyProperties();
     if (family_properties.empty()) {
@@ -434,47 +431,14 @@ bool Instance::CreateDevice() {
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
-    // bbport: a queue of a compute and transfer family without graphics, for reading back GPU
-    // data the GPU finished writing long ago without waiting behind the queued frame
-    // (BufferCache::DownloadMemory). BB_READBACK_QUEUE=0 turns it off.
-    std::array<vk::DeviceQueueCreateInfo, 2> queue_infos{queue_info};
-    u32 queue_info_count = 1;
-    if (const char* env = std::getenv("BB_READBACK_QUEUE"); !env || env[0] != '0') {
-        for (std::size_t i = 0; i < family_properties.size(); i++) {
-            const auto flags = family_properties[i].queueFlags;
-            if (!(flags & vk::QueueFlagBits::eGraphics) && (flags & vk::QueueFlagBits::eCompute) &&
-                family_properties[i].queueCount > 0) {
-                readback_family_index = static_cast<u32>(i);
-                queue_infos[1] = vk::DeviceQueueCreateInfo{
-                    .queueFamilyIndex = readback_family_index,
-                    .queueCount = 1,
-                    .pQueuePriorities = queue_priorities.data(),
-                };
-                queue_info_count = 2;
-                break;
-            }
-        }
-    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
-    // bbport: DLSS (optional bridge library) needs its own device extensions on NVIDIA GPUs.
-    std::vector<const char*> dlss_extensions;
-    if (Dlss* dlss = Dlss::Get()) {
-        dlss->AppendDeviceExtensions(*instance, physical_device, dlss_extensions);
-        for (const char* name : dlss_extensions) {
-            if (std::none_of(enabled_extensions.begin(), enabled_extensions.end(),
-                             [&](const char* e) { return std::string_view{e} == name; }) &&
-                enabled_extensions.size() < enabled_extensions.capacity()) {
-                enabled_extensions.push_back(name);
-            }
-        }
-    }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = queue_info_count,
-            .pQueueCreateInfos = queue_infos.data(),
+            .queueCreateInfoCount = 1u,
+            .pQueueCreateInfos = &queue_info,
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -496,16 +460,14 @@ bool Instance::CreateDevice() {
                 .wideLines = features.wideLines,
                 .multiViewport = features.multiViewport,
                 .samplerAnisotropy = features.samplerAnisotropy,
-                // bbport: exact sample counts for the game's occlusion queries (vk_occlusion.h).
-                .occlusionQueryPrecise = features.occlusionQueryPrecise,
                 .vertexPipelineStoresAndAtomics = features.vertexPipelineStoresAndAtomics,
                 .fragmentStoresAndAtomics = features.fragmentStoresAndAtomics,
                 .shaderImageGatherExtended = features.shaderImageGatherExtended,
                 .shaderStorageImageExtendedFormats = features.shaderStorageImageExtendedFormats,
                 .shaderStorageImageMultisample = features.shaderStorageImageMultisample,
-                // bbport: required by the FSR 3 accumulate shaders (vk_temporal_upscaler).
-                .shaderStorageImageWriteWithoutFormat =
-                    features.shaderStorageImageWriteWithoutFormat,
+                // Descriptor arrays of dynamic_tsharp_array_size (shader_recompiler/info.cpp)
+                .shaderSampledImageArrayDynamicIndexing =
+                    features.shaderSampledImageArrayDynamicIndexing,
                 .shaderClipDistance = features.shaderClipDistance,
                 .shaderFloat64 = features.shaderFloat64,
                 .shaderInt64 = features.shaderInt64,
@@ -532,18 +494,14 @@ bool Instance::CreateDevice() {
             .hostQueryReset = vk12_features.hostQueryReset,
             .timelineSemaphore = vk12_features.timelineSemaphore,
             .bufferDeviceAddress = vk12_features.bufferDeviceAddress,
-            .vulkanMemoryModel = vk12_features.vulkanMemoryModel,
-            .vulkanMemoryModelDeviceScope = vk12_features.vulkanMemoryModelDeviceScope,
             .shaderOutputLayer = vk12_features.shaderOutputLayer,
         },
         vk::PhysicalDeviceVulkan13Features{
             .robustImageAccess = vk13_features.robustImageAccess,
             .shaderDemoteToHelperInvocation = vk13_features.shaderDemoteToHelperInvocation,
             .subgroupSizeControl = vk13_features.subgroupSizeControl,
-            .computeFullSubgroups = vk13_features.computeFullSubgroups,
             .synchronization2 = vk13_features.synchronization2,
             .dynamicRendering = vk13_features.dynamicRendering,
-            .shaderIntegerDotProduct = vk13_features.shaderIntegerDotProduct,
             .maintenance4 = vk13_features.maintenance4,
         },
         // Extensions
@@ -620,22 +578,6 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
         },
-        vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR{
-            .computeDerivativeGroupQuads =
-                compute_shader_derivatives_features.computeDerivativeGroupQuads,
-            .computeDerivativeGroupLinear =
-                compute_shader_derivatives_features.computeDerivativeGroupLinear,
-        },
-        vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE{
-            .shaderMixedFloatDotProductFloat16AccFloat32 = true,
-        },
-        vk::PhysicalDeviceCooperativeMatrixFeaturesKHR{
-            .cooperativeMatrix = true,
-        },
-        vk::PhysicalDeviceShaderFloat8FeaturesEXT{
-            .shaderFloat8 = true,
-            .shaderFloat8CooperativeMatrix = true,
-        },
     };
 
     if (!custom_border_color) {
@@ -687,17 +629,16 @@ bool Instance::CreateDevice() {
     if (!shader_clock) {
         device_chain.unlink<vk::PhysicalDeviceShaderClockFeaturesKHR>();
     }
-    if (!compute_shader_derivatives) {
-        device_chain.unlink<vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR>();
-    }
-    if (!mixed_float_dot_product) {
-        device_chain.unlink<vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE>();
-    }
-    if (!cooperative_matrix) {
-        device_chain.unlink<vk::PhysicalDeviceCooperativeMatrixFeaturesKHR>();
-    }
-    if (!shader_float8) {
-        device_chain.unlink<vk::PhysicalDeviceShaderFloat8FeaturesEXT>();
+
+    // Chained by hand to keep the large StructureChain above untouched.
+    vk::PhysicalDeviceFaultFeaturesEXT fault_features{
+        .deviceFault = vk::True,
+        .deviceFaultVendorBinary = device_fault_vendor_binary ? vk::True : vk::False,
+    };
+    if (device_fault) {
+        auto& features2 = device_chain.get<vk::PhysicalDeviceFeatures2>();
+        fault_features.pNext = features2.pNext;
+        features2.pNext = &fault_features;
     }
 
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
@@ -708,16 +649,9 @@ bool Instance::CreateDevice() {
     device = std::move(dev);
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
-    if (Dlss* dlss = Dlss::Get()) {
-        dlss->Initialize(*instance, physical_device, *device);
-    }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
-    if (readback_family_index != NoFamily) {
-        readback_queue = device->getQueue(readback_family_index, 0);
-        LOG_INFO(Render_Vulkan, "Readback queue: family {}", readback_family_index);
-    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =
@@ -754,61 +688,22 @@ bool Instance::CreateDevice() {
     return true;
 }
 
-namespace {
-const Instance* stats_instance = nullptr;
-}
-
-void VmaDeviceUsage(u64& block_bytes, u64& allocation_bytes) {
-    block_bytes = allocation_bytes = 0;
-    if (!stats_instance) {
-        return;
-    }
-    const auto props = stats_instance->GetPhysicalDevice().getMemoryProperties();
-    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
-    vmaGetHeapBudgets(stats_instance->GetAllocator(), budgets.data());
-    for (u32 heap = 0; heap < props.memoryHeapCount; ++heap) {
-        if (props.memoryHeaps[heap].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
-            block_bytes += budgets[heap].statistics.blockBytes;
-            allocation_bytes += budgets[heap].statistics.allocationBytes;
-        }
-    }
-}
-
 void Instance::CreateAllocator() {
     const VmaVulkanFunctions functions = {
         .vkGetInstanceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
-    // bbport: new device memory per frame (BB_FRAME_LOG alloc_mb).
-    static const VmaDeviceMemoryCallbacks memory_callbacks = {
-        .pfnAllocate = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize size, void*) {
-            BbStats::device_alloc_bytes.fetch_add(size, std::memory_order_relaxed);
-        },
-        .pfnFree = [](VmaAllocator, uint32_t, VkDeviceMemory, VkDeviceSize size, void*) {
-            BbStats::device_free_bytes.fetch_add(size, std::memory_order_relaxed);
-        },
-    };
 
-    // bbport: 64 MiB blocks (VMA default 256 MiB). A block goes back to the driver only once
-    // empty: images freed here and there (the texture collector) left 256 MiB blocks mostly
-    // empty and held. BB_VMA_BLOCK_MB=N.
-    static const VkDeviceSize block_size = [] {
-        const char* env = std::getenv("BB_VMA_BLOCK_MB");
-        return VkDeviceSize(env ? std::max(1ul, std::strtoul(env, nullptr, 10)) : 64ul) << 20;
-    }();
     const VmaAllocatorCreateInfo allocator_info = {
         .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
         .physicalDevice = physical_device,
         .device = *device,
-        .preferredLargeHeapBlockSize = block_size,
-        .pDeviceMemoryCallbacks = &memory_callbacks,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
     };
 
     const VkResult result = vmaCreateAllocator(&allocator_info, &allocator);
-    stats_instance = this;
     if (result != VK_SUCCESS) {
         UNREACHABLE_MSG("Failed to initialize VMA with error {}",
                         vk::to_string(vk::Result{result}));
@@ -831,17 +726,6 @@ void Instance::CollectDeviceParameters() {
     const std::string api_version = GetReadableVersion(properties.apiVersion);
     const std::string extensions = fmt::format("{}", fmt::join(available_extensions, ", "));
 
-    // bbport: in every log (reports of hangs and device loss need it; LOG_INFO is filtered out).
-    u64 device_local = 0;
-    for (u32 i = 0; i < memory_properties.memoryHeapCount; ++i) {
-        if (memory_properties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
-            device_local = std::max<u64>(device_local, memory_properties.memoryHeaps[i].size);
-        }
-    }
-    std::printf("GPU: %s%s, %llu MiB VRAM; %s %s (%s), Vulkan %s\n", model_name.c_str(),
-                IsIntegrated() ? " (integrated)" : "",
-                static_cast<unsigned long long>(device_local >> 20), vendor_name.c_str(),
-                driver_version.c_str(), driver.driverInfo.data(), api_version.c_str());
     LOG_INFO(Render_Vulkan, "GPU_Vendor: {}", vendor_name);
     LOG_INFO(Render_Vulkan, "GPU_Model: {}", model_name);
     LOG_INFO(Render_Vulkan, "GPU_Integrated: {}", IsIntegrated() ? "Yes" : "No");
@@ -881,9 +765,6 @@ void Instance::CollectPhysicalMemoryInfo() {
         // If memory budget is not supported, use the size of the heap as the budget.
         total_memory_budget += memory_props.memoryHeaps[i].size;
     }
-    if (VramLimit() != 0) {
-        total_memory_budget = std::min(total_memory_budget, VramLimit());
-    }
     if (!IsIntegrated()) {
         // We reserve some memory for the system.
         const u64 system_memory = std::min<u64>(total_memory_budget / 8, 1_GB);
@@ -893,7 +774,7 @@ void Instance::CollectPhysicalMemoryInfo() {
     // Leave at least 8 GB for the system on integrated GPUs.
     const s64 available_memory = static_cast<s64>(total_memory_budget - device_initial_usage);
     total_memory_budget =
-        static_cast<u64>(std::max<s64>(available_memory - 8_GB, static_cast<s64>(local_memory)));
+        static_cast<u64>(std::max<s64>(available_memory - 8_GB, static_cast<s64>(2_GB)));
 }
 
 void Instance::CollectImageFormatInfo() {
@@ -965,20 +846,6 @@ u64 Instance::GetDeviceMemoryUsage() const {
         total_usage += memory_budget_props.heapUsage[heap];
     }
     return total_usage;
-}
-
-u64 Instance::GetDeviceMemoryBudgetNow() const {
-    vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
-    vk::PhysicalDeviceMemoryProperties2 props = {
-        .pNext = &memory_budget_props,
-    };
-    physical_device.getMemoryProperties2(&props);
-
-    u64 total_budget = 0;
-    for (const size_t heap : valid_heaps) {
-        total_budget += memory_budget_props.heapBudget[heap];
-    }
-    return VramLimit() != 0 ? std::min(total_budget, VramLimit()) : total_budget;
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {

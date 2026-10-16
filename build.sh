@@ -2,6 +2,39 @@
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
 mkdir -p out
+# Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
+# there and CMake links bb-probe.exe as well; no PGO (GCC-only flags), LTO off by default.
+case $(uname -s) in
+MINGW*|MSYS*)
+    # shellcheck source=msys2-env.sh
+    source ./msys2-env.sh
+    for tool in clang cmake ninja pkg-config; do
+        command -v "$tool" >/dev/null || { echo "Need $tool from MSYS2 CLANG64 (packaging/windows/README.md)." >&2; exit 1; }
+    done
+    if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ||
+          ! -f gpu/third_party/xbyak/xbyak/xbyak.h ]]; then
+        git submodule update --init --recursive
+    fi
+    for patch in gpu/patches/fsr-vulkan/*.patch; do
+        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+            git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+        fi
+    done
+    # sotc: llvm-windres, binutils windres fails on build paths with spaces ("Unable to create
+    # temp file").
+    cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO=off \
+        -DBB_LTO="${BB_LTO:-OFF}" -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+        -DCMAKE_RC_COMPILER=llvm-windres >/dev/null
+    echo "GPU library and loader: LTO ${BB_LTO:-OFF}"
+    if ! ninja -C out/gpu bb-probe bb-gpu-capabilities bb-play > out/gpu-build.log 2>&1; then
+        grep -v '^\[' out/gpu-build.log | tail -40 >&2
+        echo 'Build failed (full log: out/gpu-build.log)' >&2; exit 1
+    fi
+    cp out/gpu/bb-probe.exe out/gpu/bb-gpu-capabilities.exe out/gpu/bb-play.exe out/
+    echo "Built $PWD/out/bb-probe.exe"
+    exit 0
+    ;;
+esac
 if [[ -z ${CC:-} ]]; then
     CC=$(command -v cc || command -v gcc || true)
     if [[ -z $CC ]]; then
@@ -34,46 +67,22 @@ mkdir -p pgo
 if [[ ! -f gpu/third_party/fsr-vulkan/CMakeLists.txt || ! -f gpu/third_party/imgui/imgui.h ]]; then
     git submodule update --init --recursive
 fi
-# Issue #124: a checkout updated from an earlier version keeps that version's patch applied, and
-# the new one applies neither way ("patch does not apply"): the submodule's tree holds nothing but
-# these patches, so it is reset and they are applied again.
-fsr_patches_apply() {
-    for patch in gpu/patches/fsr-vulkan/*.patch; do
-        if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
-            git -C gpu/third_party/fsr-vulkan apply "$@" "$PWD/$patch" || return 1
-        fi
-    done
-}
-if ! fsr_patches_apply --check 2>/dev/null; then
-    echo 'FSR-Vulkan: an earlier version of the port changed it; resetting it and patching again'
-    git -C gpu/third_party/fsr-vulkan checkout -- .
-fi
-fsr_patches_apply
+for patch in gpu/patches/fsr-vulkan/*.patch; do
+    if ! git -C gpu/third_party/fsr-vulkan apply --reverse --check "$PWD/$patch" 2>/dev/null; then
+        git -C gpu/third_party/fsr-vulkan apply "$PWD/$patch"
+    fi
+done
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
     -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
 echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
 # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
-if ! ninja -C out/gpu bbgpu $(grep -q "^build bbnet:" out/gpu/build.ninja && echo bbnet) > out/gpu-build.log 2>&1; then
+if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
     echo 'GPU library build failed (full log: out/gpu-build.log)' >&2; exit 1
-fi
-# Optional DLSS (NVIDIA RTX): DLSS_SDK_ROOT=<github.com/NVIDIA/DLSS checkout> builds the bridge
-# (gpu/dlss_bridge, the only code using NVIDIA's SDK) and puts it next to bb-probe with NVIDIA's
-# libnvidia-ngx-dlss.so. Without them the DLSS upscaler is listed as unavailable.
-if [[ -n ${DLSS_SDK_ROOT:-} ]]; then
-    cmake -S gpu/dlss_bridge -B out/dlss-bridge -G Ninja -DCMAKE_BUILD_TYPE=Release \
-        -DDLSS_SDK_ROOT="$DLSS_SDK_ROOT" >/dev/null
-    ninja -C out/dlss-bridge >/dev/null
-    rm -f out/libnvidia-ngx-dlss.so.*
-    cp out/dlss-bridge/libbbport_dlss.so "$DLSS_SDK_ROOT"/lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.* out/
-    cp "$DLSS_SDK_ROOT/LICENSE.txt" out/NVIDIA-DLSS-LICENSE.txt
-    echo "DLSS bridge: out/libbbport_dlss.so"
 fi
 # $ORIGIN/gpu: packaged copies keep the library next to the binary without patching it.
 gpu=(-Lout/gpu -lbbgpu -Wl,-rpath,'$ORIGIN/gpu' -Wl,-rpath,"$PWD/out/gpu" -rdynamic)
 runtime=(src/runtime*.c)
-# Title profiles (ADR-0016): per-title knowledge, layer L6; the runtime does not depend on them.
-titles=(src/profiles/*.c)
 # Third-party decoders: compiled once, without this project's -Werror policy.
 atrac9=(third_party/LibAtrac9/C/src/*.c)
 if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/libatrac9.a -name '*.c') ]]; then
@@ -81,13 +90,15 @@ if [[ ! -f out/libatrac9.a || -n $(find third_party/LibAtrac9/C/src -newer out/l
     for source in "${atrac9[@]}"; do "$CC" -std=c99 -O2 -g -w -c "$source" -o "out/atrac9/$(basename "${source%.c}").o"; done
     ar rcs out/libatrac9.a out/atrac9/*.o
 fi
+# Title profiles (ADR-0016): per-title knowledge, layer L6; the runtime does not depend on them.
+titles=(src/profiles/*.c)
 # sotc: isa_emulate runs inside guest code, so no XMM/YMM (docs/10; the SSE4a operands arrive spilled).
 "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -mgeneral-regs-only -c src/isa_emulate.c -o out/isa_emulate.o
 isa=(src/cpu_check.c src/isa_rewrite.c out/isa_emulate.o)
 "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -no-pie "${includes[@]}" -I. -Isrc src/probe.c "${runtime[@]}" "${titles[@]}" "${isa[@]}" src/vulkan_smoke.c out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/bb-probe
 echo "Built $PWD/out/bb-probe"
-# GPU check for run.sh (live_resolution=auto) and the launcher's gamepad list (--gamepads).
-"$CC" -std=c11 -O2 -Wall -Wextra -Werror "${includes[@]}" tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
+# GPU check for run.sh (live_resolution=auto): links only the Vulkan loader.
+"$CC" -std=c11 -O2 -Wall -Wextra -Werror tools/gpu_capabilities.c "${libraries[@]}" -o out/bb-gpu-capabilities
 if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread "${includes[@]}" -I. -Isrc tests/test_pad.c "${libraries[@]}" -o out/pad-test
     out/pad-test
@@ -97,30 +108,6 @@ if [[ ${1:-} == --test ]]; then
     out/file-mods-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
     out/sema-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_eventflag.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/eventflag-test
-    out/eventflag-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_kernel_ext.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/kernel-ext-test
-    out/kernel-ext-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_services_ext.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/services-ext-test
-    out/services-ext-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_pngenc.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/pngenc-test
-    out/pngenc-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_ngs2.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/ngs2-test
-    out/ngs2-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_savedata_backup.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/savedata-backup-test
-    out/savedata-backup-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_title_profile.c "${runtime[@]}" "${titles[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/title-profile-test
-    out/title-profile-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_cpu_check.c src/cpu_check.c -o out/cpu-check-test
-    out/cpu-check-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_emulate.c src/cpu_check.c out/isa_emulate.o -o out/isa-emulate-test
-    out/isa-emulate-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_rewrite.c src/isa_rewrite.c src/cpu_check.c out/isa_emulate.o -o out/isa-rewrite-test
-    out/isa-rewrite-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_fiber.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/fiber-test
-    out/fiber-test
-    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/online-test
-    out/online-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
 fi

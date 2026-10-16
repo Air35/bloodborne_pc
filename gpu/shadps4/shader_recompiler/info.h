@@ -43,24 +43,8 @@ struct InfoPersistent {
     ImageResourceList images;
     SamplerResourceList samplers;
     FMaskResourceList fmasks;
+    SharpTableList sharp_tables;
 
-    struct UserDataMask {
-        void Set(IR::ScalarReg reg) noexcept {
-            mask |= 1 << static_cast<u32>(reg);
-        }
-
-        u32 Index(IR::ScalarReg reg) const noexcept {
-            const u32 reg_mask = (1 << static_cast<u32>(reg)) - 1;
-            return std::popcount(mask & reg_mask);
-        }
-
-        u32 NumRegs() const noexcept {
-            return std::popcount(mask);
-        }
-
-        u32 mask;
-    };
-    UserDataMask ud_mask{};
     u32 fetch_shader_sgpr_base{};
     u32 shared_memory_scratch_size{};
 
@@ -133,13 +117,11 @@ struct Info : InfoPersistent {
     bool has_discard{};
     bool has_image_gather{};
     bool has_image_query{};
-    bool has_readconst{};
+    bool has_flatbuf{};
     bool uses_buffer_atomic_float_min_max{};
     bool uses_image_atomic_float_min_max{};
     bool uses_lane_id{};
     bool uses_shader_clock{};
-    /// bbport BB_LAYER_MEMORY: some guest buffer goes through the page table (IsPagedBuffer).
-    bool uses_paged_buffers{};
     bool uses_group_quad{};
     bool uses_group_shuffle{};
     bool uses_group_ballot{};
@@ -161,82 +143,30 @@ struct Info : InfoPersistent {
         : InfoPersistent(stage_, l_stage_, params.hash), pgm_base{params.Base()},
           user_data{params.user_data} {}
 
-    /// bbport: user data of this stage as a draw saw it. The GPU command thread refreshes
-    /// user_data/flattened_ud_buf for every draw it decodes, while the draw recording thread
-    /// (vk_draw_pipe.h) may still work on an earlier draw: that thread installs snapshots here.
-    struct UdSnapshot {
-        const Info* info;
-        const u32* user_data;
-        u32 user_data_size;
-        const u32* flat;
-        u32 flat_size;
-        VAddr pgm_base;
-    };
-    static constexpr u32 MaxUdSnapshots = 6;
-    static inline thread_local UdSnapshot ud_snapshots[MaxUdSnapshots];
-    static inline thread_local u32 num_ud_snapshots = 0;
-
-    const UdSnapshot* Snapshot() const noexcept {
-        for (u32 i = 0; i < num_ud_snapshots; ++i) {
-            if (ud_snapshots[i].info == this) {
-                return &ud_snapshots[i];
-            }
-        }
-        return nullptr;
-    }
-    std::span<const u32> UserData() const noexcept {
-        if (const auto* snapshot = Snapshot()) [[unlikely]] {
-            return {snapshot->user_data, snapshot->user_data_size};
-        }
-        return user_data;
-    }
-    std::span<const u32> FlatUserData() const noexcept {
-        if (const auto* snapshot = Snapshot()) [[unlikely]] {
-            return {snapshot->flat, snapshot->flat_size};
-        }
-        return flattened_ud_buf;
-    }
-
-    VAddr ProgramBase() const noexcept {
-        if (const auto* snapshot = Snapshot()) [[unlikely]] {
-            return snapshot->pgm_base;
-        }
-        return pgm_base;
-    }
-
     template <typename T>
     inline T ReadUdSharp(u32 sharp_idx) const noexcept {
-        return *reinterpret_cast<const T*>(&FlatUserData()[sharp_idx]);
+        return *reinterpret_cast<const T*>(&flattened_ud_buf[sharp_idx]);
     }
 
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
         T data;
-        const auto ud = UserData();
-        const u32* base = ud.data();
+        const u32* base = user_data.data();
         if (ptr_index != IR::NumScalarRegs) {
-            std::memcpy(&base, &ud[ptr_index], sizeof(base));
+            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
     }
 
-    void PushUd(Backend::Bindings& bnd, PushData& push) const {
-        const auto ud = UserData();
-        u32 mask = ud_mask.mask;
-        while (mask) {
-            const u32 index = std::countr_zero(mask);
-            ASSERT(bnd.user_data < NUM_USER_DATA_REGS && index < NUM_USER_DATA_REGS);
-            mask &= ~(1U << index);
-            push.ud_regs[bnd.user_data++] = ud[index];
-        }
-    }
-
     void AddBindings(Backend::Bindings& bnd) const {
         bnd.buffer += buffers.size();
         bnd.unified += buffers.size() + images.size() + samplers.size();
-        bnd.user_data += ud_mask.NumRegs();
+        for (const auto& image : images) {
+            // Descriptor arrays take array_size + 1 bindings
+            bnd.unified += image.array_size;
+        }
     }
 
     void RefreshFlatBuf() {
@@ -244,8 +174,24 @@ struct Info : InfoPersistent {
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            srt_info.walker_func(user_data.data(), flattened_ud_buf.data(), &SrtCopyWindow,
+                                 GetSrtWalkerContext());
         }
+        if (!sharp_tables.empty()) {
+            RefreshSharpTables();
+        }
+    }
+
+    /// Copies every SharpTable from guest memory into the flat buffer (zeros if unmapped)
+    void RefreshSharpTables();
+
+    /// Flat buffer dwords that hold sharp tables rather than SRT walker output
+    u32 SharpTableDwords() const noexcept {
+        u32 dwords = 0;
+        for (const auto& table : sharp_tables) {
+            dwords += table.NumDwords();
+        }
+        return dwords;
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
@@ -262,5 +208,8 @@ struct Info : InfoPersistent {
     bool Deserialize(Serialization::Archive& ar);
 };
 DECLARE_ENUM_FLAG_OPERATORS(Info::ReadConstType);
+
+/// Per-game dynamic_tsharp_array_size, clamped to 64 elements (0 = off)
+u32 DynamicTsharpArraySize();
 
 } // namespace Shader

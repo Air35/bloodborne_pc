@@ -85,7 +85,7 @@ public:
         Coalesce(at, m);
     }
 
-    /// bbport: removes a range from the set (parts of intervals outside it stay).
+    /// Removes a range from the interval set, trimming intervals that partially overlap it.
     void Subtract(u64 start, u64 end) {
         if (start >= end) [[unlikely]] {
             return;
@@ -103,7 +103,8 @@ public:
         if (first->start < start) {
             out[m++] = first->SubRange(first->start, start);
         }
-        if (const auto prev = std::prev(last); prev->end > end) {
+        const auto prev = std::prev(last);
+        if (prev->end > end) {
             out[m++] = prev->SubRange(end, prev->end);
         }
         Splice(first, last, out, m);

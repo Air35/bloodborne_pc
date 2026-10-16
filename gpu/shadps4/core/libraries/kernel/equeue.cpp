@@ -1,14 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include <atomic>
 #include <thread>
-#include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <mutex>
-#include <string>
-#include <vector>
 #include <magic_enum/magic_enum.hpp>
 
 #include "common/assert.h"
@@ -201,7 +196,17 @@ int EqueueInternal::WaitForEvents(OrbisKernelEvent* ev, int num, const OrbisKern
     if (micros == 0) {
         // Wait indefinitely for events
         std::unique_lock lock{m_mutex};
-        m_cond.wait(lock, predicate);
+        // sotc: an indefinite wait reports itself after 5 s (hang diagnosis).
+        if (!m_cond.wait_for(lock, std::chrono::seconds(5), predicate)) {
+            std::fprintf(stderr, "SOTC equeue '%s' waited 5s; registered events:", m_name.c_str());
+            for (const auto& event : m_events) {
+                std::fprintf(stderr, " [ident %#llx filter %d triggered %d]",
+                             static_cast<unsigned long long>(event.event.ident), event.event.filter,
+                             event.IsTriggered() ? 1 : 0);
+            }
+            std::fprintf(stderr, "\n");
+            m_cond.wait(lock, predicate);
+        }
     } else {
         // Wait up until the timeout value
         std::unique_lock lock{m_mutex};
@@ -464,33 +469,6 @@ int PS4_SYSV_ABI sceKernelDeleteEqueue(OrbisKernelEqueue eq) {
     return ORBIS_OK;
 }
 
-namespace {
-// bbport (frame stats): time the game spends waiting in each event queue, and the events it got.
-struct EqueueWaitStat {
-    std::string name;
-    u64 waits = 0, ns = 0, events = 0;
-};
-std::mutex equeue_wait_mutex;
-std::vector<EqueueWaitStat> equeue_wait_stats;
-} // namespace
-
-void ReportEqueueWaits(double frames) {
-    std::scoped_lock lk{equeue_wait_mutex};
-    if (equeue_wait_stats.empty() || frames <= 0) {
-        return;
-    }
-    std::sort(equeue_wait_stats.begin(), equeue_wait_stats.end(),
-              [](const auto& a, const auto& b) { return a.ns > b.ns; });
-    std::printf("Guest event waits per frame:");
-    for (std::size_t i = 0; i < std::min<std::size_t>(equeue_wait_stats.size(), 6); ++i) {
-        const auto& s = equeue_wait_stats[i];
-        std::printf("%s %s %.1f waits %.2f ms %.1f events", i ? ";" : "", s.name.c_str(),
-                    s.waits / frames, s.ns / (frames * 1e6), s.events / frames);
-    }
-    std::printf("\n");
-    equeue_wait_stats.clear();
-}
-
 int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,
                                      OrbisKernelUseconds* timo) {
     HLE_TRACE;
@@ -512,23 +490,7 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    const auto wait_start = std::chrono::steady_clock::now();
     *out = equeue->WaitForEvents(ev, num, timo);
-    {
-        const u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                std::chrono::steady_clock::now() - wait_start)
-                                .count());
-        std::scoped_lock lk{equeue_wait_mutex};
-        auto it = std::find_if(equeue_wait_stats.begin(), equeue_wait_stats.end(),
-                               [&](const auto& s) { return s.name == equeue->GetName(); });
-        if (it == equeue_wait_stats.end()) {
-            it = equeue_wait_stats.insert(equeue_wait_stats.end(),
-                                          EqueueWaitStat{std::string(equeue->GetName())});
-        }
-        ++it->waits;
-        it->ns += ns;
-        it->events += u64(*out);
-    }
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;
@@ -665,7 +627,16 @@ int PS4_SYSV_ABI sceKernelTriggerUserEvent(OrbisKernelEqueue eq, int id, void* u
         return ORBIS_KERNEL_ERROR_EBADF;
     }
 
-    if (!kqueues[eq]->TriggerEvent(id, OrbisKernelEvent::Filter::User, udata)) {
+    const bool found = kqueues[eq]->TriggerEvent(id, OrbisKernelEvent::Filter::User, udata);
+    // sotc: SOTC_FLIP_TRACE=1 logs the frame handshake (user events, flips).
+    static const bool trace = std::getenv("SOTC_FLIP_TRACE") != nullptr;
+    if (trace) {
+        std::fprintf(stderr, "FLIPTRACE %lld user event '%s' id %d udata %p%s\n",
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count()),
+                     std::string(kqueues[eq]->GetName()).c_str(), id, udata, found ? "" : " NOT FOUND");
+    }
+    if (!found) {
         return ORBIS_KERNEL_ERROR_ENOENT;
     }
     return ORBIS_OK;

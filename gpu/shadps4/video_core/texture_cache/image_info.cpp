@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
+#include <cstring>
+#include <memory>
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
@@ -48,6 +51,9 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
     pitch = attrib.tiling_mode == TilingMode::Linear ? size.width : (size.width + 127) & (~127);
     num_bits = attrib.pixel_format != VideoOutFormat::A16R16G16B16Float ? 32 : 64;
     ASSERT(num_bits == 32);
+    // sotc: on a PS4 Pro the tiled display buffers use the alternate tiling, as the color
+    // buffers the game renders into them do (else the two are an unresolvable overlap).
+    alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && props.is_tiled;
 
     guest_address = cpu_address;
     UpdateSize();
@@ -116,6 +122,28 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
+    // sotc: every texture of every draw describes its image again, mip layout included (a few
+    // thousand per frame in SotC's open world), mostly the same few hundred T#s. The result only
+    // depends on the T# and is_depth: answered from a small per-thread cache.
+    struct Entry {
+        std::array<u64, 4> sharp;
+        bool is_depth;
+        bool valid;
+        ImageInfo info;
+    };
+    static constexpr size_t NumEntries = 512;
+    static thread_local std::unique_ptr<std::array<Entry, NumEntries>> cache =
+        std::make_unique<std::array<Entry, NumEntries>>();
+    std::array<u64, 4> sharp;
+    std::memcpy(sharp.data(), &image, sizeof(sharp));
+    const u64 hash = (sharp[0] * 0x9E3779B97F4A7C15ULL) ^ (sharp[1] * 0xC2B2AE3D27D4EB4FULL) ^
+                     (sharp[2] * 0x165667B19E3779F9ULL) ^ (sharp[3] * 0x27D4EB2F165667C5ULL) ^
+                     u64{desc.is_depth};
+    Entry& entry = (*cache)[(hash ^ (hash >> 29)) % NumEntries];
+    if (entry.valid && entry.is_depth == desc.is_depth && entry.sharp == sharp) {
+        *this = entry.info;
+        return;
+    }
     tile_mode = image.GetTileMode();
     array_mode = AmdGpu::GetArrayMode(tile_mode);
     pixel_format = LiverpoolToVK::SurfaceFormat(image.GetDataFmt(), image.GetNumberFmt());
@@ -142,6 +170,10 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    entry.sharp = sharp;
+    entry.is_depth = desc.is_depth;
+    entry.info = *this;
+    entry.valid = true;
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {
@@ -151,8 +183,12 @@ bool ImageInfo::IsCompatible(const ImageInfo& info) const {
 }
 
 void ImageInfo::UpdateSize() {
+    if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
+        UNREACHABLE_MSG("Unhandled array mode: ArrayLinearGeneral");
+    }
+    const u32 thickness = AmdGpu::GetMicroTileThickness(array_mode);
+    const bool macro = AmdGpu::IsMacroTiled(array_mode);
     guest_size = 0;
-    micro_tiled_mips = 0;
     for (s32 mip = 0; mip < resources.levels; ++mip) {
         u32 mip_w = pitch >> mip;
         u32 mip_h = size.height >> mip;
@@ -171,40 +207,25 @@ void ImageInfo::UpdateSize() {
         }
 
         auto& mip_info = mips_layout[mip];
-        u32 mip_thickness = 1;
         if (array_mode == AmdGpu::ArrayMode::ArrayLinearAligned) {
             std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
                 ImageSizeLinearAligned(mip_w, mip_h, num_bits, num_samples);
-        } else if (array_mode == AmdGpu::ArrayMode::ArrayLinearGeneral) {
-            UNREACHABLE_MSG("Unhandled array mode: ArrayLinearGeneral");
         } else {
-            // Every tiled array mode (1D/2D/3D, thin/thick/xthick, PRT or not) groups
-            // GetMicroTileThickness() consecutive depth slices per tile; the slice count (depth x
-            // layers) is padded to it once, below. bbport (upstream #5196): a mip smaller than a
-            // macro tile is stored 1D (micro tiled, at most 4 thick), as the hardware does.
-            const u32 thickness = AmdGpu::GetMicroTileThickness(array_mode);
-            const bool macro = AmdGpu::IsMacroTiled(array_mode);
-            if (macro &&
-                IsMacroTiledMip(mip_w, mip_h, num_bits, num_samples, tile_mode, mip, alt_tile)) {
-                mip_thickness = thickness;
-                std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
-                    ImageSizeMacroTiled(mip_w, mip_h, num_bits, num_samples, tile_mode, alt_tile);
+            mip_d += (-mip_d) & (thickness - 1);
+            if (macro) {
+                ASSERT(!props.is_block);
+                std::tie(mip_info.pitch, mip_info.height, mip_info.size) = ImageSizeMacroTiled(
+                    mip_w, mip_h, thickness, num_bits, num_samples, tile_mode, mip, alt_tile);
             } else {
-                mip_thickness = std::min(thickness, 4u);
                 std::tie(mip_info.pitch, mip_info.height, mip_info.size) =
-                    ImageSizeMicroTiled(mip_w, mip_h, mip_thickness, num_bits, num_samples);
-                if (macro) {
-                    micro_tiled_mips |= 1u << mip;
-                }
+                    ImageSizeMicroTiled(mip_w, mip_h, thickness, num_bits, num_samples);
             }
         }
         if (props.is_block) {
             mip_info.pitch = std::max(mip_info.pitch * 4, 32u);
             mip_info.height = std::max(mip_info.height * 4, 32u);
         }
-        u32 num_slices = mip_d * resources.layers;
-        num_slices += (-num_slices) & (mip_thickness - 1);
-        mip_info.size *= num_slices;
+        mip_info.size *= mip_d * resources.layers;
         mip_info.offset = guest_size;
         guest_size += mip_info.size;
     }

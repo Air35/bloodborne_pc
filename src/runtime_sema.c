@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef _WIN32
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
@@ -35,9 +34,16 @@ static Sema *find(uint32_t id) {
 static void host_check(int e) {
     if (e) { fprintf(stderr,"STOP: semaphore host error %d\n",e); exit(21); }
 }
+/* Waits use this clock for their deadlines. winpthreads condition variables accept only
+ * CLOCK_REALTIME (pthread_condattr_setclock(CLOCK_MONOTONIC) fails with EINVAL). */
+#ifdef _WIN32
+#define WAIT_CLOCK CLOCK_REALTIME
+#else
+#define WAIT_CLOCK CLOCK_MONOTONIC
+#endif
 static uint64_t now_ns(void) {
     struct timespec t;
-    if (clock_gettime(CLOCK_MONOTONIC,&t)) { perror("clock_gettime"); exit(1); }
+    if (clock_gettime(WAIT_CLOCK,&t)) { perror("clock_gettime"); exit(1); }
     return (uint64_t)t.tv_sec*1000000000+(uint64_t)t.tv_nsec;
 }
 static ABI int32_t sem_create(uint32_t *out,const char *name,uint32_t attr,
@@ -70,13 +76,12 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
         Waiter w={.need=need};
         pthread_condattr_t attr;
         host_check(pthread_condattr_init(&attr));
-        host_check(pthread_condattr_setclock(&attr,CLOCK_MONOTONIC));
+        host_check(pthread_condattr_setclock(&attr,WAIT_CLOCK));
         host_check(pthread_cond_init(&w.event,&attr));
         host_check(pthread_condattr_destroy(&attr));
         Waiter **tail=&s->first;
         while (*tail) tail=&(*tail)->next;
         *tail=&w; ++s->active;
-        const uint64_t wait_start=runtime_wait_clock();
         uint64_t deadline=timeout ? now_ns()+(uint64_t)*timeout*1000 : 0;
         struct timespec end={.tv_sec=(time_t)(deadline/1000000000),.tv_nsec=(long)(deadline%1000000000)};
         while (!w.done) {
@@ -87,7 +92,6 @@ static int32_t wait_count(uint32_t id,int32_t need,uint32_t *timeout,int block) 
                 *p=w.next; w.result=ERR(60); w.done=1; ++timed_out;
             } else if (e!=ETIMEDOUT) host_check(e);
         }
-        runtime_wait_note(2,runtime_wait_clock()-wait_start);
         result=w.result;
         if (!result) ++acquired;
         if (timeout) {
@@ -164,12 +168,12 @@ unsigned runtime_sema_waiters(uint32_t id) {
     return n;
 }
 uintptr_t runtime_sema_resolve(const char *name) {
-    if (!strcmp(name,"188x57JYp0g#libkernel")) return (uintptr_t)sem_create;
-    if (!strcmp(name,"Zxa0VhQVTsk#libkernel")) return (uintptr_t)sem_wait;
-    if (!strcmp(name,"4czppHBiriw#libkernel")) return (uintptr_t)sem_signal;
-    if (!strcmp(name,"12wOHk8ywb0#libkernel")) return (uintptr_t)sem_poll;
-    if (!strcmp(name,"4DM06U2BNEY#libkernel")) return (uintptr_t)sem_cancel;
-    if (!strcmp(name,"R1Jvn8bSCW8#libkernel")) return (uintptr_t)sem_delete;
+    if (!strcmp(name,"188x57JYp0g")) return (uintptr_t)sem_create;
+    if (!strcmp(name,"Zxa0VhQVTsk")) return (uintptr_t)sem_wait;
+    if (!strcmp(name,"4czppHBiriw")) return (uintptr_t)sem_signal;
+    if (!strcmp(name,"12wOHk8ywb0")) return (uintptr_t)sem_poll;
+    if (!strcmp(name,"4DM06U2BNEY")) return (uintptr_t)sem_cancel;
+    if (!strcmp(name,"R1Jvn8bSCW8")) return (uintptr_t)sem_delete;
     return 0;
 }
 void runtime_sema_report(void) {
@@ -178,8 +182,4 @@ void runtime_sema_report(void) {
            created,deleted,acquired,signaled,timed_out);
     pthread_mutex_unlock(&lock);
 }
-#else
-uintptr_t runtime_sema_resolve(const char *name) { (void)name; return 0; }
-void runtime_sema_report(void) { puts("Runtime: Windows semaphore backend not implemented"); }
-unsigned runtime_sema_waiters(uint32_t id) { (void)id; return 0; }
-#endif
+

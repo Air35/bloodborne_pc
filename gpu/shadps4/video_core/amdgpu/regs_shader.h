@@ -240,9 +240,13 @@ static constexpr const BinaryInfo& SearchBinaryInfo(const u32* code) {
     UNREACHABLE_MSG("Shader binary info not found.");
 }
 
-static constexpr Shader::ShaderParams GetParams(const auto& sh) {
+/// sotc: SearchBinaryInfo cached per code address, validated through the backing view
+/// (amdgpu/sotc_bininfo.cpp): no readback when the code shares GPU-written tracking regions.
+const BinaryInfo& SearchBinaryInfoCached(const u32* code);
+
+static Shader::ShaderParams GetParams(const auto& sh) {
     const auto* code = sh.template Address<u32*>();
-    const auto& bininfo = SearchBinaryInfo(code);
+    const auto& bininfo = SearchBinaryInfoCached(code);
     return {
         .user_data = sh.user_data,
         .code = std::span{code, bininfo.length / sizeof(u32)},

@@ -2,7 +2,6 @@
 // bbgpu_handle_fault() first; registered handlers run in priority order.
 #pragma once
 #include <compare>
-#include <cstdint>
 #include <set>
 #include <signal.h>
 #include "common/singleton.h"
@@ -37,11 +36,7 @@ private:
     struct HandlerEntry {
         T handler;
         u32 priority;
-        // bbport: equal priorities are kept (ordered by handler), not dropped by the set.
-        std::strong_ordering operator<=>(const HandlerEntry& right) const {
-            if (const auto order = priority <=> right.priority; order != 0) return order;
-            return reinterpret_cast<std::uintptr_t>(handler) <=> reinterpret_cast<std::uintptr_t>(right.handler);
-        }
+        std::strong_ordering operator<=>(const HandlerEntry& right) const { return priority <=> right.priority; }
     };
     std::set<HandlerEntry<AccessViolationHandler>> access_violation_handlers;
     std::set<HandlerEntry<IllegalInstructionHandler>> illegal_instruction_handlers;

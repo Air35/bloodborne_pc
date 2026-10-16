@@ -24,7 +24,7 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_SUBREV_F32:
         return V_SUBREV_F32(inst);
     case Opcode::V_MAC_LEGACY_F32:
-        return V_MAC_F32(inst);
+        return V_MAC_LEGACY_F32(inst);
     case Opcode::V_MUL_LEGACY_F32:
         return V_MUL_LEGACY_F32(inst);
     case Opcode::V_MUL_F32:
@@ -153,6 +153,8 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
         return V_CVT_F32_UBYTE(2, inst);
     case Opcode::V_CVT_F32_UBYTE3:
         return V_CVT_F32_UBYTE(3, inst);
+    case Opcode::V_TRUNC_F64:
+        return V_TRUNC_F64(inst);
     case Opcode::V_FLOOR_F64:
         return V_FLOOR_F64(inst);
     case Opcode::V_FRACT_F32:
@@ -239,15 +241,15 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_CMP_U_F32:
         return V_CMP_F32(ConditionOp::U, false, inst);
     case Opcode::V_CMP_NGE_F32:
-        return V_CMP_F32(ConditionOp::LT, false, inst);
+        return V_CMP_F32(ConditionOp::LT, false, inst, true);
     case Opcode::V_CMP_NGT_F32:
-        return V_CMP_F32(ConditionOp::LE, false, inst);
+        return V_CMP_F32(ConditionOp::LE, false, inst, true);
     case Opcode::V_CMP_NLE_F32:
-        return V_CMP_F32(ConditionOp::GT, false, inst);
+        return V_CMP_F32(ConditionOp::GT, false, inst, true);
     case Opcode::V_CMP_NEQ_F32:
-        return V_CMP_F32(ConditionOp::LG, false, inst);
+        return V_CMP_F32(ConditionOp::LG, false, inst, true);
     case Opcode::V_CMP_NLT_F32:
-        return V_CMP_F32(ConditionOp::GE, false, inst);
+        return V_CMP_F32(ConditionOp::GE, false, inst, true);
 
         //     V_CMPX_{OP16}_F32
     case Opcode::V_CMPX_F_F32:
@@ -265,17 +267,17 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_CMPX_GE_F32:
         return V_CMP_F32(ConditionOp::GE, true, inst);
     case Opcode::V_CMPX_NGE_F32:
-        return V_CMP_F32(ConditionOp::LT, true, inst);
+        return V_CMP_F32(ConditionOp::LT, true, inst, true);
     case Opcode::V_CMPX_NLG_F32:
-        return V_CMP_F32(ConditionOp::EQ, true, inst);
+        return V_CMP_F32(ConditionOp::EQ, true, inst, true);
     case Opcode::V_CMPX_NGT_F32:
-        return V_CMP_F32(ConditionOp::LE, true, inst);
+        return V_CMP_F32(ConditionOp::LE, true, inst, true);
     case Opcode::V_CMPX_NLE_F32:
-        return V_CMP_F32(ConditionOp::GT, true, inst);
+        return V_CMP_F32(ConditionOp::GT, true, inst, true);
     case Opcode::V_CMPX_NEQ_F32:
-        return V_CMP_F32(ConditionOp::LG, true, inst);
+        return V_CMP_F32(ConditionOp::LG, true, inst, true);
     case Opcode::V_CMPX_NLT_F32:
-        return V_CMP_F32(ConditionOp::GE, true, inst);
+        return V_CMP_F32(ConditionOp::GE, true, inst, true);
     case Opcode::V_CMPX_TRU_F32:
         return V_CMP_F32(ConditionOp::TRU, true, inst);
 
@@ -297,15 +299,15 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
     case Opcode::V_CMP_U_F64:
         return V_CMP_F64(ConditionOp::U, false, inst);
     case Opcode::V_CMP_NGE_F64:
-        return V_CMP_F64(ConditionOp::LT, false, inst);
+        return V_CMP_F64(ConditionOp::LT, false, inst, true);
     case Opcode::V_CMP_NGT_F64:
-        return V_CMP_F64(ConditionOp::LE, false, inst);
+        return V_CMP_F64(ConditionOp::LE, false, inst, true);
     case Opcode::V_CMP_NLE_F64:
-        return V_CMP_F64(ConditionOp::GT, false, inst);
+        return V_CMP_F64(ConditionOp::GT, false, inst, true);
     case Opcode::V_CMP_NEQ_F64:
-        return V_CMP_F64(ConditionOp::LG, false, inst);
+        return V_CMP_F64(ConditionOp::LG, false, inst, true);
     case Opcode::V_CMP_NLT_F64:
-        return V_CMP_F64(ConditionOp::GE, false, inst);
+        return V_CMP_F64(ConditionOp::GE, false, inst, true);
 
         //     V_CMP_{OP8}_I32
     case Opcode::V_CMP_LT_I32:
@@ -414,7 +416,7 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
 
         // VOP3a
     case Opcode::V_MAD_LEGACY_F32:
-        return V_MAD_F32(inst);
+        return V_MAD_LEGACY_F32(inst);
     case Opcode::V_MAD_F32:
         return V_MAD_F32(inst);
     case Opcode::V_MAD_I32_I24:
@@ -479,6 +481,8 @@ void Translator::EmitVectorAlu(const GcnInst& inst) {
         return V_ALIGNBYTE_B32(inst);
     case Opcode::V_MUL_F64:
         return V_MUL_F64(inst);
+    case Opcode::V_MIN_F64:
+        return V_MIN_F64(inst);
     case Opcode::V_MAX_F64:
         return V_MAX_F64(inst);
     case Opcode::V_MUL_LO_U32:
@@ -603,17 +607,27 @@ void Translator::V_MUL_F32(const GcnInst& inst) {
     SetDst(inst.dst[0], ir.FPMul(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1])));
 }
 
-void Translator::V_MUL_LEGACY_F32(const GcnInst& inst) {
-    // GCN V_MUL_LEGACY_F32: if either source is zero, the result is +0.0
-    // regardless of the other operand (even if NaN or Inf).
-    // Standard IEEE multiply would produce NaN for 0 * Inf.
-    const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 src1{GetSrc<IR::F32>(inst.src[1])};
+IR::F32 Translator::LegacyMul(const IR::F32& a, const IR::F32& b) {
+    // GCN legacy multiplies (DX9 rules): if either source is zero, the product is +0.0
+    // regardless of the other operand (even if NaN or Inf). IEEE would give NaN for 0 * Inf.
     const IR::F32 zero{ir.Imm32(0.0f)};
-    const IR::U1 src0_zero{ir.FPEqual(src0, zero)};
-    const IR::U1 src1_zero{ir.FPEqual(src1, zero)};
-    const IR::U1 either_zero{ir.LogicalOr(src0_zero, src1_zero)};
-    SetDst(inst.dst[0], IR::F32{ir.Select(either_zero, zero, ir.FPMul(src0, src1))});
+    const IR::U1 either_zero{ir.LogicalOr(ir.FPEqual(a, zero), ir.FPEqual(b, zero))};
+    return IR::F32{ir.Select(either_zero, zero, ir.FPMul(a, b))};
+}
+
+void Translator::V_MUL_LEGACY_F32(const GcnInst& inst) {
+    SetDst(inst.dst[0],
+           LegacyMul(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1])));
+}
+
+void Translator::V_MAC_LEGACY_F32(const GcnInst& inst) {
+    const auto product = LegacyMul(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1]));
+    SetDst(inst.dst[0], ir.FPAdd(product, GetSrc<IR::F32>(inst.dst[0])));
+}
+
+void Translator::V_MAD_LEGACY_F32(const GcnInst& inst) {
+    const auto product = LegacyMul(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1]));
+    SetDst(inst.dst[0], ir.FPAdd(product, GetSrc<IR::F32>(inst.src[2])));
 }
 
 void Translator::V_MUL_I32_I24(const GcnInst& inst, bool is_signed) {
@@ -997,6 +1011,11 @@ void Translator::V_CVT_F32_UBYTE(u32 index, const GcnInst& inst) {
     SetDst(inst.dst[0], ir.ConvertUToF(32, 32, byte));
 }
 
+void Translator::V_TRUNC_F64(const GcnInst& inst) {
+    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
+    SetDst64(inst.dst[0], ir.FPTrunc(src0));
+}
+
 void Translator::V_FLOOR_F64(const GcnInst& inst) {
     const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
     SetDst64(inst.dst[0], ir.FPFloor(src0));
@@ -1172,7 +1191,12 @@ void Translator::V_MOVRELSD_B32(const GcnInst& inst) {
 
 // VOPC
 
-void Translator::V_CMP_F32(ConditionOp op, bool set_exec, const GcnInst& inst) {
+void Translator::V_CMP_F32(ConditionOp op, bool set_exec, const GcnInst& inst,
+                            bool unordered) {
+    // V_CMP_N* (NGE, NLT, NEQ...) negate the comparison, so they are true when an operand is
+    // NaN; translating them to the ordered opposite (NGE -> LT) made them false instead.
+    // Games use NaN as an "invalid" marker (SotC's fog history) and test it this way.
+    const bool ordered = !unordered;
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
     const IR::F32 src1{GetSrc<IR::F32>(inst.src[1])};
     const IR::U1 result = [&] {
@@ -1180,17 +1204,17 @@ void Translator::V_CMP_F32(ConditionOp op, bool set_exec, const GcnInst& inst) {
         case ConditionOp::F:
             return ir.Imm1(false);
         case ConditionOp::EQ:
-            return ir.FPEqual(src0, src1);
+            return ir.FPEqual(src0, src1, ordered);
         case ConditionOp::LG:
-            return ir.FPNotEqual(src0, src1);
+            return ir.FPNotEqual(src0, src1, ordered);
         case ConditionOp::GT:
-            return ir.FPGreaterThan(src0, src1);
+            return ir.FPGreaterThan(src0, src1, ordered);
         case ConditionOp::LT:
-            return ir.FPLessThan(src0, src1);
+            return ir.FPLessThan(src0, src1, ordered);
         case ConditionOp::LE:
-            return ir.FPLessThanEqual(src0, src1);
+            return ir.FPLessThanEqual(src0, src1, ordered);
         case ConditionOp::GE:
-            return ir.FPGreaterThanEqual(src0, src1);
+            return ir.FPGreaterThanEqual(src0, src1, ordered);
         case ConditionOp::U:
             return ir.LogicalOr(ir.FPIsNan(src0), ir.FPIsNan(src1));
         default:
@@ -1208,7 +1232,12 @@ void Translator::V_CMP_F32(ConditionOp op, bool set_exec, const GcnInst& inst) {
     SetDst64(inst.dst[1], ir.Ballot(result));
 }
 
-void Translator::V_CMP_F64(ConditionOp op, bool set_exec, const GcnInst& inst) {
+void Translator::V_CMP_F64(ConditionOp op, bool set_exec, const GcnInst& inst,
+                            bool unordered) {
+    // V_CMP_N* (NGE, NLT, NEQ...) negate the comparison, so they are true when an operand is
+    // NaN; translating them to the ordered opposite (NGE -> LT) made them false instead.
+    // Games use NaN as an "invalid" marker (SotC's fog history) and test it this way.
+    const bool ordered = !unordered;
     const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
     const IR::F64 src1{GetSrc64<IR::F64>(inst.src[1])};
     const IR::U1 result = [&] {
@@ -1216,17 +1245,17 @@ void Translator::V_CMP_F64(ConditionOp op, bool set_exec, const GcnInst& inst) {
         case ConditionOp::F:
             return ir.Imm1(false);
         case ConditionOp::EQ:
-            return ir.FPEqual(src0, src1);
+            return ir.FPEqual(src0, src1, ordered);
         case ConditionOp::LG:
-            return ir.FPNotEqual(src0, src1);
+            return ir.FPNotEqual(src0, src1, ordered);
         case ConditionOp::GT:
-            return ir.FPGreaterThan(src0, src1);
+            return ir.FPGreaterThan(src0, src1, ordered);
         case ConditionOp::LT:
-            return ir.FPLessThan(src0, src1);
+            return ir.FPLessThan(src0, src1, ordered);
         case ConditionOp::LE:
-            return ir.FPLessThanEqual(src0, src1);
+            return ir.FPLessThanEqual(src0, src1, ordered);
         case ConditionOp::GE:
-            return ir.FPGreaterThanEqual(src0, src1);
+            return ir.FPGreaterThanEqual(src0, src1, ordered);
         case ConditionOp::U:
             return ir.LogicalOr(ir.FPIsNan(src0), ir.FPIsNan(src1));
         default:
@@ -1357,39 +1386,12 @@ void Translator::V_MAD_U32_U24(const GcnInst& inst) {
     V_MAD_I32_I24(inst, false);
 }
 
-IR::F32 Translator::SelectCubeResult(const IR::F32& x, const IR::F32& y, const IR::F32& z,
-                                     const IR::F32& x_res, const IR::F32& y_res,
-                                     const IR::F32& z_res) {
-    const auto abs_x = ir.FPAbs(x);
-    const auto abs_y = ir.FPAbs(y);
-    const auto abs_z = ir.FPAbs(z);
-
-    const auto z_face_cond{
-        ir.LogicalAnd(ir.FPGreaterThanEqual(abs_z, abs_x), ir.FPGreaterThanEqual(abs_z, abs_y))};
-    const auto y_face_cond{ir.FPGreaterThanEqual(abs_y, abs_x)};
-
-    return IR::F32{ir.Select(z_face_cond, z_res, ir.Select(y_face_cond, y_res, x_res))};
-}
-
 void Translator::V_CUBEID_F32(const GcnInst& inst) {
     const auto x = GetSrc<IR::F32>(inst.src[0]);
     const auto y = GetSrc<IR::F32>(inst.src[1]);
     const auto z = GetSrc<IR::F32>(inst.src[2]);
 
-    IR::F32 result;
-    if (profile.supports_native_cube_calc) {
-        result = ir.CubeFaceIndex(ir.CompositeConstruct(x, y, z));
-    } else {
-        const auto x_neg_cond{ir.FPLessThan(x, ir.Imm32(0.f))};
-        const auto y_neg_cond{ir.FPLessThan(y, ir.Imm32(0.f))};
-        const auto z_neg_cond{ir.FPLessThan(z, ir.Imm32(0.f))};
-        const IR::F32 x_face{ir.Select(x_neg_cond, ir.Imm32(1.f), ir.Imm32(0.f))};
-        const IR::F32 y_face{ir.Select(y_neg_cond, ir.Imm32(3.f), ir.Imm32(2.f))};
-        const IR::F32 z_face{ir.Select(z_neg_cond, ir.Imm32(5.f), ir.Imm32(4.f))};
-
-        result = SelectCubeResult(x, y, z, x_face, y_face, z_face);
-    }
-    SetDst(inst.dst[0], result);
+    SetDst(inst.dst[0], ir.CubeFaceIndex(x, y, z));
 }
 
 void Translator::V_CUBESC_F32(const GcnInst& inst) {
@@ -1397,14 +1399,7 @@ void Translator::V_CUBESC_F32(const GcnInst& inst) {
     const auto y = GetSrc<IR::F32>(inst.src[1]);
     const auto z = GetSrc<IR::F32>(inst.src[2]);
 
-    const auto x_neg_cond{ir.FPLessThan(x, ir.Imm32(0.f))};
-    const auto z_neg_cond{ir.FPLessThan(z, ir.Imm32(0.f))};
-    const IR::F32 x_sc{ir.Select(x_neg_cond, z, ir.FPNeg(z))};
-    const IR::F32 y_sc{x};
-    const IR::F32 z_sc{ir.Select(z_neg_cond, ir.FPNeg(x), x)};
-
-    const auto result{SelectCubeResult(x, y, z, x_sc, y_sc, z_sc)};
-    SetDst(inst.dst[0], result);
+    SetDst(inst.dst[0], ir.CubeFaceCoordS(x, y, z));
 }
 
 void Translator::V_CUBETC_F32(const GcnInst& inst) {
@@ -1412,12 +1407,7 @@ void Translator::V_CUBETC_F32(const GcnInst& inst) {
     const auto y = GetSrc<IR::F32>(inst.src[1]);
     const auto z = GetSrc<IR::F32>(inst.src[2]);
 
-    const auto y_neg_cond{ir.FPLessThan(y, ir.Imm32(0.f))};
-    const IR::F32 x_z_tc{ir.FPNeg(y)};
-    const IR::F32 y_tc{ir.Select(y_neg_cond, ir.FPNeg(z), z)};
-
-    const auto result{SelectCubeResult(x, y, z, x_z_tc, y_tc, x_z_tc)};
-    SetDst(inst.dst[0], result);
+    SetDst(inst.dst[0], ir.CubeFaceCoordT(x, y, z));
 }
 
 void Translator::V_CUBEMA_F32(const GcnInst& inst) {
@@ -1425,13 +1415,7 @@ void Translator::V_CUBEMA_F32(const GcnInst& inst) {
     const auto y = GetSrc<IR::F32>(inst.src[1]);
     const auto z = GetSrc<IR::F32>(inst.src[2]);
 
-    const auto two{ir.Imm32(2.f)};
-    const IR::F32 x_major_axis{ir.FPMul(x, two)};
-    const IR::F32 y_major_axis{ir.FPMul(y, two)};
-    const IR::F32 z_major_axis{ir.FPMul(z, two)};
-
-    const auto result{SelectCubeResult(x, y, z, x_major_axis, y_major_axis, z_major_axis)};
-    SetDst(inst.dst[0], result);
+    SetDst(inst.dst[0], ir.CubeFaceMajorAxis(x, y, z));
 }
 
 void Translator::V_BFE_U32(bool is_signed, const GcnInst& inst) {
@@ -1552,6 +1536,8 @@ void Translator::V_CVT_PK_U8_F32(const GcnInst& inst) {
     const IR::U32 src1{GetSrc(inst.src[1])};
     const IR::U32 src2{GetSrc(inst.src[2])};
 
+    // Round, clamp to [0, 255] and give 0 for NaN like GCN; the byte index is src1 & 3
+    // (V_CVT_PK_U8_F32 fixup, shadPS4 #5194).
     const IR::F32 clamped{ir.FPClamp(ir.FPRoundEven(src0), ir.Imm32(0.0f), ir.Imm32(255.0f))};
     const IR::F32 value{ir.Select(ir.FPIsNan(src0), ir.Imm32(0.0f), clamped)};
     const IR::U32 value_uint{ir.ConvertFToU(32, value)};
@@ -1582,6 +1568,7 @@ void Translator::V_ALIGNBIT_B32(const GcnInst& inst) {
     const IR::U32 src1{GetSrc(inst.src[1])};
     const IR::U32 src2{ir.BitwiseAnd(GetSrc(inst.src[2]), ir.Imm32(0x1F))};
     const IR::U32 lo{ir.ShiftRightLogical(src1, src2)};
+    // (src0 << 1) << (31 - shift): a shift by 32 is undefined (shadPS4 #5186)
     const IR::U32 hi{
         ir.ShiftLeftLogical(ir.ShiftLeftLogical(src0, ir.Imm32(1)), ir.ISub(ir.Imm32(31), src2))};
     SetDst(inst.dst[0], ir.BitwiseOr(lo, hi));
@@ -1602,6 +1589,12 @@ void Translator::V_MUL_F64(const GcnInst& inst) {
     const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
     const IR::F64 src1{GetSrc64<IR::F64>(inst.src[1])};
     SetDst64(inst.dst[0], ir.FPMul(src0, src1));
+}
+
+void Translator::V_MIN_F64(const GcnInst& inst) {
+    const IR::F64 src0{GetSrc64<IR::F64>(inst.src[0])};
+    const IR::F64 src1{GetSrc64<IR::F64>(inst.src[1])};
+    SetDst64(inst.dst[0], ir.FPMin(src0, src1));
 }
 
 void Translator::V_MAX_F64(const GcnInst& inst) {

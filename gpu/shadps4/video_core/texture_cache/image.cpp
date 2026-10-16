@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "bbport_toggles.h"
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -34,8 +33,10 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
             }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
             // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used.
-            usage |= vk::ImageUsageFlagBits::eStorage;
+            // flag is also used. The exception here is for multisample images when storage is not
+            // supported, where even with ExtendedUsage we may get only one supported sample back.
+            if (info.num_samples == 1 || instance.IsMultisampleStorageImageSupported())
+                usage |= vk::ImageUsageFlagBits::eStorage;
         }
     } else {
         // Similarly to above, we specify storage usage. This is typically not supported by
@@ -51,10 +52,10 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color1DArray:
-        return vk::ImageType::e1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
     case AmdGpu::ImageType::Color2DArray:
+    case AmdGpu::ImageType::Cube:
         return vk::ImageType::e2D;
     case AmdGpu::ImageType::Color3D:
         return vk::ImageType::e3D;
@@ -87,14 +88,12 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
 
 UniqueImage::~UniqueImage() {
     if (image) {
-        BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
         vmaDestroyImage(allocator, image, allocation);
     }
 }
 
 void UniqueImage::Destroy() {
     if (image) {
-        BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
         vmaDestroyImage(allocator, image, allocation);
         image = vk::Image{};
         allocation = {};
@@ -104,22 +103,8 @@ void UniqueImage::Destroy() {
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
-    // bbport: images of BB_VMA_DEDICATED_MB (4) or more get memory of their own, given back to
-    // the driver when they are freed. In shared VMA blocks the texture collector's evictions left
-    // holes (~0.9 GB on an RX 7800 XT) that a block only returns once wholly empty.
-    static const vk::DeviceSize dedicated_from = [] {
-        const char* env = std::getenv("BB_VMA_DEDICATED_MB");
-        return vk::DeviceSize(env ? std::strtoull(env, nullptr, 10) : 4) << 20;
-    }();
-    VmaAllocationCreateFlags dedicated = 0;
-    if (device && dedicated_from != 0) {
-        const vk::DeviceImageMemoryRequirements query{.pCreateInfo = &image_ci};
-        if (device.getImageMemoryRequirements(query).memoryRequirements.size >= dedicated_from) {
-            dedicated = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-        }
-    }
     const VmaAllocationCreateInfo alloc_ci = {
-        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | dedicated,
+        .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
         .requiredFlags = 0,
         .preferredFlags = 0,
@@ -132,18 +117,27 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        // Over the video memory budget (loading screens peak before the cache collects old
+        // images). Going over budget lets the driver page memory out instead of aborting.
+        static bool warned = false;
+        if (!std::exchange(warned, true)) {
+            LOG_WARNING(Render_Vulkan, "Video memory budget exceeded, allocating images past it");
+        }
+        VmaAllocationCreateInfo over_budget_ci = alloc_ci;
+        over_budget_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget_ci, &unsafe_image,
+                                &allocation, &alloc_info);
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
-    BbStats::vk_image_bytes.fetch_add(size_bytes, std::memory_order_relaxed);
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
              Common::SlotVector<ImageView>& slot_image_views_, const ImageInfo& info_)
-    : guest_begin{info_.guest_address}, guest_end{info_.guest_address + info_.guest_size},
-      info{info_}, runtime{&runtime_}, slot_image_views{&slot_image_views_} {
-    BbStats::Timer timer{BbStats::t_image_create};
+    : runtime{&runtime_}, slot_image_views{&slot_image_views_}, info{info_} {
     if (info.pixel_format == vk::Format::eUndefined) {
         return;
     }
@@ -227,13 +221,9 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
         runtime->SetBackingSamples(this, info.num_samples);
     }
     const auto& view_infos = backing->image_view_infos;
-    if (backing->last_view < view_infos.size() && view_infos[backing->last_view] == view_info) {
-        return (*slot_image_views)[backing->image_view_ids[backing->last_view]];
-    }
     const auto it = std::ranges::find(view_infos, view_info);
     if (it != view_infos.end()) {
-        backing->last_view = static_cast<u32>(std::distance(view_infos.begin(), it));
-        const auto view_id = backing->image_view_ids[backing->last_view];
+        const auto view_id = backing->image_view_ids[std::distance(view_infos.begin(), it)];
         return (*slot_image_views)[view_id];
     }
     const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
@@ -322,7 +312,6 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return;
         }
-
         barriers.emplace_back(vk::ImageMemoryBarrier2{
             .srcStageMask = last_state.pl_stage,
             .srcAccessMask = last_state.access_mask,

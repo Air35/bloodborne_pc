@@ -1,13 +1,11 @@
 #include "bbport_write_log.h"
-#include "bbport_game_menu.h"
-#include "bbport_gnm_hooks.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
-#include "game_profile.h"
 #include "bbport_copy.h"
+#ifndef _WIN32
 #include <sys/resource.h>
-#include "bbport_free_check.h"
+#endif
 #include "bbport_toggles.h"
 #include <algorithm>
 #include <atomic>
@@ -15,6 +13,10 @@
 #include <boost/asio/io_context.hpp>
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
+#ifdef _WIN32
+#include <windows.h>
+#include "../third_party/renderdoc/renderdoc_app.h"
+#endif
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -28,21 +30,21 @@
 #include "common/rdtsc.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
-#include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "core/emulator_settings.h"
 #include "core/signals.h"
 #include "sdl_window.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" {
 // runtime_memory.c
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
-void runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
-const uint64_t* runtime_memory_generation(void);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+const unsigned char* runtime_memory_backing_pointer(uintptr_t address);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
 uint64_t runtime_process_time_us(void);
@@ -50,8 +52,6 @@ uint64_t runtime_process_time_counter(void);
 uint64_t runtime_tsc_frequency(void);
 int32_t* runtime_errno(void);
 void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
-void runtime_memory_set_note_write_hook(RuntimeGpuRange note);
-void runtime_memory_set_cpu_write_hook(RuntimeGpuRange hook);
 }
 
 Frontend::WindowSDL* g_window = nullptr;
@@ -99,74 +99,27 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
             auto* r = Memory::Instance()->GetRasterizer();
             r->RegisterMemory(address, size);
             r->MapMemory(address, size);
+            // sotc: images over a range mapped now (the fine mips Shadow of the Colossus streams
+            // into memory it maps later) were uploaded and tracked without these pages; the data
+            // the game writes there next would go unnoticed. Reupload them on their next use.
+            static const bool map_invalidate = [] {
+                const char* v = std::getenv("SOTC_MAP_INVALIDATE");
+                return !v || v[0] != '0';
+            }();
+            if (map_invalidate) r->InvalidateMemory(address, size);
         },
         [](uintptr_t address, uint64_t size) { Memory::Instance()->GetRasterizer()->UnmapMemory(address, size); },
         [](uintptr_t address, uint64_t size) {
             Memory::Instance()->GetRasterizer()->InvalidateMemory(address, size);
         });
-    // bbport: data written into GPU memory by a path the GPU side hears of (file reads, the game's
-    // resource loaders): invalidated, and an asset (it may keep a VRAM copy).
-    runtime_memory_set_note_write_hook([](uintptr_t address, uint64_t size) {
-        Memory::Instance()->GetRasterizer()->NoteAssetWrite(address, size);
-    });
-    // bbport: the game's libc copies (memcpy, memset, memmove) over pages the caches watch.
-    runtime_memory_set_cpu_write_hook([](uintptr_t address, uint64_t size) {
-        Memory::Instance()->GetRasterizer()->OnCpuWrite(address, size);
-    });
 }
 void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
     if (rasterizer) rasterizer->InvalidateMemory(address, size);
 }
-namespace {
-// bbport: the mapped region of the last lookup, per thread, valid for the mapping table generation
-// it was read at. The GPU command thread clamps and copies thousands of constant ranges a frame,
-// nearly all within the region of the one before: two calls into the runtime each (~5% of it).
-struct RegionCache {
-    u64 generation = 1; // odd: invalid
-    uintptr_t start = 0, end = 0;
-};
-thread_local RegionCache region_cache;
-
-bool CachedMapped(VAddr address, u64 size) {
-    static const uint64_t* const generation_ptr = runtime_memory_generation();
-    const u64 generation = __atomic_load_n(generation_ptr, __ATOMIC_ACQUIRE);
-    if (generation & 1) {
-        return false; // being changed
-    }
-    auto& cache = region_cache;
-    if (cache.generation == generation && address >= cache.start && address + size <= cache.end) {
-        return true;
-    }
-    uintptr_t start = 0, end = 0;
-    int mapped = 0;
-    if (!runtime_memory_region(address, &start, &end, &mapped) || !mapped) {
-        return false;
-    }
-    cache = {generation, start, end};
-    return address + size <= end;
-}
-} // namespace
-
 u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
-    if (size && CachedMapped(virtual_addr, size)) {
-        return size;
-    }
     return runtime_memory_clamp(virtual_addr, size);
 }
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
-    // BB_READBACKS=2 protects GPU-written pages against reads: the copy threads and recorders
-    // read through the backing view, as a read fault on them would wait for the GPU thread,
-    // which waits for them.
-    static const bool precise =
-        EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise;
-    if (precise) {
-        runtime_memory_read_backing(source, dest, size);
-        return;
-    }
-    if (size && CachedMapped(source, size)) {
-        std::memcpy(dest, reinterpret_cast<const void*>(source), size);
-        return;
-    }
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;
@@ -174,7 +127,12 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
             end = source + size;
         }
         const u64 n = std::min<u64>(size, end - source);
-        if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        // sotc: read through the backing view, never through the guest address. With precise
+        // readbacks GPU-written pages are read-protected, and a fault on a copy thread or the
+        // recording thread would wait for the command processor, which waits for them.
+        const u8* backing = mapped ? runtime_memory_backing_pointer(source) : nullptr;
+        if (backing) std::memcpy(dest, backing, n);
+        else if (mapped) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
         else std::memset(dest, 0, n);
         source += n; dest += n; size -= n;
     }
@@ -190,11 +148,52 @@ void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
         CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
     });
 }
-void MemoryManager::ReadBacking(VAddr address, void* data, u64 size) {
-    runtime_memory_read_backing(address, data, size);
+bool MemoryManager::IsValidMapping(VAddr virtual_addr, u64 size) {
+    return runtime_memory_is_mapped(virtual_addr, size ? size : 1) != 0;
 }
-bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
-    BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, BbWriteLog::Backing);
+bool MemoryManager::IsMappedAddress(VAddr virtual_addr) {
+    return runtime_memory_is_mapped(virtual_addr, 1) != 0;
+}
+bool MemoryManager::TryCopySparseMemory(VAddr source, u8* dest, u64 size) {
+    // Through the backing view: the guest address may be protected by the GPU page tracker.
+    while (size) {
+        uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        if (!runtime_memory_region(source, &start, &end, &mapped) || !mapped) {
+            return false;
+        }
+        const u8* backing = runtime_memory_backing_pointer(source);
+        if (!backing) {
+            return false;
+        }
+        const u64 n = std::min<u64>(size, end - source);
+        std::memcpy(dest, backing, n);
+        source += n;
+        dest += n;
+        size -= n;
+    }
+    return true;
+}
+const u8* MemoryManager::GetBackingRun(VAddr address, VAddr* run_start, u64* run_size) const {
+    uintptr_t start = 0, end = 0;
+    int mapped = 0;
+    if (!runtime_memory_region(address, &start, &end, &mapped) || !mapped) {
+        return nullptr;
+    }
+    const u8* backing = runtime_memory_backing_pointer(start);
+    if (!backing) {
+        return nullptr;
+    }
+    *run_start = start;
+    *run_size = end - start;
+    return backing;
+}
+const u8* MemoryManager::GetBackingPointer(VAddr address) const {
+    return runtime_memory_backing_pointer(address);
+}
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size, u32 source) {
+    BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size,
+                     static_cast<BbWriteLog::Source>(10 + source));
     return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
 }
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
@@ -223,7 +222,8 @@ u64 PS4_SYSV_ABI sceKernelReadTsc() { return Common::FencedRDTSC(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTime() { return runtime_process_time_us(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounter() { return runtime_process_time_counter(); }
 u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() { return 1'000'000'000; }
-s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return 0; } // base PS4
+extern "C" int runtime_sotc_neo(void);
+s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return runtime_sotc_neo(); } // sotc: SOTC_NEO=1, a PS4 Pro
 s32 PS4_SYSV_ABI sceKernelGetCompiledSdkVersion(s32* ver) {
     if (!ver) return ORBIS_KERNEL_ERROR_EINVAL;
     *ver = s32(g_sdk_version);
@@ -242,6 +242,16 @@ std::mutex g_window_mutex;
 std::condition_variable g_window_cv;
 bool g_window_ready;
 } // namespace
+
+u32 BbDisplayRefreshHz() {
+    static const u32 hz = [] {
+        const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+        const u32 rate = mode && mode->refresh_rate > 0 ? u32(mode->refresh_rate + 0.5f) : 60;
+        std::printf("GPU: vblank follows the display refresh rate, %u Hz\n", rate);
+        return std::max<u32>(rate, 60);
+    }();
+    return hz;
+}
 
 #ifdef BB_PGO_GENERATE
 extern "C" void __gcov_dump(void);
@@ -264,13 +274,15 @@ static void StartProfileWriter() {
 
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
-    // What the translator knows about this game (games/), before anything asks for it.
-    Game::Select(config->serial);
 #ifdef BB_PGO_GENERATE
     StartProfileWriter();
 #endif
     g_sdk_version = config->sdk_version;
+#ifdef _WIN32
+    if (config->user_dir && !std::getenv("BB_GPU_USER_DIR")) _putenv_s("BB_GPU_USER_DIR", config->user_dir);
+#else
     if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
+#endif
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "Bloodborne";
     const s32 width = config->width, height = config->height;
@@ -321,22 +333,25 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
     return 0;
 }
 
-extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
-    // BB_LABEL_TRAP (diagnostic): its read-only label pages first. Not passed on to GPU page
-    // tracking (a write fault drains the draw pipe: thousands a second would change the timing
-    // under test); label pages are not expected to be GPU-tracked.
-    if (BbFreeCheck::OnTrapFault(ucontext, reinterpret_cast<std::uint64_t>(address))) {
-        return 1;
-    }
-    if (Core::Signals::Instance()->DispatchAccessViolation(ucontext, address)) {
-        return 1;
-    }
-    return BbFreeCheck::OnStaleTrapFault(reinterpret_cast<std::uint64_t>(address)) ? 1 : 0;
+extern "C" int bbgpu_is_gpu_side_thread(void) {
+    auto* rasterizer = Core::Memory::Instance()->GetRasterizer();
+    return rasterizer && std::this_thread::get_id() == rasterizer->GetGpuCommandProcessorThread()
+               ? 1
+               : 0;
 }
 
-extern "C" void bbgpu_patch_image(unsigned char* image, uint64_t size) {
-    BbGnmHooks::PatchImage(image, size);
-    BbGameMenu::PatchImage(image, size);
+extern "C" void bbgpu_register_guest_stack(uintptr_t address, uint64_t size) {
+    VideoCore::RegisterGuestStack(address, size);
+}
+extern "C" void bbgpu_register_guest_stack_end(uintptr_t address, uint64_t size) {
+    VideoCore::UnregisterGuestStack(address, size);
+}
+extern "C" int bbgpu_readbacks_mode(void) {
+    return static_cast<int>(EmulatorSettings.GetReadbacksMode());
+}
+
+extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+    return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
 }
 
 extern "C" unsigned bbgpu_symbol_count(void) {
@@ -380,17 +395,83 @@ int* PS4_SYSV_ABI __Error() {
 }
 } // namespace Libraries::Kernel
 
-// RenderDoc capture hooks: not used by the port.
+// sotc port: RenderDoc captures of one GPU submission when the game runs under RenderDoc
+// (renderdoccmd capture ...): SOTC_RDOC_TRIGGER=<file> appears -> the next submission the
+// command processor runs is captured (Liverpool calls StartCapture/EndCapture around it).
 namespace VideoCore {
+#ifdef _WIN32
+static RENDERDOC_API_1_6_0* rdoc_api;
+static int rdoc_state; // 0 idle, 1 triggered, 2 capturing
+void LoadRenderDoc() {
+    static bool tried;
+    if (std::exchange(tried, true)) return;
+    if (HMODULE mod = GetModuleHandleA("renderdoc.dll")) {
+        const auto get_api = reinterpret_cast<pRENDERDOC_GetAPI>(GetProcAddress(mod, "RENDERDOC_GetAPI"));
+        if (get_api && get_api(eRENDERDOC_API_Version_1_6_0, reinterpret_cast<void**>(&rdoc_api)) == 1) {
+            rdoc_api->SetCaptureKeys(nullptr, 0);
+            std::fprintf(stderr, "sotc: RenderDoc attached (SOTC_RDOC_TRIGGER captures a submission)\n");
+        }
+    }
+}
+void StartCapture() {
+    static const char* trigger = std::getenv("SOTC_RDOC_TRIGGER");
+    if (!trigger && rdoc_state == 0) return;
+    LoadRenderDoc();
+    if (!rdoc_api) return;
+    if (trigger && rdoc_state == 0 && std::remove(trigger) == 0) rdoc_state = 1;
+    if (rdoc_state == 1) {
+        rdoc_api->StartFrameCapture(nullptr, nullptr);
+        rdoc_state = 2;
+    }
+}
+void EndCapture() {
+    // SOTC_RDOC_SUBMITS=N: the capture spans N submissions (a whole frame is split in several).
+    static int left = 0;
+    if (rdoc_api && rdoc_state == 2 && left == 0) {
+        const char* v = std::getenv("SOTC_RDOC_SUBMITS");
+        left = v ? std::max(1, std::atoi(v)) : 1;
+    }
+    if (rdoc_api && rdoc_state == 2 && --left == 0) {
+        const bool ok = rdoc_api->EndFrameCapture(nullptr, nullptr) == 1;
+        std::fprintf(stderr, "sotc: RenderDoc capture %s\n", ok ? "saved" : "FAILED");
+        rdoc_state = 0;
+    }
+}
+// F12 under RenderDoc (window.cpp): capture the next submissions (SOTC_RDOC_SUBMITS).
+void TriggerCapture() {
+    LoadRenderDoc();
+    if (rdoc_api && rdoc_state == 0) {
+        rdoc_state = 1;
+        std::fprintf(stderr, "sotc: RenderDoc capture armed (F12)\n");
+    }
+}
+void SetOutputDir(const std::filesystem::path&, const std::string&) {}
+bool IsRenderDocLoaded() { return rdoc_api != nullptr; }
+#else
 void LoadRenderDoc() {}
 void StartCapture() {}
 void EndCapture() {}
 void TriggerCapture() {}
 void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return false; }
+#endif
 void RequestScreenshot(ScreenshotRequest) {}
-u32 ConsumeGameOnlyScreenshotRequests() { return 0; }
-u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
+// sotc port: BB_FRAME_DUMP_TRIGGER=<file>: when the file appears it is removed and the next
+// presented game frame is saved as a PNG screenshot (user screenshots directory).
+// SOTC_SHOT_OVERLAY=1: the screenshot includes the overlay (the save/load list).
+static bool ShotWithOverlay() {
+    static const bool with = std::getenv("SOTC_SHOT_OVERLAY") != nullptr;
+    return with;
+}
+u32 ConsumeGameOnlyScreenshotRequests() {
+    static const char* trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
+    return !ShotWithOverlay() && trigger && std::remove(trigger) == 0 ? 1 : 0;
+}
+bool ConsumeImageDumpRequest() { return false; } // sotc: SOTC_DUMP needs RenderDoc hooks
+u32 ConsumeWithOverlaysScreenshotRequests() {
+    static const char* trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
+    return ShotWithOverlay() && trigger && std::remove(trigger) == 0 ? 1 : 0;
+}
 ScreenshotRequests ConsumeScreenshotRequests() { return {}; }
 } // namespace VideoCore
 
@@ -398,24 +479,20 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
-extern "C" void bbgpu_mouse_take(double* dx, double* dy, int* wheel_up, int* wheel_down) {
-    double x = 0, y = 0;
-    int up = 0, down = 0;
-    if (g_window) {
-        g_window->TakeMouse(x, y, up, down);
+// sotc: the game's save/load slot list (sceSaveDataDialog LIST, runtime_services.c).
+extern "C" int bbgpu_save_list_open(const char* title, const char* const* items, int count,
+                                     int focus, int first_deletable) {
+    std::vector<std::string> list;
+    for (int i = 0; i < count; ++i) {
+        list.emplace_back(items[i] ? items[i] : "");
     }
-    *dx = x;
-    *dy = y;
-    *wheel_up = up;
-    *wheel_down = down;
+    return BbOverlay::OpenSaveList(title ? title : "", list, focus, first_deletable) ? 1 : 0;
 }
-
-extern "C" int bbgpu_mouse_captured(void) {
-    return g_window && g_window->MouseCaptured() ? 1 : 0;
+extern "C" int bbgpu_save_list_poll(void) {
+    return BbOverlay::PollSaveList();
 }
-
-extern "C" void bbgpu_mouse_look_enable(int enabled) {
-    Frontend::WindowSDL::EnableMouseLook(enabled != 0);
+extern "C" void bbgpu_save_list_close(void) {
+    BbOverlay::CloseSaveList();
 }
 
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {

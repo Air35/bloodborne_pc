@@ -4,10 +4,11 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include "common/alignment.h"
 #include "common/types.h"
-#include "video_core/buffer_cache//region_definitions.h"
+#include "video_core/buffer_cache/region_definitions.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -15,30 +16,33 @@ class Rasterizer;
 
 namespace VideoCore {
 
+/// Guest thread and fiber stacks. The page tracker never makes them inaccessible: on Windows
+/// a fault whose exception frame cannot be written below the faulting stack pointer kills the
+/// process without running any handler.
+void RegisterGuestStack(VAddr address, u64 size);
+void UnregisterGuestStack(VAddr address, u64 size);
+
+/// Calls func(address, size) for the parts of the range outside registered guest stacks.
+/// Those pages are never protected, so the CPU may have written them without the tracker
+/// noticing: GPU data read back must not be written over them.
+void ForEachNonStackRange(VAddr address, u64 size, const std::function<void(VAddr, u64)>& func);
+
 struct UffdImpl;
 struct SignalImpl;
 
-class PageManager {
-    // PAGE_SIZE and PAGE_BITS conflicts with machine/param.h definitions on freebsd!
-    // Use the same page size as the tracker.
-    static constexpr size_t PM_PAGE_BITS = TRACKER_PAGE_BITS;
-    static constexpr size_t PM_PAGE_SIZE = TRACKER_BYTES_PER_PAGE;
+enum class PageOp : s8 {
+    None = 0,
+    Track = 1,
+    Untrack = -1,
+};
 
-    // Keep the lock granularity the same as region granularity. (since each regions has
-    // itself a lock)
-    static constexpr size_t PAGES_PER_LOCK = NUM_PAGES_PER_REGION;
+class PageManager {
+    static constexpr size_t PM_PAGE_BITS = 12;
+    static constexpr size_t PM_PAGE_SIZE = 1ULL << PM_PAGE_BITS;
 
 public:
     explicit PageManager(Vulkan::Rasterizer* rasterizer);
     ~PageManager();
-
-    /// bbport: the guest code behind write faults on tracked pages over the last window (frame
-    /// stats): which game functions write GPU memory, to replace tracking by explicit hooks.
-    static void ReportFaultSites();
-    /// bbport: the write fault being handled on this thread hit an image (diagnostics: which guest
-    /// code writes textures, BB_WRITE_TRACKING=1).
-    static void NoteImageFault(VAddr image_address, u64 image_size, u32 width, u32 height,
-                               u32 format, u32 tiling);
 
     /// Register a range of mapped gpu memory.
     void OnGpuMap(VAddr address, size_t size);
@@ -47,12 +51,12 @@ public:
     void OnGpuUnmap(VAddr address, size_t size);
 
     /// Updates watches in the pages touching the specified region.
-    template <bool track>
-    void UpdatePageWatchers(VAddr addr, u64 size) const;
+    void UpdatePageWatchers(VAddr addr, u64 size, PageOp write_op) const;
 
-    /// Updates watches in the pages touching the specified region using a mask.
-    template <bool track, bool is_read = false>
-    void UpdatePageWatchersForRegion(VAddr base_addr, RegionBits& mask) const;
+    /// Updates watches in the pages touching the inclusive bounds using a mask.
+    void UpdatePageWatchersForRegion(VAddr base_addr, const Bounds& bounds,
+                                     const RegionBits& write_mask, const RegionBits& read_mask,
+                                     PageOp write_op, PageOp read_op) const;
 
     /// Returns page aligned address.
     static constexpr VAddr GetPageAddr(VAddr addr) {
