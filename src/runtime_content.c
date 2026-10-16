@@ -144,14 +144,20 @@ static ABI int32_t addon_list(uint32_t service,void *list,uint32_t capacity,uint
     if (count) printf("Runtime: AppContent add-ons reported installed (%s): %u\n",root,(unsigned)count);
     ++lists; return 0;
 }
+/* sotc: the NID alone decides, as in runtime.c of the union: what follows '#' (per-executable
+ * library/module letters, or a library name) is not compared. */
+static int nid_is(const char *name,const char *nid) {
+    const size_t n=strlen(nid);
+    return !strncmp(name,nid,n) && (name[n]=='\0' || name[n]=='#');
+}
 uintptr_t runtime_content_resolve(const char *name) {
-    if (!strcmp(name,"g8cM39EUZ6o#libSceSysmodule")) return (uintptr_t)module_load;
-    if (!strcmp(name,"fMP5NHUOaMk#libSceSysmodule")) return (uintptr_t)module_loaded;
-    if (!strcmp(name,"eR2bZFAAU0Q#libSceSysmodule")) return (uintptr_t)module_unload;
-    if (!strcmp(name,"hHrGoGoNf+s#libSceSysmodule")) return (uintptr_t)module_load_internal;
-    if (!strcmp(name,"R9lA82OraNs#libSceAppContent")) return (uintptr_t)content_init;
-    if (!strcmp(name,"99b82IKXpH4#libSceAppContent")) return (uintptr_t)param_int;
-    if (!strcmp(name,"xnd8BJzAxmk#libSceAppContent")) return (uintptr_t)addon_list;
+    if (nid_is(name,"g8cM39EUZ6o")) return (uintptr_t)module_load;          /* libSceSysmodule */
+    if (nid_is(name,"fMP5NHUOaMk")) return (uintptr_t)module_loaded;
+    if (nid_is(name,"eR2bZFAAU0Q")) return (uintptr_t)module_unload;
+    if (nid_is(name,"hHrGoGoNf+s")) return (uintptr_t)module_load_internal;
+    if (nid_is(name,"R9lA82OraNs")) return (uintptr_t)content_init;         /* libSceAppContent */
+    if (nid_is(name,"99b82IKXpH4")) return (uintptr_t)param_int;
+    if (nid_is(name,"xnd8BJzAxmk")) return (uintptr_t)addon_list;
     return 0;
 }
 void runtime_content_report(void) {
