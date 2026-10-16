@@ -157,6 +157,9 @@ set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
 target_include_directories(bbgpu PRIVATE third_party/stb)
 target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)
 target_compile_definitions(bbgpu PRIVATE BOOST_ASIO_STANDALONE NDEBUG)
+# sotc: buffer cache arena size (ADR-0018 A'); 32 = 4 GiB, the only value real GPUs need.
+set(SOTC_ARENA_PAGE_BITS 32 CACHE STRING "Buffer cache arena page bits (28-32)")
+target_compile_definitions(bbgpu PRIVATE SOTC_ARENA_PAGE_BITS=${SOTC_ARENA_PAGE_BITS})
 target_compile_options(bbgpu PRIVATE -Wno-deprecated-declarations -Wno-missing-field-initializers)
 # Runtime symbols (runtime_memory_*, runtime_process_*) resolve against bb-probe.
 if (NOT WIN32)

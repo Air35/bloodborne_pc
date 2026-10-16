@@ -73,8 +73,10 @@ for patch in gpu/patches/fsr-vulkan/*.patch; do
     fi
 done
 cmake -S gpu -B out/gpu -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBB_PGO="$pgo" \
-    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" >/dev/null
-echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}"
+    -DBB_LTO="${BB_LTO:-ON}" -DBB_PGO_DIR="$PWD/pgo" \
+    -DSOTC_ARENA_PAGE_BITS="${SOTC_ARENA_PAGE_BITS:-32}" >/dev/null
+# sotc: SOTC_ARENA_PAGE_BITS=29 for lavapipe (2 GiB of sparse space in all; ADR-0018 A').
+echo "GPU library: PGO $pgo, LTO ${BB_LTO:-ON}, arena 2^${SOTC_ARENA_PAGE_BITS:-32}"
 # A failed GPU build must stop here: an older libbbgpu.so would otherwise be used silently.
 if ! ninja -C out/gpu bbgpu > out/gpu-build.log 2>&1; then
     grep -v '^\[' out/gpu-build.log | tail -40 >&2
@@ -110,6 +112,9 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # sotc: guest paths without case (PS4/shadPS4 semantics on a case-sensitive host).
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -Isrc tests/test_file_case.c -o out/file-case-test
+    out/file-case-test
     # sotc: CPU detection and the ISA rewrite (docs/10 §5): pure, no runtime or GPU library.
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_cpu_check.c src/cpu_check.c -o out/cpu-check-test
     out/cpu-check-test

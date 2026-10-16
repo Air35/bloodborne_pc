@@ -40,7 +40,13 @@ class PageManager;
 
 class BufferCache {
     static constexpr u64 ADDRESS_SPACE_BITS = 40;
-    static constexpr u64 ARENA_PAGE_BITS = 32;
+#ifndef SOTC_ARENA_PAGE_BITS
+#define SOTC_ARENA_PAGE_BITS 32
+#endif
+    // sotc: arena size per build (ADR-0018 A'): 4 GiB everywhere a real GPU runs; a smaller
+    // arena only where the device's sparseAddressSpaceSize is small (lavapipe: 2 GiB in all).
+    static constexpr u64 ARENA_PAGE_BITS = SOTC_ARENA_PAGE_BITS;
+    static_assert(ARENA_PAGE_BITS >= 28 && ARENA_PAGE_BITS <= 32, "arena page between 256 MiB and 4 GiB");
     static constexpr u64 ARENA_PAGE_SIZE = u64{1} << ARENA_PAGE_BITS;
     static constexpr u64 NUM_ARENA_PAGES = u64{1} << (ADDRESS_SPACE_BITS - ARENA_PAGE_BITS);
     static constexpr u64 MIN_BLOCK_SIZE = 16_KB;
