@@ -51,20 +51,46 @@ def load_ini():
 
 def no_console():
     """Started without a console (the launcher): console programs must not open their own."""
+    if os.name != 'nt':
+        return 0  # sotc (Linux): creationflags only exist on Windows
     import ctypes
     return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
 
 
+PROBE = 'bb-probe.exe' if os.name == 'nt' else 'bb-probe'
+
+
 def find_probe():
-    for candidate in (PORT / 'bin' / 'bb-probe.exe', PORT / 'out' / 'bb-probe.exe'):
+    for candidate in (PORT / 'bin' / PROBE, PORT / 'out' / PROBE):
         if candidate.is_file():
             return candidate
-    fail('bb-probe.exe not found: build it with build.sh (MSYS2 CLANG64) or use a packaged build.')
+    fail(f'{PROBE} not found: build it with build.sh or use a packaged build.')
+
+
+def out_dir():
+    """sotc (Linux): where the prepared image goes; SOTC_OUT_DIR when the port folder is read-only
+    (tools/sotc-sandbox.sh --run)."""
+    return Path(os.environ.get('SOTC_OUT_DIR', PORT / 'out'))
+
+
+def isa_args(probe, out):
+    """sotc: the probe says which instruction sets this CPU lacks (docs/10 §7); when it needs a
+    rewrite, the table is made from the linked image (reused while the image is the same)."""
+    plan = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True).stdout
+    if 'ISA: rewrite=' not in plan or 'ISA: rewrite=none' in plan:
+        return []
+    run_script('isa_rewrite.py', out / 'boot-linked.bin', '--out', out)
+    return ['--isa-rewrite', str(out / 'isa-rewrite.bin')]
 
 
 def run_script(name, *args):
     # Inside the packaged SotC.exe (PyInstaller) the executable runs the scripts itself.
-    script = ['--script'] if getattr(sys, 'frozen', False) else []
+    # sotc: isolated interpreter (-I, CLAUDE.md); -I leaves the script's folder off sys.path and
+    # the scripts import their siblings, so that folder (only) is put back.
+    script = ['--script'] if getattr(sys, 'frozen', False) else [
+        '-I', '-c', 'import runpy, sys; sys.path.insert(0, sys.argv[1]); sys.argv = sys.argv[2:]; '
+                    'runpy.run_path(sys.argv[0], run_name="__main__")', str(SCRIPTS)]
     result = subprocess.run([sys.executable, *script, str(SCRIPTS / name), *map(str, args)], stdin=subprocess.DEVNULL,
                             creationflags=no_console())
     if result.returncode:
@@ -85,7 +111,8 @@ def fingerprint(game, modules):
 def game_update(game):
     """The game update next to the dump, as shadPS4 uses it (<game>-UPDATE or <game>-patch), or
     SOTC_UPDATE_DIR; None without one."""
-    named = os.environ.get('SOTC_UPDATE_DIR')
+    # sotc: SOTC_PATCH_DIR is what tools/sotc-sandbox.sh exports for the update (Linux).
+    named = os.environ.get('SOTC_UPDATE_DIR') or os.environ.get('SOTC_PATCH_DIR')
     if named:
         return Path(named).resolve()
     for suffix in ('-UPDATE', '-patch'):
@@ -119,14 +146,18 @@ def main():
     load_ini()
     env = os.environ
     os.chdir(PORT)
-    out = PORT / 'out'
-    out.mkdir(exist_ok=True)
+    out = out_dir()
+    out.mkdir(parents=True, exist_ok=True)
     game = Path(env.get('SOTC_GAME_DIR', PORT.parent / 'CUSA08809')).resolve()
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game}: set SOTC_GAME_DIR (environment or sotc.ini).')
 
     modules = []
+    # sotc (Linux): tools/sotc-sandbox.sh mounts the console's own modules at SOTC_FIRMWARE_DIR.
     sys_modules = env.get('SOTC_SYS_MODULES')
+    firmware = env.get('SOTC_FIRMWARE_DIR')
+    if not sys_modules and firmware and all((Path(firmware) / n).is_file() for n in SYS_MODULES):
+        sys_modules = firmware
     if sys_modules:
         modules = [Path(sys_modules) / name for name in SYS_MODULES]
         missing = [m.name for m in modules if not m.is_file()]
@@ -171,7 +202,7 @@ def main():
 
     probe = find_probe()
     # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
-    if not (probe.parent / 'SDL3.dll').is_file():
+    if os.name == 'nt' and not (probe.parent / 'SDL3.dll').is_file():
         clang64 = Path(env.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
         if clang64.is_dir():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
@@ -183,6 +214,7 @@ def main():
     command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                '--sotc-cpu', str(out / 'sotc-cpu.bin'), '--patches', str(out / 'patches.bin'),
                *(['--sotc-cmdline', str(out / 'cmdline.bin')] if (out / 'cmdline.bin').is_file() else []),
+               *isa_args(probe, out),  # sotc: MOVBE/BMI1/LZCNT on CPUs without them
                '--app0', str(game), '--user', str(user), *sys.argv[1:]]
     # SOTC_WRAP: a JSON list put in front of the game, e.g. RenderDoc
     # ["C:/Program Files/RenderDoc/renderdoccmd.exe", "capture", "-w", "-c", "<file>"]; F12 then
