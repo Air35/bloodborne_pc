@@ -3,6 +3,7 @@ from paths import ROOT
 from pathlib import Path
 import struct
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -142,6 +143,19 @@ class LoaderTests(unittest.TestCase):
         r = self.run_image(package(code, [(8, 0, 16, 0), (24, 1, 0, 0)], ['after-relative-jump']))
         self.assertEqual(r.returncode, 20, r.stderr)
         self.assertIn('after-relative-jump', r.stdout)
+
+    def test_image_is_mapped_below_2_gib(self):
+        # sotc: the game packs pointers to its static data into 31 bits (ShadowOfTheColossus-PC
+        # 70bb438 src/probe.c:55-58; ADR-0019), so the image must end below 0x80000000 on Linux
+        # too. lea rdi,[rip] hands the code's own address to an unresolved import, whose STOP
+        # line prints it as the first argument.
+        code = b'\x48\x8d\x3d\0\0\0\0' + b'\xff\x25\x03\0\0\0' + b'\x90' * 3 + b'\0' * 8
+        r = self.run_image(package(code, [(16, 1, 0, 0)], ['image-base-check']))
+        self.assertEqual(r.returncode, 20, r.stdout + r.stderr)
+        self.assertIn('image-base-check', r.stdout + r.stderr)
+        found = re.search(r'first argument: (0x[0-9a-f]+)', r.stdout + r.stderr)
+        self.assertIsNotNone(found, r.stdout + r.stderr)
+        self.assertLess(int(found[1], 16), 0x80000000)
 
     def test_out_of_bounds_relocation_is_rejected(self):
         r = self.run_image(package(b'\xc3', [(4092, 0, 0, 0)]))

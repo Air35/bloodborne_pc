@@ -8,6 +8,8 @@
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include "gpu/sotc/sotc_patches.h"
+#include "cpu_check.h"
+#include "isa_rewrite.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -43,6 +45,52 @@ static int gpu_enabled;
 int vulkan_smoke(void);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
+
+/* sotc: the game's code was compiled for the PS4's CPU (AMD Jaguar) and runs as it is: AVX, BMI1
+ * (andn/bextr/blsr/tzcnt), MOVBE, LZCNT and POPCNT, thousands of each in eboot.bin, and SSE4a in
+ * a few functions. A CPU without one stops at the first with SIGILL, and lzcnt/tzcnt even run as
+ * bsr/bsf there, with other results. cpu_check.c classifies the host by CPUID bit; the sets it
+ * lacks are rewritten by isa_rewrite.c from a table (SOTC_ISA_MODE, docs/10, ADR-0010). SSE4a
+ * is left to the load-time patchers of gpu/sotc when --sotc-cpu is given (ADR-0019: one
+ * mechanism per set). BB_SKIP_CPU_CHECK=1 skips all of it (tests on hosts that lack sets).
+ * Sets isa_missing/isa_sets; returns 0, or 20 after a STOP line. */
+/* sotc: imports the GPU library serves (registered by bbgpu_init); names end in #library. */
+static int gpu_library_import(const char *name) {
+    static const char *const libraries[]={"#libSceGnmDriver","#libSceVideoOut"};
+    const size_t length=strlen(name);
+    for (size_t i=0;i<sizeof(libraries)/sizeof(*libraries);++i) {
+        const size_t suffix=strlen(libraries[i]);
+        if (length>suffix && !strcmp(name+length-suffix,libraries[i])) return 1;
+    }
+    return 0;
+}
+static unsigned isa_missing, isa_sets;
+static char isa_missing_names[96], isa_sets_names[96];
+static IsaTable *isa_table;
+static int cpu_setup(void) {
+    const char *skip = getenv("BB_SKIP_CPU_CHECK");
+    if (skip && !strcmp(skip, "1")) return 0;
+    const CpuFeatureWords words = cpu_feature_words();
+    char fatal[96];
+    if (cpu_missing_fatal(words, fatal, sizeof fatal)) {
+        printf("STOP: this CPU lacks instruction sets the game's code uses and no rewrite can supply: %s "
+               "(an Intel Sandy Bridge 2011 or newer with AVX, or an AMD with AVX, is needed)\n", fatal);
+        return 20;
+    }
+    isa_missing = cpu_missing_rewritable(words, isa_missing_names, sizeof isa_missing_names);
+    IsaPolicy policy;
+    const char *text = getenv("SOTC_ISA_MODE");
+    if (isa_policy_parse(text, &policy)) {
+        printf("STOP: SOTC_ISA_MODE=%s is not auto, native, rewrite or rewrite:<list of movbe,bmi1,lzcnt,f16c,sse4a>\n", text);
+        return 20;
+    }
+    if (isa_policy_resolve(&policy, isa_missing, &isa_sets)) {
+        printf("STOP: this CPU lacks %s and SOTC_ISA_MODE=native does not rewrite them\n", isa_missing_names);
+        return 20;
+    }
+    cpu_set_names(isa_sets, isa_sets_names, sizeof isa_sets_names);
+    return 0;
+}
 static uint64_t read64(FILE *f) {
     unsigned char b[8];
     if (fread(b, 1, 8, f) != 8) fail("truncated boot file");
@@ -81,6 +129,26 @@ static void *allocate_image(size_t size) {
     if (!p) fail("cannot commit the eboot range");
     printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need); loader at %p\n",p,(void *)GetModuleHandleA(NULL));
     return p;
+}
+#else
+/* sotc (Linux): the same 31-bit constraint as above (ADR-0019). The image takes the highest free
+ * range that ends below 2 GiB: bb-probe is linked -no-pie at 0x400000 and its brk heap (where
+ * main() keeps host objects the guest sees) grows upward from there, so it keeps the room below. */
+#define EBOOT_LIMIT UINT64_C(0x80000000)
+#define EBOOT_ALIGN (UINT64_C(16) << 20)
+static void *allocate_image(size_t size) {
+    if (size >= EBOOT_LIMIT) fail("the image does not fit below 2 GiB");
+    for (uint64_t at = (EBOOT_LIMIT - size) & ~(EBOOT_ALIGN - 1); at >= EBOOT_ALIGN; at -= EBOOT_ALIGN) {
+        void *p = mmap((void *)(uintptr_t)at, size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (p == (void *)(uintptr_t)at) {
+            printf("Image at %p (below 2 GiB, as the game's 31-bit pointers need)\n", p);
+            return p;
+        }
+        if (p != MAP_FAILED) munmap(p, size); /* an old kernel ignored the hint */
+    }
+    fail("no free range below 2 GiB for the image");
+    return NULL;
 }
 #endif
 static void *allocate(size_t size) {
@@ -460,6 +528,7 @@ static void choose_heap(void) {
         }
     }
     heap_chosen=best;
+    runtime_sotc_set_heap(best); /* sotc: read by the GPU library through runtime_sotc_heap() */
     fprintf(stderr,"Runtime: BPE heap guard on heap %p (%ld of %d frees)\n",(void *)best,best_count,HEAP_HOOK_CALLS);
     for (int i=0;i<8 && heap_seen[i].heap;++i) {
         uint64_t words[0x10]={0};
@@ -471,7 +540,6 @@ static void choose_heap(void) {
                 (unsigned long long)words[8]);
     }
 }
-uintptr_t runtime_sotc_heap(void) { return heap_chosen; }
 static int heap_hook_trap(EXCEPTION_POINTERS *info) {
     CONTEXT *c=info->ContextRecord;
     if (info->ExceptionRecord->ExceptionCode==EXCEPTION_SINGLE_STEP) {
@@ -655,10 +723,12 @@ static void apply_sotc_cmdline(const char *path, uint64_t size) {
     printf("Engine command line: %s\n",text);
 }
 #ifndef _WIN32
-/* sotc (Linux): the BPE heap guard finds the heap through a Windows-only breakpoint; until the
- * SIGTRAP side exists the guard stays off here (docs/plans/2026-10-15-a0b-uniao-sotc-pc.md). */
-uintptr_t runtime_sotc_heap(void) { return 0; }
 static void fault(int sig, siginfo_t *info, void *context) {
+    /* sotc: an int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
+    if (sig == SIGTRAP && isa_table && isa_rewrite_handle_sigtrap(isa_table, context)) return;
+    /* sotc: an SSE4a site the load-time patchers left is interpreted (gpu/sotc, shadPS4 SotC
+     * fork). On Linux the kernel skips the 128-byte red zone before the signal frame. */
+    if (sig == SIGILL && image && sotc_handle_illegal(context)) return;
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
@@ -676,7 +746,13 @@ static void fault(int sig, siginfo_t *info, void *context) {
     uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
     char line[512];
     Dl_info where;
-    if (rip - (uintptr_t)image < 0x10000000)
+    /* sotc: inside the stub of a rewritten site, the emulation of that instruction faulted. */
+    const int isa_site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
+    if (isa_site >= 0)
+        snprintf(line, sizeof(line), "Guest fault (signal %d) while emulating ISA site 0x%llx (%s), address %p\n",
+                 sig, (unsigned long long)isa_table->sites[isa_site].offset,
+                 isa_kind_name(isa_table->sites[isa_site].kind), info->si_addr);
+    else if (rip - (uintptr_t)image < 0x10000000)
         snprintf(line, sizeof(line), "Guest fault (signal %d) at guest offset 0x%lx, address %p\n",
                  sig, (unsigned long)(rip - (uintptr_t)image), info->si_addr);
     else if (dladdr((void *)rip, &where) && where.dli_fname)
@@ -697,6 +773,7 @@ static void fault(int sig, siginfo_t *info, void *context) {
             snprintf(line, sizeof(line), "  #%d %p\n", i, frames[i]);
         ssize_t written_=write(2, line, strlen(line)); (void)written_;
     }
+    if (isa_table) { isa_rewrite_report(isa_table, stderr); fflush(stderr); } /* sotc: hot ISA sites */
     _exit(128 + sig);
 }
 #endif
@@ -855,30 +932,48 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+    if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {
+        /* sotc: what check-env and the launcher ask before building a table (docs/10 §7). */
+        const int rc = cpu_setup();
+        if (rc) return rc;
+        printf(isa_missing ? "CPU: missing %s\n" : "CPU: complete\n", isa_missing_names);
+        printf("ISA: rewrite=%s\n", isa_sets ? isa_sets_names : "none");
+        return 0;
+    }
 #ifdef _WIN32
     /* The PS4 user range must stay free of host allocations (GPU driver, heaps), and the guest
      * TCB needs one of the 64 TEB TLS slots before DLLs (Vulkan drivers) take them. */
     runtime_memory_reserve();
     runtime_thread_tcb_offset();
 #endif
-    int cpu_only = 0, strict_imports = 0;
+    int cpu_only = 0, strict_imports = 0, check_imports = 0;
     unsigned timeout_seconds = 10;
-    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL, *sotc_cmdline=NULL;
+    const char *content_profile=NULL, *app0=NULL, *user_dir=NULL, *patch_file=NULL, *sotc_cpu=NULL, *sotc_cmdline=NULL, *isa_file=NULL;
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--cpu-only")) cpu_only = 1;
         else if (!strcmp(argv[i], "--sotc-cpu") && i+1<argc) sotc_cpu=argv[++i];
         else if (!strcmp(argv[i], "--sotc-cmdline") && i+1<argc) sotc_cmdline=argv[++i];
         else if (!strcmp(argv[i], "--strict-imports")) strict_imports = 1;
+        else if (!strcmp(argv[i], "--check-imports")) check_imports = 1;
         else if (!strcmp(argv[i], "--content-profile") && i+1<argc) content_profile=argv[++i];
         else if (!strcmp(argv[i], "--app0") && i+1<argc) app0=argv[++i];
         else if (!strcmp(argv[i], "--user") && i+1<argc) user_dir=argv[++i];
         else if (!strcmp(argv[i], "--patches") && i+1<argc) patch_file=argv[++i];
+        else if (!strcmp(argv[i], "--isa-rewrite") && i+1<argc) isa_file=argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i+1<argc) timeout_seconds=(unsigned)strtoul(argv[++i],NULL,10);
         else { fprintf(stderr, "Unknown option: %s\n", argv[i]); return 1; }
     }
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--timeout seconds] | --vulkan-only\n", argv[0]);
+        fprintf(stderr, "Usage: %s boot.bin [--cpu-only] [--strict-imports] [--content-profile file] [--app0 dir] [--user dir] [--patches file] [--sotc-cpu file] [--isa-rewrite file] [--timeout seconds] | --vulkan-only | --cpu-features\n", argv[0]);
         return 1;
+    }
+    if (!check_imports) { /* sotc: --check-imports runs no guest code */
+        const int rc = cpu_setup();
+        if (rc) return rc;
+        /* sotc: SSE4a goes to the gpu/sotc patchers when they run (ADR-0019, one mechanism). */
+        if (sotc_cpu) isa_sets &= ~(unsigned)CPU_SET_SSE4A;
+        if (!isa_sets) isa_sets_names[0] = '\0';
+        else cpu_set_names(isa_sets, isa_sets_names, sizeof isa_sets_names);
     }
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
@@ -921,6 +1016,7 @@ int main(int argc, char **argv) {
     struct sigaction sa = {0}; sa.sa_sigaction = fault; sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL); /* sotc: int3 ISA sites */
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
@@ -1028,13 +1124,23 @@ int main(int argc, char **argv) {
         }
     }
     /* sotc: the CPU patch trampolines follow the image (rel32 jumps reach them). */
-#ifdef _WIN32
-    image = allocate_image(round_page(size) + SOTC_TRAMPOLINE_SIZE);
-#else
-    image = allocate(round_page(size) + SOTC_TRAMPOLINE_SIZE);
-#endif
+    /* sotc: the stubs of the ISA rewrite follow the trampolines in the same low mapping (rel32). */
+    if (isa_sets) {
+        isa_table = isa_file ? isa_table_load(isa_file) : NULL;
+        if (!isa_table) {
+            printf("STOP: this CPU needs %s rewritten and no valid rewrite table was given (--isa-rewrite)\n", isa_sets_names);
+            return 20;
+        }
+    }
+    const size_t stub_area = isa_table ? round_page(isa_stub_area_size(isa_table)) : 0;
+    image = allocate_image(round_page(size) + SOTC_TRAMPOLINE_SIZE + stub_area);
+    unsigned char *stubs = image + round_page(size) + SOTC_TRAMPOLINE_SIZE;
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
+    if (isa_table && isa_table_matches(isa_table, image, size)) {
+        printf("STOP: this CPU needs %s rewritten and the rewrite table does not match this image\n", isa_sets_names);
+        return 20;
+    }
     if (!cpu_only) {
         char title[128]="Bloodborne", serial[16]="UNKNOWN", sfo[4096];
         uint32_t attributes=0;
@@ -1092,6 +1198,27 @@ int main(int argc, char **argv) {
         }
         memcpy(image + relocs[i].target, &value, 8);
     }
+    if (check_imports) {
+        /* sotc: lists every import the game would stop at, without running it. From gow3 91b6e61
+         * src/probe.c:888-903. GnmDriver/VideoOut are registered only by bbgpu_init (it opens the
+         * window), so with --cpu-only they are reported apart instead of as missing. */
+        uint64_t missing=0, gpu_left=0;
+        for (uint64_t i=0;i<import_count;++i) {
+            int data=0, used=0;
+            for (uint64_t r=0;r<nr;++r) if (relocs[r].kind && relocs[r].value==i) { used=1; data=relocs[r].kind==2; break; }
+            if (!used || runtime_resolve(names[i],data) || (native_libc && bindings[i])) continue;
+            if (!gpu_enabled && gpu_library_import(names[i])) {
+                printf("GPU (not checked without the GPU library): %s\n",names[i]);
+                ++gpu_left;
+                continue;
+            }
+            printf("MISSING: %s (%s)\n",names[i],runtime_import_name(names[i]));
+            ++missing;
+        }
+        printf("Imports: %" PRIu64 " missing, %" PRIu64 " left to the GPU library\n",missing,gpu_left);
+        fflush(NULL);
+        _exit(missing ? 1 : 0); /* no destructors: GPU threads may be running */
+    }
     /* sotc: BB_LIST_IMPORTS=1 prints how every import is served, then exits. */
     if (getenv("BB_LIST_IMPORTS")) {
         unsigned served[3]={0};
@@ -1112,6 +1239,19 @@ int main(int argc, char **argv) {
 #endif
     if (sotc_cpu) apply_sotc_cpu_patches(sotc_cpu, segments, ns, size);
     if (sotc_cmdline) apply_sotc_cmdline(sotc_cmdline, size);
+    if (isa_table) { /* sotc: after the patches (a patched site is skipped), before the pages are protected */
+        const IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
+        if (r.unsupported_needed) {
+            printf("STOP: this CPU needs %s rewritten and %u sites use encodings the rewrite cannot emulate\n",
+                   isa_sets_names, r.unsupported_needed);
+            fflush(NULL);
+            _exit(20); /* no destructors: GPU threads are running */
+        }
+        printf("ISA: rewriting %s%s%s: %u sites rewritten (%u jmp, %u relocated, %u int3), %u skipped\n",
+               isa_sets_names, isa_missing ? "; CPU lacks " : "; forced by SOTC_ISA_MODE", isa_missing_names,
+               r.rewritten, r.jmp, r.relocated, r.int3, r.skipped);
+        protect(stubs, stub_area, 5);
+    }
 #ifdef _WIN32
     /* sotc: the BPE heap breakpoint is handled by the Windows exception filter only; the Linux
      * SIGTRAP side is pending (docs/plans/2026-10-15-a0b-uniao-sotc-pc.md). */

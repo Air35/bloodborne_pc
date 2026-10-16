@@ -31,7 +31,8 @@ static void setup(void) {
     delete_sem=GET(Delete,"R1Jvn8bSCW8");
     cancel_sem=GET(Cancel,"4DM06U2BNEY");
     assert(create && poll_sem && signal_sem && wait_sem && delete_sem && cancel_sem);
-    assert(!runtime_resolve("188x57JYp0g",0));
+    /* sotc: NID alone matches (functions only); no data symbol of that NID. */
+    assert(runtime_resolve("188x57JYp0g#C#D",0)==(uintptr_t)create);
     assert(!runtime_resolve("188x57JYp0g",1));
 }
 static void lifecycle(void) {

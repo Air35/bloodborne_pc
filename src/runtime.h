@@ -115,6 +115,10 @@ uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
 uintptr_t runtime_pad_resolve(const char *name);
 uintptr_t runtime_sotc_resolve(const char *name);
+/* sotc: the BPE heap the GPU library guards (buffer_cache.cpp); 0 until the loader finds it.
+ * On Linux the heap-finding breakpoint is pending, so the guard stays off there. */
+uintptr_t runtime_sotc_heap(void);
+void runtime_sotc_set_heap(uintptr_t heap);
 int runtime_thread_is_guest(void);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);

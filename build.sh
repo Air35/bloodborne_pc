@@ -110,4 +110,11 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # sotc: CPU detection and the ISA rewrite (docs/10 §5): pure, no runtime or GPU library.
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_cpu_check.c src/cpu_check.c -o out/cpu-check-test
+    out/cpu-check-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_emulate.c src/cpu_check.c out/isa_emulate.o -o out/isa-emulate-test
+    out/isa-emulate-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_isa_rewrite.c src/isa_rewrite.c src/cpu_check.c out/isa_emulate.o -o out/isa-rewrite-test
+    out/isa-rewrite-test
 fi

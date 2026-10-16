@@ -502,6 +502,9 @@ static const struct { const char *nid; void *function; } by_nid[]={
     {"HZ9Q2c+4BU4",ok_ignored}, {"SweJO7t3pkk",ulobjmgr_check},
     {"pztV4AF18iI",guest_sincosf}, /* sincosf (libSceLibcInternal, libSceNgs2) */
 };
+static volatile uintptr_t sotc_heap; /* sotc: set once by the loader, read by GPU threads */
+uintptr_t runtime_sotc_heap(void) { return sotc_heap; }
+void runtime_sotc_set_heap(uintptr_t heap) { sotc_heap = heap; }
 uintptr_t runtime_sotc_resolve(const char *name) {
     for (size_t i=0;i<sizeof(by_nid)/sizeof(*by_nid);++i)
         if (!strcmp(name,by_nid[i].nid)) return (uintptr_t)by_nid[i].function;
