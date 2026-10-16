@@ -65,6 +65,17 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
+    // sotc: an arena larger than the device's whole sparse address space fails later, at the
+    // first dispatch, as ErrorOutOfDeviceMemory; say why at start (ADR-0018 A').
+    const u64 sparse_space = instance.GetPhysicalDevice().getProperties().limits.sparseAddressSpaceSize;
+    if (sparse_space < ARENA_PAGE_SIZE) {
+        LOG_CRITICAL(Render_Vulkan,
+                     "Buffer arenas of {} MiB do not fit this device's sparse address space ({} MiB): "
+                     "build with SOTC_ARENA_PAGE_BITS={} (bash build.sh)",
+                     ARENA_PAGE_SIZE >> 20, sparse_space >> 20,
+                     /* room for four arenas: lavapipe's 2 GiB gives 29, the value tested */
+                     std::bit_width(sparse_space) >= 31 ? std::bit_width(sparse_space) - 3 : 28);
+    }
     const vk::BufferCreateInfo probe_ci = {
         .flags =
             vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,

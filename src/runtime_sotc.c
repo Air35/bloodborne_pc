@@ -505,6 +505,20 @@ static const struct { const char *nid; void *function; } by_nid[]={
 static volatile uintptr_t sotc_heap; /* sotc: set once by the loader, read by GPU threads */
 uintptr_t runtime_sotc_heap(void) { return sotc_heap; }
 void runtime_sotc_set_heap(uintptr_t heap) { sotc_heap = heap; }
+static struct { uint64_t offset; unsigned char expected[16]; unsigned length; } heap_probe;
+void runtime_set_heap_probe(uint64_t offset, const unsigned char *expected, unsigned length) {
+    if (length > sizeof(heap_probe.expected)) length = sizeof(heap_probe.expected);
+    heap_probe.offset = offset;
+    memcpy(heap_probe.expected, expected, length);
+    heap_probe.length = length;
+}
+int runtime_heap_probe(uint64_t *offset, unsigned char expected[16], unsigned *length) {
+    if (!heap_probe.length) return 0;
+    *offset = heap_probe.offset;
+    memcpy(expected, heap_probe.expected, heap_probe.length);
+    *length = heap_probe.length;
+    return 1;
+}
 uintptr_t runtime_sotc_resolve(const char *name) {
     for (size_t i=0;i<sizeof(by_nid)/sizeof(*by_nid);++i)
         if (!strcmp(name,by_nid[i].nid)) return (uintptr_t)by_nid[i].function;

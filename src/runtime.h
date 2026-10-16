@@ -119,6 +119,11 @@ uintptr_t runtime_sotc_resolve(const char *name);
  * On Linux the heap-finding breakpoint is pending, so the guard stays off there. */
 uintptr_t runtime_sotc_heap(void);
 void runtime_sotc_set_heap(uintptr_t heap);
+/* sotc (ADR-0016): the function whose first argument is the heap to guard, pushed by a title
+ * profile: its offset in the eboot and the bytes expected there (a different build is left
+ * alone). runtime_heap_probe returns 0 when no profile set one; expected holds up to 16 bytes. */
+void runtime_set_heap_probe(uint64_t offset, const unsigned char *expected, unsigned length);
+int runtime_heap_probe(uint64_t *offset, unsigned char expected[16], unsigned *length);
 int runtime_thread_is_guest(void);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);

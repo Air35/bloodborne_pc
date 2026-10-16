@@ -157,6 +157,36 @@ class LoaderTests(unittest.TestCase):
         self.assertIsNotNone(found, r.stdout + r.stderr)
         self.assertLess(int(found[1], 16), 0x80000000)
 
+    def test_heap_probe_finds_the_heap_through_a_breakpoint(self):
+        # sotc: the BPE heap guard (ShadowOfTheColossus-PC 70bb438, Windows only there) on Linux:
+        # an int3 on the free function records its first argument for its first 2000 calls,
+        # single-stepping the original instruction each time, then the heap with the most frees
+        # and a plausible size (+0x30) is handed to the GPU library. The address comes from the
+        # title profile; SOTC_HEAP_PROBE=<offset>:<expected bytes> sets it for this test.
+        free_fn = bytes.fromhex('554889e541574156' '415e415f5dc3')  # push..pop..ret
+        main = (b'\xb9\x34\x08\0\0'                 # mov ecx,2100
+                b'\x51'                             # loop: push rcx
+                + b'\x48\x8d\x3d' + struct.pack('<i', 0x800 - 13)   # lea rdi,[heap]
+                + b'\xe8' + struct.pack('<i', 0x100 - 18)           # call free
+                + b'\x59\xff\xc9\x75\xee'          # pop rcx; dec ecx; jnz loop
+                + b'\xff\x25\x03\0\0\0' + b'\x90' * 3 + b'\0' * 8)  # jmp [slot at 32]
+        code = bytearray(main.ljust(0x100, b'\x90') + free_fn)
+        code = code.ljust(0x800, b'\0') + b'\0' * 0x30 + struct.pack('<Q', 0x2000000)
+        env = dict(os.environ, BB_SKIP_CPU_CHECK='1', SOTC_HEAP_PROBE='0x100:554889e541574156')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'boot.bin'
+            path.write_bytes(package(bytes(code), [(32, 1, 0, 0)], ['after-heap-probe']))
+            r = subprocess.run([str(EXE.resolve()), str(path), '--cpu-only'],
+                               capture_output=True, text=True, timeout=20, env=env)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 20, out)  # the loop ended and reached the import
+        self.assertIn('after-heap-probe', out)
+        chosen = re.search(r'BPE heap guard on heap (0x[0-9a-f]+) \((\d+) of 2000 frees\)', out)
+        self.assertIsNotNone(chosen, out)
+        base = int(re.search(r'Image at (0x[0-9a-f]+)', out)[1], 16)
+        self.assertEqual(int(chosen[1], 16), base + 0x800)
+        self.assertEqual(int(chosen[2]), 2000)
+
     def test_out_of_bounds_relocation_is_rejected(self):
         r = self.run_image(package(b'\xc3', [(4092, 0, 0, 0)]))
         self.assertEqual(r.returncode, 1)

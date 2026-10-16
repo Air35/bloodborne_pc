@@ -10,6 +10,9 @@
 #include "gpu/sotc/sotc_patches.h"
 #include "cpu_check.h"
 #include "isa_rewrite.h"
+#include "title_profile.h"
+#include <ctype.h>
+#include <stdatomic.h>
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
@@ -723,8 +726,101 @@ static void apply_sotc_cmdline(const char *path, uint64_t size) {
     printf("Engine command line: %s\n",text);
 }
 #ifndef _WIN32
+/* sotc (Linux): the heap guard's probe (Windows: heap_hook_* above). A title profile names a
+ * function whose first argument is a heap (runtime_set_heap_probe); an int3 on its first byte
+ * records that argument for its first HEAP_PROBE_CALLS calls, each time putting the original
+ * byte back and single-stepping it (TF) before re-arming. Then the heap with the most frees and
+ * a plausible size (+0x30) goes to the GPU library (runtime_sotc_set_heap). SOTC_HEAP_GUARD=0
+ * leaves it off; SOTC_HEAP_PROBE=<offset>:<hex bytes> sets the function (tests, other builds). */
+#define HEAP_PROBE_CALLS 2000
+const unsigned char *runtime_memory_backing_pointer(uintptr_t address); /* runtime_memory.c */
+static uint64_t heap_probe_offset;
+static unsigned char heap_probe_original;
+static atomic_int heap_probe_calls, heap_probe_done;
+static _Thread_local int heap_probe_rearm;
+static struct { _Atomic uintptr_t heap; atomic_long count; } heap_probe_seen[8];
+static void heap_probe_write(unsigned char value) {
+    unsigned char *at=image+heap_probe_offset;
+    void *page=(void *)((uintptr_t)at & ~(uintptr_t)(page_size-1));
+    mprotect(page,page_size,PROT_READ|PROT_WRITE|PROT_EXEC);
+    *(volatile unsigned char *)at=value;
+    mprotect(page,page_size,PROT_READ|PROT_EXEC);
+}
+static void heap_probe_choose(void) {
+    uintptr_t best=0; long best_count=0;
+    for (int i=0;i<8;++i) {
+        const uintptr_t heap=atomic_load(&heap_probe_seen[i].heap);
+        if (!heap) continue;
+        uint64_t size=0;
+        const unsigned char *backing=runtime_memory_backing_pointer(heap+0x30);
+        if (backing) memcpy(&size,backing,8);
+        else if (heap-(uintptr_t)image<0x20000000) memcpy(&size,(const void *)(heap+0x30),8); /* a global of the eboot */
+        const long count=atomic_load(&heap_probe_seen[i].count);
+        if (size>=0x1000000 && size<0x100000000ull && count>best_count) { best=heap; best_count=count; }
+    }
+    runtime_sotc_set_heap(best);
+    char line[128];
+    const int n=snprintf(line,sizeof(line),"Runtime: BPE heap guard on heap %p (%ld of %d frees)\n",
+                         (void *)best,best_count,HEAP_PROBE_CALLS);
+    ssize_t written_=write(2,line,(size_t)n); (void)written_;
+}
+/* The SIGTRAP of the probe: its int3 (RIP past it) or the single step that re-arms it. */
+static int heap_probe_trap(ucontext_t *uc) {
+    greg_t *g=uc->uc_mcontext.gregs;
+    if (heap_probe_rearm && (g[REG_EFL] & 0x100)) {
+        heap_probe_rearm=0;
+        if (!atomic_load(&heap_probe_done)) heap_probe_write(0xcc);
+        g[REG_EFL]&=~(greg_t)0x100;
+        return 1;
+    }
+    if (!heap_probe_offset || (uintptr_t)g[REG_RIP]-1!=(uintptr_t)(image+heap_probe_offset)) return 0;
+    g[REG_RIP]-=1; /* run the original instruction */
+    if (image[heap_probe_offset]!=0xcc) return 1; /* another thread put it back: just run it */
+    const uintptr_t heap=(uintptr_t)g[REG_RDI];
+    for (int i=0;i<8;++i) {
+        uintptr_t expected=0;
+        if (atomic_load(&heap_probe_seen[i].heap)==heap ||
+            atomic_compare_exchange_strong(&heap_probe_seen[i].heap,&expected,heap)) {
+            atomic_fetch_add(&heap_probe_seen[i].count,1);
+            break;
+        }
+    }
+    heap_probe_write(heap_probe_original);
+    if (atomic_fetch_add(&heap_probe_calls,1)+1>=HEAP_PROBE_CALLS) {
+        if (!atomic_exchange(&heap_probe_done,1)) heap_probe_choose();
+    } else {
+        heap_probe_rearm=1;
+        g[REG_EFL]|=0x100; /* back to the breakpoint after this instruction */
+    }
+    return 1;
+}
+/* Arms the probe while the image is still writable; returns 1 when armed. */
+static int heap_probe_install(uint64_t image_size) {
+    const char *off=getenv("SOTC_HEAP_GUARD");
+    if (off && off[0]=='0') return 0;
+    uint64_t offset=0; unsigned char expected[16]; unsigned length=0;
+    const char *text=getenv("SOTC_HEAP_PROBE");
+    if (text) {
+        char *end=NULL;
+        offset=strtoull(text,&end,0);
+        if (end && *end==':') for (++end;length<16 && isxdigit((unsigned char)end[0]) && isxdigit((unsigned char)end[1]);end+=2) {
+            char byte[3]={end[0],end[1],0};
+            expected[length++]=(unsigned char)strtoul(byte,NULL,16);
+        }
+    } else if (!runtime_heap_probe(&offset,expected,&length)) return 0;
+    if (!length || offset+length>image_size || memcmp(image+offset,expected,length)) {
+        printf("Runtime: BPE heap guard off: the heap's free function is not where the profile says\n");
+        return 0;
+    }
+    heap_probe_offset=offset;
+    heap_probe_original=image[offset];
+    image[offset]=0xcc;
+    return 1;
+}
 static void fault(int sig, siginfo_t *info, void *context) {
-    /* sotc: an int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
+    /* sotc: the heap guard's probe, then an int3 ISA site (RIP is past the CC byte); any other
+     * trap ends in the report below. */
+    if (sig == SIGTRAP && heap_probe_trap(context)) return;
     if (sig == SIGTRAP && isa_table && isa_rewrite_handle_sigtrap(isa_table, context)) return;
     /* sotc: an SSE4a site the load-time patchers left is interpreted (gpu/sotc, shadPS4 SotC
      * fork). On Linux the kernel skips the 128-byte red zone before the signal frame. */
@@ -994,6 +1090,10 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
+        /* sotc: the loader names the title once; what is specific to it is a profile (ADR-0016). */
+        char title_id[16]="";
+        sfo_value(sfo,"TITLE_ID",title_id,sizeof(title_id),NULL);
+        title_profile_apply(title_id,id,runtime_file_user_dir());
     }
     bbgpu_register_kernel();
 #ifdef _WIN32
@@ -1253,9 +1353,10 @@ int main(int argc, char **argv) {
         protect(stubs, stub_area, 5);
     }
 #ifdef _WIN32
-    /* sotc: the BPE heap breakpoint is handled by the Windows exception filter only; the Linux
-     * SIGTRAP side is pending (docs/plans/2026-10-15-a0b-uniao-sotc-pc.md). */
     if (sotc_cpu) install_heap_hook();
+#else
+    /* sotc: the heap guard's probe, from the title profile (heap_probe_install). */
+    if (heap_probe_install(size)) printf("Runtime: BPE heap guard probe armed at image offset 0x%" PRIx64 "\n", heap_probe_offset);
 #endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
