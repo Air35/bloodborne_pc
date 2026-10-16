@@ -206,9 +206,9 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         break;
     }
 
-    if (window_type != Frontend::WindowSystemType::Headless) {
-        extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    }
+    // sotc: the headless surface is a VkSurfaceKHR too (VK_EXT_headless_surface requires
+    // VK_KHR_surface); without it vkGetPhysicalDeviceSurfaceFormatsKHR is a null pointer.
+    extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 
     if (EmulatorSettings.IsHdrAllowed()) {
         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
