@@ -209,37 +209,8 @@ endif()
 add_executable(video-driver-test EXCLUDE_FROM_ALL ../tests/test_video_driver.cpp)
 target_compile_options(video-driver-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(video-driver-test PRIVATE .)
-add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
-target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_include_directories(motion-history-test PRIVATE ..)
-add_executable(motion-shader-test EXCLUDE_FROM_ALL ../tests/test_motion_shaders.cpp ../tests/test_gpu_runtime_stubs.cpp)
-target_include_directories(motion-shader-test PRIVATE shim shadps4 third_party/gcn/include)
-target_link_libraries(motion-shader-test PRIVATE bbgpu)
-add_executable(ui-composition-test EXCLUDE_FROM_ALL ../tests/test_ui_composition.cpp)
-target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-target_include_directories(ui-composition-test PRIVATE ..)
-
-add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
-target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
-# The test's Vulkan-Hpp inline methods have a different set of platform extensions
-# from vk_platform.cpp. Keep them local and use an explicit dispatcher in the test.
-target_compile_options(scene-resolution-test PRIVATE -UNDEBUG -fPIC)
-set_source_files_properties(../tests/test_scene_resolution.cpp PROPERTIES
-    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
-target_link_libraries(scene-resolution-test PRIVATE bbgpu)
-add_executable(taa-shader-test EXCLUDE_FROM_ALL ../tests/test_taa_shader.cpp ../tests/test_gpu_runtime_stubs.cpp)
-target_include_directories(taa-shader-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
-target_compile_options(taa-shader-test PRIVATE -UNDEBUG -fPIC)
-set_source_files_properties(../tests/test_taa_shader.cpp PROPERTIES
-    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
-target_link_libraries(taa-shader-test PRIVATE bbgpu)
-add_dependencies(taa-shader-test host_shaders)
-
-add_executable(camera-motion-test EXCLUDE_FROM_ALL ../tests/test_camera_motion.cpp ../tests/test_gpu_runtime_stubs.cpp)
-target_include_directories(camera-motion-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
-target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
-target_link_libraries(camera-motion-test PRIVATE bbgpu)
-add_dependencies(camera-motion-test host_shaders)
+# sotc: the bbport TAA/motion/scene-resolution/UI-composition tests went with those features,
+# which the shadPS4 SotC core of the union does not have (ADR-0019).
 
 # bbport: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
